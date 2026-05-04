@@ -341,6 +341,7 @@ $router->add('GET', '/api/admin/settings/tax', 'SettingsController@getVat');
 $router->add('PUT', '/api/admin/settings/tax', 'SettingsController@updateVat');
 $router->add('GET', '/api/settings/shipping', 'SettingsController@getShipping');
 $router->add('GET', '/api/settings/store-status', 'SettingsController@getStoreStatus');
+$router->add('GET', '/api/settings/brand-logos', 'SettingsController@getPublicBrandLogos');
 $router->add('GET', '/api/admin/settings/shipping', 'SettingsController@getShipping');
 $router->add('PUT', '/api/admin/settings/shipping', 'SettingsController@updateShipping');
 $router->add('GET', '/api/admin/settings/store-status', 'SettingsController@getStoreStatus');
@@ -363,6 +364,8 @@ $router->add('PUT', '/api/admin/discounts/{id}', 'DiscountController@update');
 $router->add('PATCH', '/api/admin/discounts/{id}/status', 'DiscountController@updateStatus');
 $router->add('GET', '/api/admin/purchase-invoices', 'PurchaseInvoiceController@index');
 $router->add('GET', '/api/admin/purchase-invoices/{id}', 'PurchaseInvoiceController@show');
+$router->add('GET', '/api/admin/billing/rides', 'BillingDocumentController@rides');
+$router->add('GET', '/api/admin/billing/rides/{accessKey}/pdf', 'BillingDocumentController@ridePdf');
 $router->add('GET', '/api/admin/pos/shift/active', 'PosController@activeShift');
 $router->add('GET', '/api/admin/pos/shifts', 'PosController@shifts');
 $router->add('GET', '/api/admin/pos/movements', 'PosController@movements');
@@ -391,6 +394,7 @@ function is_public_api_request(string $uri, string $method): bool {
             '/api/auth/session',
             '/api/settings/shipping',
             '/api/settings/store-status',
+            '/api/settings/brand-logos',
             '/api/health',
         ], true)) {
             return true;

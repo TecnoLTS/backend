@@ -75,47 +75,75 @@ class BusinessIntelligenceService {
 
     private function profitAnalysis() {
         $raw = $this->orderRepo->getProfitStats();
-        // Add business intelligence: Break-even analysis or projections
-        $raw['roi'] = $raw['cost'] > 0 ? round(($raw['profit'] / $raw['cost']) * 100, 1) : 0;
+        $grossProfit = (float)($raw['gross_profit'] ?? $raw['profit'] ?? 0);
+        $netProfit = (float)($raw['net_profit'] ?? $grossProfit);
+        $cost = (float)($raw['cost'] ?? 0);
+        $operatingExpenses = (float)($raw['operating_expenses'] ?? 0);
+        $raw['roi'] = $cost > 0 ? round(($grossProfit / $cost) * 100, 1) : 0;
+        $netInvestmentBase = $cost + $operatingExpenses;
+        $raw['net_roi'] = $netInvestmentBase > 0 ? round(($netProfit / $netInvestmentBase) * 100, 1) : 0;
         return $raw;
     }
 
     private function inventoryHealthCheck() {
-        $dive = $this->orderRepo->getInventoryDeepDive();
-        // Add intelligence: Days of stock remaining (simulated for now)
-        foreach ($dive['riskItems'] as &$item) {
-            $item['estimated_days_left'] = max(1, $item['quantity'] * 2); // Simple logic
-        }
-        return $dive;
+        return $this->orderRepo->getInventoryDeepDive();
     }
 
     private function productAnalytics() {
         $pRepo = new \App\Repositories\ProductRepository();
         $products = $pRepo->getAll();
-        
-        $totalMargin = 0;
+
+        $totalMargin = 0.0;
+        $marginSampleCount = 0;
+        $weightedProfit = 0.0;
+        $weightedRevenue = 0.0;
         $lowMarginCount = 0;
+        $missingCostCount = 0;
+        $stockValueAtCost = 0.0;
+
         foreach ($products as $p) {
-            $margin = 0;
+            $price = (float)($p['price'] ?? 0);
+            $cost = (float)($p['cost'] ?? ($p['business']['cost'] ?? 0));
+            $quantity = max(0, (int)($p['quantity'] ?? 0));
+
+            if ($cost <= 0) {
+                $missingCostCount++;
+            }
+
+            if ($price <= 0 || $cost <= 0) {
+                continue;
+            }
+
             if (isset($p['business']['margin']) && is_numeric($p['business']['margin'])) {
                 $margin = (float)$p['business']['margin'];
             } else {
-                $price = (float)($p['price'] ?? 0);
-                $cost = (float)($p['cost'] ?? 0);
-                $margin = $price > 0 ? (($price - $cost) / $price) * 100 : 0;
+                $margin = (($price - $cost) / $price) * 100;
             }
+
             $totalMargin += $margin;
+            $marginSampleCount++;
             if ($margin < 25) {
                 $lowMarginCount++;
             }
+
+            $stockRevenue = $price * $quantity;
+            $stockCost = $cost * $quantity;
+            $weightedRevenue += $stockRevenue;
+            $weightedProfit += ($stockRevenue - $stockCost);
+            $stockValueAtCost += $stockCost;
         }
-        
-        $avgMargin = count($products) > 0 ? round($totalMargin / count($products), 1) : 0;
+
+        $avgMargin = $marginSampleCount > 0 ? round($totalMargin / $marginSampleCount, 1) : 0;
+        $weightedMargin = $weightedRevenue > 0 ? round(($weightedProfit / $weightedRevenue) * 100, 1) : 0;
         
         return [
             'averageMargin' => $avgMargin,
+            'weightedMargin' => $weightedMargin,
             'lowMarginOpportunities' => $lowMarginCount,
-            'totalMonitored' => count($products)
+            'missingCostCount' => $missingCostCount,
+            'stockValueAtCost' => round($stockValueAtCost, 2),
+            'totalMonitored' => count($products),
+            'pricedCostedProducts' => $marginSampleCount
         ];
     }
 

@@ -76,6 +76,76 @@ class FacturadorApiService {
         throw new \RuntimeException(sprintf('Facturador respondió con error (%d): %s', $statusCode ?: 500, $message));
     }
 
+    public function listRidePdfs(int $limit = 100): array {
+        $endpoint = $this->invoiceEndpoint . '/rides?limit=' . max(1, min(300, $limit));
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'header' => implode("\r\n", [
+                    'Accept: application/json',
+                    'X-API-Key: ' . $this->apiKey,
+                ]),
+                'timeout' => $this->timeoutSeconds,
+                'ignore_errors' => true,
+            ],
+        ]);
+
+        $responseBody = @file_get_contents($endpoint, false, $context);
+        $responseHeaders = $http_response_header ?? [];
+        $statusCode = $this->extractStatusCode($responseHeaders);
+        $decoded = is_string($responseBody) && $responseBody !== '' ? json_decode($responseBody, true) : null;
+
+        if ($statusCode >= 200 && $statusCode < 300 && is_array($decoded) && ($decoded['success'] ?? false) === true && is_array($decoded['data'] ?? null)) {
+            return $decoded['data'];
+        }
+
+        $message = is_array($decoded) ? ($decoded['error']['message'] ?? $decoded['message'] ?? null) : null;
+        throw new \RuntimeException(sprintf(
+            'No se pudo listar RIDE PDF del facturador (%d): %s',
+            $statusCode ?: 500,
+            is_string($message) && trim($message) !== '' ? $message : 'respuesta inválida'
+        ));
+    }
+
+    public function getRidePdf(string $accessKey): array {
+        $normalizedAccessKey = preg_replace('/[^0-9]/', '', $accessKey);
+        if (!is_string($normalizedAccessKey) || $normalizedAccessKey === '') {
+            throw new \InvalidArgumentException('Clave de acceso inválida');
+        }
+
+        $endpoint = $this->invoiceEndpoint . '/' . rawurlencode($normalizedAccessKey) . '/ride.pdf';
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'header' => implode("\r\n", [
+                    'Accept: application/pdf',
+                    'X-API-Key: ' . $this->apiKey,
+                ]),
+                'timeout' => $this->timeoutSeconds,
+                'ignore_errors' => true,
+            ],
+        ]);
+
+        $body = @file_get_contents($endpoint, false, $context);
+        $responseHeaders = $http_response_header ?? [];
+        $statusCode = $this->extractStatusCode($responseHeaders);
+
+        if ($statusCode >= 200 && $statusCode < 300 && is_string($body) && $body !== '') {
+            return [
+                'filename' => 'RIDE-' . $normalizedAccessKey . '.pdf',
+                'content' => $body,
+            ];
+        }
+
+        $decoded = is_string($body) && $body !== '' ? json_decode($body, true) : null;
+        $message = is_array($decoded) ? ($decoded['error']['message'] ?? $decoded['message'] ?? null) : null;
+        throw new \RuntimeException(sprintf(
+            'No se pudo obtener RIDE PDF del facturador (%d): %s',
+            $statusCode ?: 500,
+            is_string($message) && trim($message) !== '' ? $message : 'respuesta inválida'
+        ));
+    }
+
     private function extractStatusCode(array $headers): int {
         foreach ($headers as $header) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', (string)$header, $matches) === 1) {

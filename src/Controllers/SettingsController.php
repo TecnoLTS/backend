@@ -91,6 +91,90 @@ class SettingsController {
         return substr($text, 0, $maxLength);
     }
 
+    private function sanitizeAssetUrlValue($value): string {
+        $text = $this->sanitizeTextValue($value, 2048);
+        if ($text === '') {
+            return '';
+        }
+
+        if (str_starts_with($text, '/uploads/') || str_starts_with($text, '/images/')) {
+            if (preg_match('/[\x00-\x1F\x7F<>"\']/', $text)) {
+                return '';
+            }
+            return $text;
+        }
+
+        if (filter_var($text, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $text)) {
+            return $text;
+        }
+
+        return '';
+    }
+
+    private function buildBrandReferenceId($name) {
+        $base = preg_replace('/[^A-Z0-9]+/', '', strtoupper($this->sanitizeTextValue($name, 160)));
+        if ($base === '') {
+            return 'brand-' . uniqid();
+        }
+        return 'brand-' . strtolower($base);
+    }
+
+    private function sanitizeBrandReferenceList($value) {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $seenNames = [];
+        $seenIds = [];
+        $normalized = [];
+
+        foreach ($value as $index => $item) {
+            if (is_string($item) || is_numeric($item)) {
+                $item = ['name' => (string)$item];
+            }
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $name = $this->sanitizeTextValue($item['name'] ?? ($item['label'] ?? ($item['brand'] ?? '')), 160);
+            if ($name === '') {
+                continue;
+            }
+
+            $nameKey = function_exists('mb_strtolower')
+                ? mb_strtolower($name, 'UTF-8')
+                : strtolower($name);
+
+            if (isset($seenNames[$nameKey])) {
+                continue;
+            }
+
+            $seenNames[$nameKey] = true;
+            $id = $this->sanitizeTextValue($item['id'] ?? '', 160);
+            $logoUrl = $this->sanitizeAssetUrlValue($item['logoUrl'] ?? ($item['logo_url'] ?? ($item['imageUrl'] ?? ($item['image'] ?? ($item['logo'] ?? '')))));
+            $baseId = $id !== '' ? $id : $this->buildBrandReferenceId($name !== '' ? $name : (string)($index + 1));
+            $finalId = $baseId;
+            $suffix = 2;
+            while (isset($seenIds[$finalId])) {
+                $finalId = $baseId . '-' . $suffix;
+                $suffix++;
+            }
+            $seenIds[$finalId] = true;
+
+            $normalized[] = [
+                'id' => $finalId,
+                'name' => $name,
+                'logoUrl' => $logoUrl,
+            ];
+        }
+
+        usort($normalized, static function ($left, $right) {
+            return strcasecmp((string)($left['name'] ?? ''), (string)($right['name'] ?? ''));
+        });
+
+        return array_values($normalized);
+    }
+
     private function sanitizePercentageValue($value, $max = 100): string {
         if ($value === null) {
             return '';
@@ -194,6 +278,11 @@ class SettingsController {
         $source = is_array($data) ? $data : [];
 
         foreach (array_keys($defaults) as $key) {
+            if ($key === 'brands') {
+                $defaults[$key] = $this->sanitizeBrandReferenceList($source[$key] ?? []);
+                continue;
+            }
+
             if ($key === 'suppliers') {
                 $defaults[$key] = $this->sanitizeSupplierReferenceList($source[$key] ?? []);
                 continue;
@@ -650,6 +739,17 @@ class SettingsController {
         }
 
         Response::json($normalized);
+    }
+
+    public function getPublicBrandLogos() {
+        $catalogRepository = new ProductReferenceCatalogRepository();
+        $stored = $catalogRepository->getAll();
+        $normalized = $this->normalizeProductReferenceDataPayload($stored);
+        $brands = array_values(array_filter($normalized['brands'] ?? [], static function ($brand) {
+            return is_array($brand) && trim((string)($brand['logoUrl'] ?? '')) !== '';
+        }));
+
+        Response::json($brands);
     }
 
     public function updateProductReferenceData() {

@@ -989,7 +989,8 @@ class OrderRepository {
             WHERE o.tenant_id = :tenant_id
               AND $realizedStatus
               AND o.created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
-              AND o.created_at < DATE_TRUNC('month', NOW())
+              AND o.created_at < DATE_TRUNC('month', NOW() - INTERVAL '1 month')
+                + ((CURRENT_DATE - DATE_TRUNC('month', NOW())::date + 1) * INTERVAL '1 day')
         ");
         $stmtLast->execute(['tenant_id' => $this->getTenantId()]);
         $lastMonth = (float)($stmtLast->fetchColumn() ?: 0);
@@ -1001,7 +1002,8 @@ class OrderRepository {
         return [
             'current' => round($thisMonth, 2),
             'previous' => round($lastMonth, 2),
-            'percentage' => round($percentage, 1)
+            'percentage' => round($percentage, 1),
+            'comparison' => 'month_to_date'
         ];
     }
 
@@ -1070,6 +1072,7 @@ class OrderRepository {
         $realizedStatus = $this->realizedSalesCondition('o');
         $stmt = $this->db->prepare("
             SELECT
+                COUNT(*)::int as orders_count,
                 SUM(COALESCE(o.total, 0)) as gross,
                 SUM($netExpr) as net,
                 SUM($vatExpr) as vat,
@@ -1079,11 +1082,17 @@ class OrderRepository {
         ");
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $row = $stmt->fetch();
+        $ordersCount = (int)($row['orders_count'] ?? 0);
+        $net = (float)($row['net'] ?? 0);
+        $gross = (float)($row['gross'] ?? 0);
         return [
-            'gross' => round((float)($row['gross'] ?? 0), 2),
-            'net' => round((float)($row['net'] ?? 0), 2),
+            'orders_count' => $ordersCount,
+            'gross' => round($gross, 2),
+            'net' => round($net, 2),
             'vat' => round((float)($row['vat'] ?? 0), 2),
-            'shipping' => round((float)($row['shipping'] ?? 0), 2)
+            'shipping' => round((float)($row['shipping'] ?? 0), 2),
+            'average_order_net' => $ordersCount > 0 ? round($net / $ordersCount, 2) : 0,
+            'average_order_gross' => $ordersCount > 0 ? round($gross / $ordersCount, 2) : 0
         ];
     }
 
@@ -1681,7 +1690,8 @@ class OrderRepository {
                 WHERE $realizedStatus
                   AND o.tenant_id = :tenant_id
                   AND o.created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month')
-                  AND o.created_at < DATE_TRUNC('month', NOW())
+                  AND o.created_at < DATE_TRUNC('month', NOW() - INTERVAL '1 month')
+                    + ((CURRENT_DATE - DATE_TRUNC('month', NOW())::date + 1) * INTERVAL '1 day')
                 GROUP BY COALESCE(NULLIF(TRIM(p.category), ''), 'Sin categoría')
             )
             SELECT
@@ -1717,14 +1727,14 @@ class OrderRepository {
         $salesStmt = $this->db->prepare("
             SELECT
                 SUM($netExpr) as revenue,
-                SUM(COALESCE(o.shipping_base, o.shipping, 0)) as shipping_cost
+                SUM(COALESCE(o.shipping_base, o.shipping, 0)) as shipping_collected
             FROM \"Order\" o
             WHERE o.tenant_id = :tenant_id AND $realizedStatus
         ");
         $salesStmt->execute(['tenant_id' => $this->getTenantId()]);
         $salesRow = $salesStmt->fetch();
         $revenue = (float)($salesRow['revenue'] ?? 0);
-        $shippingCost = (float)($salesRow['shipping_cost'] ?? 0);
+        $shippingCollected = (float)($salesRow['shipping_collected'] ?? 0);
         $costExpr = $this->orderItemCostExpression('oi', 'p');
 
         $costStmt = $this->db->prepare("
@@ -1737,20 +1747,62 @@ class OrderRepository {
         $costStmt->execute(['tenant_id' => $this->getTenantId()]);
         $costRow = $costStmt->fetch();
         $cost = (float)($costRow['cost'] ?? 0);
-        $profit = $revenue - $cost;
-        $margin = $revenue > 0 ? ($profit / $revenue) * 100 : 0;
+        $grossProfit = $revenue - $cost;
+        $grossMargin = $revenue > 0 ? ($grossProfit / $revenue) * 100 : 0;
+        $operatingExpenses = $this->getRegisteredOperatingExpenses();
+        $netProfit = $grossProfit - $operatingExpenses;
+        $netMargin = $revenue > 0 ? ($netProfit / $revenue) * 100 : 0;
 
         return [
             'revenue' => round($revenue, 2),
             'cost' => round($cost, 2),
-            'shipping_cost' => round($shippingCost, 2),
-            'profit' => round($profit, 2),
-            'margin' => round($margin, 1)
+            'shipping_collected' => round($shippingCollected, 2),
+            'operating_expenses' => round($operatingExpenses, 2),
+            'gross_profit' => round($grossProfit, 2),
+            'gross_margin' => round($grossMargin, 1),
+            'net_profit' => round($netProfit, 2),
+            'net_margin' => round($netMargin, 1),
+            'expense_source' => 'pos_movements',
+            // Backwards-compatible names used by older panel widgets.
+            'shipping_cost' => 0,
+            'profit' => round($grossProfit, 2),
+            'margin' => round($grossMargin, 1)
         ];
     }
 
+    private function getRegisteredOperatingExpenses(): float {
+        try {
+            $existsStmt = $this->db->query("SELECT to_regclass('public.\"PosMovement\"') as table_name");
+            $existsRow = $existsStmt ? $existsStmt->fetch() : null;
+            if (empty($existsRow['table_name'])) {
+                return 0.0;
+            }
+
+            $stmt = $this->db->prepare("
+                SELECT SUM(amount) as total
+                FROM \"PosMovement\"
+                WHERE tenant_id = :tenant_id
+                  AND type IN ('expense', 'withdrawal')
+            ");
+            $stmt->execute(['tenant_id' => $this->getTenantId()]);
+            $row = $stmt->fetch();
+            return max(0.0, (float)($row['total'] ?? 0));
+        } catch (\Throwable $e) {
+            return 0.0;
+        }
+    }
+
     public function getInventoryValue() {
-        $stmt = $this->db->prepare('SELECT SUM(quantity * price) as market_value, SUM(quantity * cost) as cost_value, SUM(quantity) as total_items FROM "Product" WHERE tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT
+                SUM(quantity * price) as market_value,
+                SUM(quantity * cost) as cost_value,
+                SUM(quantity) as total_items,
+                COUNT(*) as products_count,
+                COUNT(*) FILTER (WHERE quantity > 0) as skus_with_stock
+            FROM "Product"
+            WHERE tenant_id = :tenant_id
+        ');
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         return $stmt->fetch();
     }
@@ -2247,6 +2299,20 @@ class OrderRepository {
     }
 
     public function getInventoryDeepDive() {
+        $realizedStatus = $this->realizedSalesCondition('o');
+        $thirtyDaySalesCte = "
+            WITH sales_30d AS (
+                SELECT
+                    oi.product_id,
+                    COALESCE(SUM(COALESCE(oi.quantity, 0)), 0) AS units_sold_30d
+                FROM \"OrderItem\" oi
+                JOIN \"Order\" o ON oi.order_id = o.id
+                WHERE o.tenant_id = :tenant_id
+                  AND $realizedStatus
+                  AND o.created_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY oi.product_id
+            )
+        ";
         // High Value Stock (Top 5 by cost investment)
         $highValueStmt = $this->db->prepare("
             SELECT name, quantity, cost, (quantity * cost) as total_cost
@@ -2259,11 +2325,37 @@ class OrderRepository {
         $highValue = $highValueStmt->fetchAll();
 
         // Stock Risk (Low quantity)
-        $stockRiskStmt = $this->db->prepare("
-            SELECT name, quantity
-            FROM \"Product\"
-            WHERE tenant_id = :tenant_id AND quantity <= 5
-            ORDER BY quantity ASC
+        $stockRiskStmt = $this->db->prepare($thirtyDaySalesCte . "
+            SELECT
+                p.name,
+                p.quantity,
+                COALESCE(s.units_sold_30d, 0)::int AS units_sold_30d,
+                ROUND((COALESCE(s.units_sold_30d, 0) / 30.0)::numeric, 2) AS avg_daily_units,
+                CASE
+                    WHEN COALESCE(s.units_sold_30d, 0) > 0
+                        THEN CEIL(p.quantity / NULLIF((COALESCE(s.units_sold_30d, 0) / 30.0), 0))
+                    WHEN p.quantity <= 0
+                        THEN 0
+                    ELSE NULL
+                END AS estimated_days_left
+            FROM \"Product\" p
+            LEFT JOIN sales_30d s ON s.product_id = p.id
+            WHERE p.tenant_id = :tenant_id
+              AND (
+                p.quantity <= 5
+                OR (
+                    COALESCE(s.units_sold_30d, 0) > 0
+                    AND p.quantity / NULLIF((COALESCE(s.units_sold_30d, 0) / 30.0), 0) <= 14
+                )
+              )
+            ORDER BY
+                CASE
+                    WHEN p.quantity <= 0 THEN 0
+                    WHEN COALESCE(s.units_sold_30d, 0) > 0
+                        THEN p.quantity / NULLIF((COALESCE(s.units_sold_30d, 0) / 30.0), 0)
+                    ELSE 999999
+                END ASC,
+                p.quantity ASC
             LIMIT 5
         ");
         $stockRiskStmt->execute(['tenant_id' => $this->getTenantId()]);
@@ -2393,18 +2485,39 @@ class OrderRepository {
                 SELECT $netExpr as net_total
                 FROM \"Order\" o
                 WHERE o.tenant_id = :tenant_id AND $realizedStatus
+            ),
+            bucketed AS (
+                SELECT
+                    CASE
+                        WHEN net_total < 20 THEN 'Menor a $20'
+                        WHEN net_total < 50 THEN '$20 a $49.99'
+                        WHEN net_total < 100 THEN '$50 a $99.99'
+                        ELSE '$100 o más'
+                    END as bucket,
+                    CASE
+                        WHEN net_total < 20 THEN 1
+                        WHEN net_total < 50 THEN 2
+                        WHEN net_total < 100 THEN 3
+                        ELSE 4
+                    END as sort_order,
+                    net_total
+                FROM orders
+            ),
+            totals AS (
+                SELECT COUNT(*) AS total_orders, COALESCE(SUM(net_total), 0) AS total_revenue
+                FROM orders
             )
             SELECT
-                CASE 
-                    WHEN net_total < 50 THEN 'Bajo (<$50)'
-                    WHEN net_total BETWEEN 50 AND 150 THEN 'Medio ($50-$150)'
-                    ELSE 'Alto (>$150)'
-                END as bucket,
-                COUNT(*) as count,
-                SUM(net_total) as revenue
-            FROM orders
-            GROUP BY bucket
-            ORDER BY count DESC
+                b.bucket,
+                COUNT(*)::int as count,
+                COALESCE(SUM(b.net_total), 0) as revenue,
+                COALESCE(AVG(b.net_total), 0) as avg_order_value,
+                CASE WHEN MAX(t.total_orders) > 0 THEN ROUND((COUNT(*)::numeric / MAX(t.total_orders)) * 100, 1) ELSE 0 END as order_share,
+                CASE WHEN MAX(t.total_revenue) > 0 THEN ROUND((COALESCE(SUM(b.net_total), 0) / MAX(t.total_revenue)) * 100, 1) ELSE 0 END as revenue_share
+            FROM bucketed b
+            CROSS JOIN totals t
+            GROUP BY b.bucket, b.sort_order
+            ORDER BY b.sort_order ASC
         ");
         $distributionStmt->execute(['tenant_id' => $this->getTenantId()]);
         $distribution = $distributionStmt->fetchAll();

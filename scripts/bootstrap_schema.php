@@ -605,17 +605,34 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
                             continue;
                         }
 
-                        $label = trim((string)$value);
+                        if ($catalogKey === 'brands' && is_array($value)) {
+                            $label = trim((string)($value['name'] ?? ($value['label'] ?? '')));
+                            $payload = [
+                                'id' => trim((string)($value['id'] ?? '')),
+                                'name' => $label,
+                                'logoUrl' => trim((string)($value['logoUrl'] ?? ($value['logo_url'] ?? ''))),
+                            ];
+                            if ($payload['id'] === '') {
+                                $payload['id'] = 'prc_' . substr(hash('sha256', $defaultTenant . '|' . $catalogKey . '|' . $label . '|' . ($index + 1)), 0, 28);
+                            }
+                        } else {
+                            $label = trim((string)$value);
+                            $payload = ['label' => $label];
+                        }
                         if ($label === '') {
                             continue;
                         }
 
+                        $rowId = $catalogKey === 'brands' && is_array($payload) && trim((string)($payload['id'] ?? '')) !== ''
+                            ? (string)$payload['id']
+                            : 'prc_' . substr(hash('sha256', $defaultTenant . '|' . $catalogKey . '|' . $label . '|' . ($index + 1)), 0, 28);
+
                         $insertCatalogStmt->execute([
-                            'id' => 'prc_' . substr(hash('sha256', $defaultTenant . '|' . $catalogKey . '|' . $label . '|' . ($index + 1)), 0, 28),
+                            'id' => $rowId,
                             'tenant_id' => $defaultTenant,
                             'catalog_key' => (string)$catalogKey,
                             'label' => $label,
-                            'payload' => json_encode(['label' => $label], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                            'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                             'sort_order' => $index,
                         ]);
                     }

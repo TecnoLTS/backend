@@ -64,6 +64,18 @@ class ProductReferenceCatalogRepository {
                 $payload = [];
             }
 
+            if ($catalogKey === 'brands') {
+                $name = trim((string)($payload['name'] ?? ($payload['label'] ?? ($row['label'] ?? ''))));
+                if ($name !== '') {
+                    $result['brands'][] = [
+                        'id' => trim((string)($payload['id'] ?? $row['id'] ?? '')),
+                        'name' => $name,
+                        'logoUrl' => trim((string)($payload['logoUrl'] ?? ($payload['logo_url'] ?? ''))),
+                    ];
+                }
+                continue;
+            }
+
             if ($catalogKey === 'suppliers') {
                 $result['suppliers'][] = [
                     'id' => trim((string)($payload['id'] ?? $row['id'] ?? '')),
@@ -123,12 +135,51 @@ class ProductReferenceCatalogRepository {
                 )
             ');
 
+            $usedBrandIds = [];
+
             foreach ($data as $catalogKey => $values) {
                 if (!is_array($values)) {
                     continue;
                 }
 
                 foreach (array_values($values) as $index => $value) {
+                    if ($catalogKey === 'brands') {
+                        if (is_string($value) || is_numeric($value)) {
+                            $value = ['name' => (string)$value];
+                        }
+                        if (!is_array($value)) {
+                            continue;
+                        }
+
+                        $brandName = trim((string)($value['name'] ?? ($value['label'] ?? '')));
+                        if ($brandName === '') {
+                            continue;
+                        }
+
+                        $payload = [
+                            'id' => trim((string)($value['id'] ?? '')),
+                            'name' => $brandName,
+                            'logoUrl' => trim((string)($value['logoUrl'] ?? ($value['logo_url'] ?? ''))),
+                        ];
+                        if ($payload['id'] === '') {
+                            $payload['id'] = $this->buildRowId($catalogKey, $brandName, $index + 1);
+                        }
+                        if (isset($usedBrandIds[$payload['id']])) {
+                            $payload['id'] = $this->buildRowId($catalogKey, $brandName, $index + 1);
+                        }
+                        $usedBrandIds[$payload['id']] = true;
+
+                        $insertStmt->execute([
+                            'id' => $payload['id'],
+                            'tenant_id' => $tenantId,
+                            'catalog_key' => $catalogKey,
+                            'label' => $brandName,
+                            'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                            'sort_order' => $index,
+                        ]);
+                        continue;
+                    }
+
                     if ($catalogKey === 'suppliers' && is_array($value)) {
                         $supplierId = trim((string)($value['id'] ?? ''));
                         $supplierName = trim((string)($value['name'] ?? ''));
