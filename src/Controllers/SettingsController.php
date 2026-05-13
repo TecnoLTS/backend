@@ -13,6 +13,7 @@ class SettingsController {
     private function getDefaultProductReferenceData() {
         return [
             'categories' => [],
+            'categoryImages' => [],
             'brands' => [],
             'suppliers' => [],
             'sizes' => [],
@@ -109,6 +110,55 @@ class SettingsController {
         }
 
         return '';
+    }
+
+    private function sanitizeCategoryImageReferenceList($value) {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $seenNames = [];
+        $normalized = [];
+
+        foreach ($value as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $name = $this->sanitizeTextValue($item['name'] ?? ($item['label'] ?? ($item['category'] ?? '')), 160);
+            if ($name === '') {
+                continue;
+            }
+
+            $nameKey = function_exists('mb_strtolower')
+                ? mb_strtolower($name, 'UTF-8')
+                : strtolower($name);
+            if (isset($seenNames[$nameKey])) {
+                continue;
+            }
+            $seenNames[$nameKey] = true;
+
+            $featuredImages = $item['featuredImages'] ?? [];
+            if (!is_array($featuredImages)) {
+                $featuredImages = [];
+            }
+
+            $normalized[] = [
+    'name' => $name,
+    'topImageUrl' => $this->sanitizeAssetUrlValue($item['topImageUrl'] ?? ($item['imageUrl'] ?? ($item['image'] ?? ''))),
+    'featuredImages' => [
+        'mobilePrimary' => $this->sanitizeAssetUrlValue($featuredImages['mobilePrimary'] ?? ''),
+        'mobileSecondary' => $this->sanitizeAssetUrlValue($featuredImages['mobileSecondary'] ?? ''),
+        'desktopPrimary' => $this->sanitizeAssetUrlValue($featuredImages['desktopPrimary'] ?? ''),
+        'desktopSecondary' => $this->sanitizeAssetUrlValue($featuredImages['desktopSecondary'] ?? ''),
+    ],
+    'showInImageSection' => array_key_exists('showInImageSection', $item)
+        ? $this->parseBool($item['showInImageSection'], true)
+        : true,
+];
+        }
+
+        return array_values($normalized);
     }
 
     private function buildBrandReferenceId($name) {
@@ -288,10 +338,37 @@ class SettingsController {
                 continue;
             }
 
+            if ($key === 'categoryImages') {
+                $defaults[$key] = $this->sanitizeCategoryImageReferenceList($source[$key] ?? []);
+                continue;
+            }
+
             $defaults[$key] = $this->sanitizeReferenceOptionList($source[$key] ?? [], $key);
         }
 
         return $defaults;
+    }
+
+    private function loadProductReferenceData() {
+        $settings = new SettingsRepository();
+        $catalogRepository = new ProductReferenceCatalogRepository();
+
+        if (!$catalogRepository->hasAnyEntries()) {
+            $stored = $settings->getJson('product_reference_data', []);
+            $normalizedLegacy = $this->normalizeProductReferenceDataPayload($stored);
+            if ($normalizedLegacy !== $this->getDefaultProductReferenceData()) {
+                $catalogRepository->replaceAll($normalizedLegacy);
+            }
+        }
+
+        $stored = $catalogRepository->getAll();
+        $normalized = $this->normalizeProductReferenceDataPayload($stored);
+
+        if ($stored !== $normalized) {
+            $catalogRepository->replaceAll($normalized);
+        }
+
+        return $normalized;
     }
 
     private function authenticate() {
@@ -720,36 +797,90 @@ class SettingsController {
     public function getProductReferenceData() {
         $user = $this->authenticate();
         $this->requireAdmin($user);
-        $settings = new SettingsRepository();
-        $catalogRepository = new ProductReferenceCatalogRepository();
-
-        if (!$catalogRepository->hasAnyEntries()) {
-            $stored = $settings->getJson('product_reference_data', []);
-            $normalizedLegacy = $this->normalizeProductReferenceDataPayload($stored);
-            if ($normalizedLegacy !== $this->getDefaultProductReferenceData()) {
-                $catalogRepository->replaceAll($normalizedLegacy);
-            }
-        }
-
-        $stored = $catalogRepository->getAll();
-        $normalized = $this->normalizeProductReferenceDataPayload($stored);
-
-        if ($stored !== $normalized) {
-            $catalogRepository->replaceAll($normalized);
-        }
-
-        Response::json($normalized);
+        Response::json($this->loadProductReferenceData());
     }
 
     public function getPublicBrandLogos() {
-        $catalogRepository = new ProductReferenceCatalogRepository();
-        $stored = $catalogRepository->getAll();
-        $normalized = $this->normalizeProductReferenceDataPayload($stored);
+        $normalized = $this->loadProductReferenceData();
         $brands = array_values(array_filter($normalized['brands'] ?? [], static function ($brand) {
             return is_array($brand) && trim((string)($brand['logoUrl'] ?? '')) !== '';
         }));
 
         Response::json($brands);
+    }
+
+    public function getPublicProductCategories() {
+        $normalized = $this->loadProductReferenceData();
+        Response::json(array_values($normalized['categories'] ?? []));
+    }
+
+    public function getPublicProductCategoryReferences() {
+        $normalized = $this->loadProductReferenceData();
+        $categories = array_values($normalized['categories'] ?? []);
+        $imagesByName = [];
+
+        foreach (($normalized['categoryImages'] ?? []) as $imageReference) {
+            if (!is_array($imageReference)) {
+                continue;
+            }
+            $name = trim((string)($imageReference['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $key = function_exists('mb_strtolower')
+                ? mb_strtolower($name, 'UTF-8')
+                : strtolower($name);
+            $imagesByName[$key] = $imageReference;
+        }
+
+        $references = [];
+$allCategories = $categories;
+$seenCategories = [];
+
+        foreach ($allCategories as $category) {
+            $name = trim((string)$category);
+            if ($name === '') {
+                continue;
+            }
+            $key = function_exists('mb_strtolower')
+                ? mb_strtolower($name, 'UTF-8')
+                : strtolower($name);
+            $lookupKeys = [$key];
+            if ($key === 'todas') {
+                $lookupKeys[] = 'todos';
+            }
+            if ($key === 'ofertas') {
+                $lookupKeys[] = 'descuentos';
+            }
+            if (isset($seenCategories[$key])) {
+                continue;
+            }
+            $seenCategories[$key] = true;
+
+            $imageReference = [];
+            foreach ($lookupKeys as $lookupKey) {
+                if (isset($imagesByName[$lookupKey])) {
+                    $imageReference = $imagesByName[$lookupKey];
+                    break;
+                }
+            }
+            $featuredImages = is_array($imageReference['featuredImages'] ?? null) ? $imageReference['featuredImages'] : [];
+
+            $featuredImages = is_array($imageReference['featuredImages'] ?? null) ? $imageReference['featuredImages'] : [];
+            $references[] = [
+    'name' => $name,
+    'topImageUrl' => trim((string)($imageReference['topImageUrl'] ?? '')),
+    'featuredImages' => [
+        'mobilePrimary' => trim((string)($featuredImages['mobilePrimary'] ?? '')),
+        'mobileSecondary' => trim((string)($featuredImages['mobileSecondary'] ?? '')),
+        'desktopPrimary' => trim((string)($featuredImages['desktopPrimary'] ?? '')),
+        'desktopSecondary' => trim((string)($featuredImages['desktopSecondary'] ?? '')),
+    ],
+    'showInImageSection' => ($imageReference['showInImageSection'] ?? true) !== false,
+];
+        }
+
+        Response::json($references);
     }
 
     public function updateProductReferenceData() {

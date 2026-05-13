@@ -343,6 +343,8 @@ $router->add('PUT', '/api/admin/settings/tax', 'SettingsController@updateVat');
 $router->add('GET', '/api/settings/shipping', 'SettingsController@getShipping');
 $router->add('GET', '/api/settings/store-status', 'SettingsController@getStoreStatus');
 $router->add('GET', '/api/settings/brand-logos', 'SettingsController@getPublicBrandLogos');
+$router->add('GET', '/api/settings/product-categories', 'SettingsController@getPublicProductCategories');
+$router->add('GET', '/api/settings/product-category-references', 'SettingsController@getPublicProductCategoryReferences');
 $router->add('GET', '/api/admin/settings/shipping', 'SettingsController@getShipping');
 $router->add('PUT', '/api/admin/settings/shipping', 'SettingsController@updateShipping');
 $router->add('GET', '/api/admin/settings/store-status', 'SettingsController@getStoreStatus');
@@ -407,6 +409,8 @@ function is_public_api_request(string $uri, string $method): bool {
             '/api/settings/shipping',
             '/api/settings/store-status',
             '/api/settings/brand-logos',
+            '/api/settings/product-categories',
+            '/api/settings/product-category-references',
             '/api/health',
         ], true)) {
             return true;

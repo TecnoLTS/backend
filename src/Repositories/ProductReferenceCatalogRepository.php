@@ -30,6 +30,7 @@ class ProductReferenceCatalogRepository {
     public function getAll(): array {
         $result = [
             'categories' => [],
+            'categoryImages' => [],
             'brands' => [],
             'suppliers' => [],
             'sizes' => [],
@@ -88,6 +89,30 @@ class ProductReferenceCatalogRepository {
                     'address' => trim((string)($payload['address'] ?? '')),
                     'notes' => trim((string)($payload['notes'] ?? '')),
                 ];
+                continue;
+            }
+
+            if ($catalogKey === 'categoryImages') {
+                $name = trim((string)($payload['name'] ?? ($payload['label'] ?? ($row['label'] ?? ''))));
+                if ($name !== '') {
+                    $featuredImages = $payload['featuredImages'] ?? [];
+                    if (!is_array($featuredImages)) {
+                        $featuredImages = [];
+                    }
+                    $result['categoryImages'][] = [
+    'name' => $name,
+    'topImageUrl' => trim((string)($payload['topImageUrl'] ?? ($payload['imageUrl'] ?? ''))),
+    'featuredImages' => [
+        'mobilePrimary' => trim((string)($featuredImages['mobilePrimary'] ?? '')),
+        'mobileSecondary' => trim((string)($featuredImages['mobileSecondary'] ?? '')),
+        'desktopPrimary' => trim((string)($featuredImages['desktopPrimary'] ?? '')),
+        'desktopSecondary' => trim((string)($featuredImages['desktopSecondary'] ?? '')),
+    ],
+    'showInImageSection' => array_key_exists('showInImageSection', $payload)
+        ? filter_var($payload['showInImageSection'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) !== false
+        : true,
+];
+                }
                 continue;
             }
 
@@ -204,6 +229,40 @@ class ProductReferenceCatalogRepository {
                             'tenant_id' => $tenantId,
                             'catalog_key' => $catalogKey,
                             'label' => $supplierName,
+                            'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                            'sort_order' => $index,
+                        ]);
+                        continue;
+                    }
+
+                    if ($catalogKey === 'categoryImages' && is_array($value)) {
+                        $categoryName = trim((string)($value['name'] ?? ($value['label'] ?? ($value['category'] ?? ''))));
+                        if ($categoryName === '') {
+                            continue;
+                        }
+                        $featuredImages = $value['featuredImages'] ?? [];
+                        if (!is_array($featuredImages)) {
+                            $featuredImages = [];
+                        }
+                        $payload = [
+    'name' => $categoryName,
+    'topImageUrl' => trim((string)($value['topImageUrl'] ?? ($value['imageUrl'] ?? ($value['image'] ?? '')))),
+    'featuredImages' => [
+        'mobilePrimary' => trim((string)($featuredImages['mobilePrimary'] ?? '')),
+        'mobileSecondary' => trim((string)($featuredImages['mobileSecondary'] ?? '')),
+        'desktopPrimary' => trim((string)($featuredImages['desktopPrimary'] ?? '')),
+        'desktopSecondary' => trim((string)($featuredImages['desktopSecondary'] ?? '')),
+    ],
+    'showInImageSection' => array_key_exists('showInImageSection', $value)
+        ? filter_var($value['showInImageSection'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) !== false
+        : true,
+];
+
+                        $insertStmt->execute([
+                            'id' => $this->buildRowId($catalogKey, $categoryName, $index + 1),
+                            'tenant_id' => $tenantId,
+                            'catalog_key' => $catalogKey,
+                            'label' => $categoryName,
                             'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                             'sort_order' => $index,
                         ]);
