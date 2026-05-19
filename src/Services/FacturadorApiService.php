@@ -101,8 +101,9 @@ class FacturadorApiService {
 
         $message = is_array($decoded) ? ($decoded['error']['message'] ?? $decoded['message'] ?? null) : null;
         throw new \RuntimeException(sprintf(
-            'No se pudo listar RIDE PDF del facturador (%d): %s',
+            'No se pudo listar RIDE PDF del facturador (%d) en %s: %s',
             $statusCode ?: 500,
+            $endpoint,
             is_string($message) && trim($message) !== '' ? $message : 'respuesta inválida'
         ));
     }
@@ -140,8 +141,9 @@ class FacturadorApiService {
         $decoded = is_string($body) && $body !== '' ? json_decode($body, true) : null;
         $message = is_array($decoded) ? ($decoded['error']['message'] ?? $decoded['message'] ?? null) : null;
         throw new \RuntimeException(sprintf(
-            'No se pudo obtener RIDE PDF del facturador (%d): %s',
+            'No se pudo obtener RIDE PDF del facturador (%d) en %s: %s',
             $statusCode ?: 500,
+            $endpoint,
             is_string($message) && trim($message) !== '' ? $message : 'respuesta inválida'
         ));
     }

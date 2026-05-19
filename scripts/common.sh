@@ -203,7 +203,22 @@ deploy_backend() {
   echo "Levantando backend Paramascotasec en ${mode} usando ${env_file}..."
   (
     cd "${APP_DIR}"
-    APP_ENV="${mode}" RUN_DB_SETUP="${run_db_setup}" RUN_DB_BOOTSTRAP="${run_db_setup}" docker compose --env-file "${env_file}" up -d --build --force-recreate --remove-orphans app web
+
+    local facturador_path
+    facturador_path="$(read_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH")"
+    if [[ -z "${facturador_path}" ]]; then
+      if [[ "${mode}" == "development" ]]; then
+        facturador_path="/api/test/v1/invoices"
+      else
+        facturador_path="/api/production/v1/invoices"
+      fi
+    fi
+
+    APP_ENV="${mode}" \
+      RUN_DB_SETUP="${run_db_setup}" \
+      RUN_DB_BOOTSTRAP="${run_db_setup}" \
+      FACTURADOR_API_INVOICES_PATH="${facturador_path}" \
+      docker compose --env-file "${env_file}" up -d --build --force-recreate --remove-orphans app web
   )
   wait_for_container_state paramascotasec-backend-app
   wait_for_container_state paramascotasec-backend-web

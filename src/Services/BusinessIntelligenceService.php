@@ -16,7 +16,7 @@ class BusinessIntelligenceService {
         $this->userRepo = new UserRepository();
     }
 
-    public function getFullDashboardStats(?string $selectedMonth = null) {
+    public function getFullDashboardStats(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null) {
         $settings = new SettingsRepository();
         $vatRate = $settings->get('vat_rate');
         $vatRate = is_numeric($vatRate) ? floatval($vatRate) : 0;
@@ -32,8 +32,8 @@ class BusinessIntelligenceService {
         $aovDeepDive = $this->orderRepo->getAOVDeepDive();
         $salesSummary = $this->orderRepo->getSalesSummary();
         $traceability = $this->orderRepo->getKpiTraceability();
-        $productSalesRanking = $this->orderRepo->getProductSalesRanking($selectedMonth);
-        $periodReport = $this->orderRepo->getReportPeriodSummary($selectedMonth);
+        $productSalesRanking = $this->orderRepo->getProductSalesRanking($selectedMonth, $selectedDate);
+        $periodReport = $this->orderRepo->getReportPeriodSummary($selectedMonth, $selectedDate, $scope);
         $financialTrends = $this->orderRepo->getFinancialTrends();
 
         return [
