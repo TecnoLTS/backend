@@ -3,6 +3,7 @@
 namespace App\Controllers;
 
 use App\Repositories\AuthSecurityRepository;
+use App\Repositories\PasswordResetTokenRepository;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 use App\Services\MailService;
@@ -15,11 +16,13 @@ class AuthController {
     private $userRepository;
     private $settingsRepository;
     private $authSecurityRepository;
+    private $passwordResetTokenRepository;
 
     public function __construct() {
         $this->userRepository = new UserRepository();
         $this->settingsRepository = new SettingsRepository();
         $this->authSecurityRepository = new AuthSecurityRepository();
+        $this->passwordResetTokenRepository = new PasswordResetTokenRepository();
     }
 
     private function isDevelopment(): bool {
@@ -219,6 +222,11 @@ class AuthController {
         return max(5, $configured);
     }
 
+    private function passwordResetTtlMinutes(): int {
+        $configured = (int)($_ENV['AUTH_PASSWORD_RESET_TTL_MINUTES'] ?? 30);
+        return max(10, min(120, $configured));
+    }
+
     private function isLoginLocked(array $user): bool {
         $lockedUntil = $user['login_locked_until'] ?? null;
         return is_string($lockedUntil) && $lockedUntil !== '' && strtotime($lockedUntil) > time();
@@ -279,6 +287,49 @@ class AuthController {
         } catch (\Throwable $exception) {
             error_log('[AUTH_SECURITY_EVENT_FAILED] ' . $exception->getMessage());
         }
+    }
+
+    private function passwordResetGenericMessage(): string {
+        return 'Si el correo existe, te enviaremos un enlace para restablecer tu contraseña.';
+    }
+
+    private function isPasswordResetRateLimited(string $email): bool {
+        $emailCount = $this->authSecurityRepository->countRecentEventsByEmail(
+            'password_reset_requested',
+            $email,
+            '1 hour'
+        );
+        $clientIp = $this->getClientIp();
+        $ipCount = $clientIp
+            ? $this->authSecurityRepository->countRecentEventsByIp('password_reset_requested', $clientIp, '1 hour')
+            : 0;
+
+        return $emailCount >= 3 || $ipCount >= 10;
+    }
+
+    private function tokenHash(string $token): string {
+        return hash('sha256', $token);
+    }
+
+    private function buildPasswordResetUrl(string $token): string {
+        $baseUrl = TenantContext::publicBaseUrl()
+            ?? TenantContext::appUrl()
+            ?? ($_ENV['NEXT_PUBLIC_BASE_URL'] ?? ($_ENV['APP_URL'] ?? $this->getRequestBaseUrl()));
+        return rtrim($baseUrl, '/') . '/reset-password?token=' . urlencode($token);
+    }
+
+    private function sendPasswordResetEmail(string $email, string $name, string $token): bool {
+        $resetUrl = $this->buildPasswordResetUrl($token);
+        $ttlMinutes = $this->passwordResetTtlMinutes();
+        $safeName = trim($name) !== '' ? trim($name) : 'Usuario';
+        $subject = 'Restablece tu contraseña';
+        $message = "Hola {$safeName},\n\n";
+        $message .= "Recibimos una solicitud para restablecer tu contraseña en Para Mascotas EC.\n";
+        $message .= "Usa este enlace dentro de los próximos {$ttlMinutes} minutos:\n";
+        $message .= "{$resetUrl}\n\n";
+        $message .= "Si no solicitaste este cambio, ignora este correo. Tu contraseña actual seguirá vigente.\n";
+
+        return MailService::send($email, $subject, $message);
     }
 
     private function serializeUser(array $user): array {
@@ -708,6 +759,126 @@ class AuthController {
         $this->userRepository->markEmailVerifiedByOtp($user['id']);
         $this->recordAuthEvent($user, 'otp_verified', 'success');
         Response::json(['verified' => true], 200, null, 'Correo verificado correctamente.');
+    }
+
+    public function requestPasswordReset() {
+        $data = json_decode(file_get_contents('php://input'), true);
+        $email = strtolower(trim((string)($data['email'] ?? '')));
+
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            Response::error('Ingresa un correo electrónico válido', 400, 'AUTH_PASSWORD_RESET_EMAIL_INVALID');
+            return;
+        }
+
+        if ($this->isPasswordResetRateLimited($email)) {
+            $this->recordAuthEvent(null, 'password_reset_rate_limited', 'blocked', [
+                'email' => $email,
+            ]);
+            Response::error('Demasiados intentos en poco tiempo. Espera y vuelve a intentarlo.', 429, 'AUTH_PASSWORD_RESET_RATE_LIMITED');
+            return;
+        }
+
+        $user = $this->userRepository->getByEmail($email);
+        $this->recordAuthEvent($user, 'password_reset_requested', 'info', [
+            'email' => $email,
+            'user_exists' => (bool)$user,
+        ]);
+
+        if (!$user || $this->looksUndeliverableEmail($email)) {
+            Response::json(['sent' => true], 200, null, $this->passwordResetGenericMessage());
+            return;
+        }
+
+        try {
+            $this->passwordResetTokenRepository->deleteExpired();
+            $token = bin2hex(random_bytes(32));
+            $expiresAt = date('Y-m-d H:i:s', time() + ($this->passwordResetTtlMinutes() * 60));
+            $this->passwordResetTokenRepository->create(
+                (string)$user['id'],
+                $this->tokenHash($token),
+                $expiresAt,
+                $this->getClientIp(),
+                $this->getUserAgent()
+            );
+
+            if ($this->sendPasswordResetEmail($email, $user['name'] ?? 'Usuario', $token)) {
+                $this->recordAuthEvent($user, 'password_reset_email_sent', 'success', [
+                    'delivery' => 'email',
+                ]);
+            } else {
+                $this->recordAuthEvent($user, 'password_reset_email_failed', 'failure', [
+                    'reason' => 'smtp_send_failed',
+                ]);
+            }
+        } catch (\Throwable $exception) {
+            error_log('[PASSWORD_RESET_REQUEST_FAILED] ' . $exception->getMessage());
+            $this->recordAuthEvent($user, 'password_reset_request_failed', 'failure');
+        }
+
+        Response::json(['sent' => true], 200, null, $this->passwordResetGenericMessage());
+    }
+
+    public function confirmPasswordReset() {
+        $data = json_decode(file_get_contents('php://input'), true);
+        $token = trim((string)($data['token'] ?? ''));
+        $password = trim((string)($data['password'] ?? $data['newPassword'] ?? ''));
+
+        if ($token === '' || !preg_match('/^[a-f0-9]{64}$/i', $token)) {
+            Response::error('El enlace de recuperación es inválido o expiró.', 400, 'AUTH_PASSWORD_RESET_TOKEN_INVALID');
+            return;
+        }
+
+        if ($password === '') {
+            Response::error('La nueva contraseña es obligatoria', 400, 'AUTH_PASSWORD_RESET_PASSWORD_REQUIRED');
+            return;
+        }
+
+        if (mb_strlen($password) < 12) {
+            Response::error('La nueva contraseña debe tener al menos 12 caracteres', 400, 'AUTH_PASSWORD_RESET_WEAK_PASSWORD');
+            return;
+        }
+
+        try {
+            $resetToken = $this->passwordResetTokenRepository->getValidToken($this->tokenHash($token));
+
+            if (!$resetToken) {
+                $this->recordAuthEvent(null, 'password_reset_token_invalid', 'failure');
+                Response::error('El enlace de recuperación es inválido o expiró.', 400, 'AUTH_PASSWORD_RESET_TOKEN_INVALID');
+                return;
+            }
+
+            $userId = (string)$resetToken['user_id'];
+            $user = $this->userRepository->getById($userId);
+            if (!$user) {
+                $this->recordAuthEvent(null, 'password_reset_user_missing', 'failure');
+                Response::error('El enlace de recuperación es inválido o expiró.', 400, 'AUTH_PASSWORD_RESET_TOKEN_INVALID');
+                return;
+            }
+
+            $currentPasswordHash = $this->userRepository->getPasswordHash($userId);
+            if ($currentPasswordHash && password_verify($password, $currentPasswordHash)) {
+                $this->recordAuthEvent($user, 'password_reset_same_password', 'failure');
+                Response::error('La nueva contraseña debe ser diferente a la actual', 400, 'AUTH_PASSWORD_RESET_SAME_PASSWORD');
+                return;
+            }
+
+            $this->userRepository->resetPasswordAfterRecovery(
+                $userId,
+                password_hash($password, PASSWORD_DEFAULT),
+                bin2hex(random_bytes(16))
+            );
+            $this->passwordResetTokenRepository->markUsed(
+                (string)$resetToken['id'],
+                $this->getClientIp(),
+                $this->getUserAgent()
+            );
+
+            $this->recordAuthEvent($user, 'password_reset_completed', 'success');
+            Response::json(['passwordReset' => true], 200, null, 'Contraseña restablecida correctamente. Inicia sesión con tu nueva contraseña.');
+        } catch (\Throwable $exception) {
+            error_log('[PASSWORD_RESET_CONFIRM_FAILED] ' . $exception->getMessage());
+            Response::error('No se pudo restablecer la contraseña', 500, 'AUTH_PASSWORD_RESET_FAILED');
+        }
     }
 
     private function sendVerificationEmail($email, $name, $token) {

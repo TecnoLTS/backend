@@ -62,6 +62,65 @@ class AuthSecurityRepository {
         ]);
     }
 
+    private function intervalSql(string $interval): string {
+        $normalized = strtolower(trim($interval));
+        $allowed = [
+            '15 minutes' => '15 minutes',
+            '1 hour' => '1 hour',
+            '24 hours' => '24 hours',
+        ];
+
+        return $allowed[$normalized] ?? '1 hour';
+    }
+
+    public function countRecentEventsByEmail(string $eventType, string $email, string $interval = '1 hour'): int {
+        $normalizedEmail = strtolower(trim($email));
+        if ($normalizedEmail === '') {
+            return 0;
+        }
+
+        $intervalSql = $this->intervalSql($interval);
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM "AuthSecurityEvent"
+            WHERE tenant_id = :tenant_id
+              AND event_type = :event_type
+              AND email = :email
+              AND created_at >= NOW() - INTERVAL \'' . $intervalSql . '\'
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'event_type' => $eventType,
+            'email' => $normalizedEmail,
+        ]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function countRecentEventsByIp(string $eventType, string $ipAddress, string $interval = '1 hour'): int {
+        $ip = trim($ipAddress);
+        if ($ip === '') {
+            return 0;
+        }
+
+        $intervalSql = $this->intervalSql($interval);
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM "AuthSecurityEvent"
+            WHERE tenant_id = :tenant_id
+              AND event_type = :event_type
+              AND ip_address = :ip_address
+              AND created_at >= NOW() - INTERVAL \'' . $intervalSql . '\'
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'event_type' => $eventType,
+            'ip_address' => $ip,
+        ]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
     private function getTenantId(): string {
         return TenantContext::id() ?? ($_ENV['DEFAULT_TENANT'] ?? 'paramascotasec');
     }

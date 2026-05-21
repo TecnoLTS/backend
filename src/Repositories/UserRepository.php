@@ -301,6 +301,27 @@ class UserRepository {
         ]);
     }
 
+    public function resetPasswordAfterRecovery(string $userId, string $newPasswordHash, string $newTokenId): void {
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET password = :password,
+                active_token_id = :token_id,
+                failed_login_attempts = 0,
+                login_locked_until = NULL,
+                otp_code = NULL,
+                otp_expires_at = NULL,
+                otp_attempts = 0,
+                updated_at = NOW()
+            WHERE id = :id AND tenant_id = :tenant_id
+        ');
+        $stmt->execute([
+            'id' => $userId,
+            'tenant_id' => $this->getTenantId(),
+            'password' => $newPasswordHash,
+            'token_id' => $newTokenId
+        ]);
+    }
+
     public function setOtpForEmail($email, $code, $expiresAt) {
         $stmt = $this->db->prepare('UPDATE "User" SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW() WHERE email = :email AND tenant_id = :tenant_id');
         $stmt->execute([

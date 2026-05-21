@@ -322,6 +322,8 @@ $router->add('POST', '/api/auth/logout', 'AuthController@logout');
 $router->add('POST', '/api/auth/register', 'AuthController@register');
 $router->add('POST', '/api/auth/request-otp', 'AuthController@requestOtp');
 $router->add('POST', '/api/auth/verify-otp', 'AuthController@verifyOtp');
+$router->add('POST', '/api/auth/password-reset/request', 'AuthController@requestPasswordReset');
+$router->add('POST', '/api/auth/password-reset/confirm', 'AuthController@confirmPasswordReset');
 $router->add('POST', '/api/contact', 'ContactController@store');
 $router->add('GET', '/api/auth/verify', 'AuthController@verify');
 $router->add('GET', '/api/auth/session', 'AuthController@session');
@@ -428,6 +430,8 @@ function is_public_api_request(string $uri, string $method): bool {
             '/api/auth/register',
             '/api/auth/request-otp',
             '/api/auth/verify-otp',
+            '/api/auth/password-reset/request',
+            '/api/auth/password-reset/confirm',
             '/api/orders/quote',
             '/api/contact',
             '/api/security/csp-report',
@@ -448,6 +452,8 @@ $csrfExemptPaths = [
     '/api/auth/register',
     '/api/auth/request-otp',
     '/api/auth/verify-otp',
+    '/api/auth/password-reset/request',
+    '/api/auth/password-reset/confirm',
     '/api/auth/verify',
     '/api/orders/quote',
     '/api/contact',
