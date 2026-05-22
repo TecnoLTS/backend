@@ -7,6 +7,7 @@ use App\Repositories\PasswordResetTokenRepository;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 use App\Services\MailService;
+use App\Services\SessionSettingsService;
 use Firebase\JWT\JWT;
 use App\Core\Auth;
 use App\Core\Response;
@@ -50,8 +51,18 @@ class AuthController {
     }
 
     private function authCookieLifetimeSeconds(): int {
-        $configured = (int)($_ENV['AUTH_COOKIE_TTL_SECONDS'] ?? 10800);
-        return max(900, $configured);
+        $configured = (int)($_ENV['AUTH_COOKIE_TTL_SECONDS'] ?? 21600);
+        return max(21600, $configured);
+    }
+
+    private function sessionLifetimeSecondsForRole(?string $role): int {
+        try {
+            return (new SessionSettingsService($this->settingsRepository))->ttlSecondsForRole($role);
+        } catch (\Throwable $exception) {
+            error_log('[SESSION_SETTINGS_FALLBACK] ' . $exception->getMessage());
+            $normalizedRole = strtolower(trim((string)$role));
+            return $normalizedRole === 'admin' ? 43200 : $this->authCookieLifetimeSeconds();
+        }
     }
 
     private function normalizeRecoveryCode(string $code): string {
@@ -352,7 +363,8 @@ class AuthController {
             return;
         }
         $tokenId = bin2hex(random_bytes(16));
-        $expiresAt = time() + $this->authCookieLifetimeSeconds();
+        $role = $user['role'] ?? 'customer';
+        $expiresAt = time() + $this->sessionLifetimeSecondsForRole(is_string($role) ? $role : 'customer');
         $payload = [
             'iat' => time(),
             'exp' => $expiresAt,
@@ -374,6 +386,35 @@ class AuthController {
         Response::json([
             'user' => $this->serializeUser($user),
         ]);
+    }
+
+    private function refreshSessionCookie(array $user, array $payload): void {
+        $secretKey = $this->getJwtSecretOrFail();
+        if (!$secretKey) {
+            return;
+        }
+
+        $role = $user['role'] ?? ($payload['role'] ?? 'customer');
+        $tokenId = trim((string)($payload['jti'] ?? ''));
+        if ($tokenId === '') {
+            return;
+        }
+
+        $expiresAt = time() + $this->sessionLifetimeSecondsForRole(is_string($role) ? $role : 'customer');
+        $refreshedPayload = [
+            'iat' => time(),
+            'exp' => $expiresAt,
+            'sub' => $user['id'],
+            'email' => $user['email'],
+            'name' => $user['name'],
+            'role' => $role,
+            'tenant_id' => $payload['tenant_id'] ?? TenantContext::id(),
+            'jti' => $tokenId,
+        ];
+
+        $jwt = JWT::encode($refreshedPayload, $secretKey, 'HS256');
+        Response::setAuthCookie($jwt, $expiresAt);
+        Response::ensureCsrfCookie($expiresAt);
     }
 
     private function validateAdminMfa(array $user, string $code): bool {
@@ -520,7 +561,7 @@ class AuthController {
             return;
         }
         Response::noStore();
-        Response::ensureCsrfCookie((int)($payload['exp'] ?? (time() + 10800)));
+        $this->refreshSessionCookie($user, $payload);
         Response::json([
             'user' => $this->serializeUser($user),
         ]);

@@ -354,6 +354,8 @@ $router->add('GET', '/api/admin/reviews', 'ProductReviewController@adminIndex');
 $router->add('PATCH', '/api/admin/reviews/{id}', 'ProductReviewController@adminUpdate');
 $router->add('GET', '/api/admin/settings/tax', 'SettingsController@getVat');
 $router->add('PUT', '/api/admin/settings/tax', 'SettingsController@updateVat');
+$router->add('GET', '/api/admin/settings/session', 'SettingsController@getSessionSettings');
+$router->add('PUT', '/api/admin/settings/session', 'SettingsController@updateSessionSettings');
 $router->add('GET', '/api/settings/shipping', 'SettingsController@getShipping');
 $router->add('GET', '/api/settings/store-status', 'SettingsController@getStoreStatus');
 $router->add('GET', '/api/settings/brand-logos', 'SettingsController@getPublicBrandLogos');

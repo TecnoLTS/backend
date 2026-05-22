@@ -5,6 +5,7 @@ namespace App\Controllers;
 use App\Repositories\SettingsRepository;
 use App\Repositories\ProductReferenceCatalogRepository;
 use App\Repositories\UserRepository;
+use App\Services\SessionSettingsService;
 use App\Support\ProductFieldValueNormalizer;
 use App\Core\Response;
 use App\Core\Auth;
@@ -484,6 +485,34 @@ class SettingsController {
             'credit_current_rate' => $creditCurrentRate,
             'credit_carryforward_rate' => $creditCarryforwardRate,
         ]);
+    }
+
+    public function getSessionSettings() {
+        $user = $this->authenticate();
+        $this->requireAdmin($user);
+
+        $service = new SessionSettingsService();
+        Response::json($service->getSettings());
+    }
+
+    public function updateSessionSettings() {
+        $user = $this->authenticate();
+        $this->requireAdmin($user);
+        $data = json_decode(file_get_contents('php://input'), true) ?: [];
+
+        if (
+            !isset($data['customerSessionHours']) || !is_numeric($data['customerSessionHours'])
+            || !isset($data['adminSessionHours']) || !is_numeric($data['adminSessionHours'])
+        ) {
+            Response::error('Duración de sesión inválida', 400, 'SETTINGS_SESSION_INVALID');
+            return;
+        }
+
+        $service = new SessionSettingsService();
+        Response::json($service->updateSettings(
+            $data['customerSessionHours'],
+            $data['adminSessionHours']
+        ));
     }
 
     public function getShipping() {

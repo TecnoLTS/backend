@@ -119,6 +119,9 @@ class Response {
     public static function ensureCsrfCookie(?int $expiresAt = null): string {
         $existing = trim((string)($_COOKIE[self::csrfCookieName()] ?? ''));
         if ($existing !== '') {
+            if ($expiresAt !== null) {
+                self::setCsrfCookie($existing, $expiresAt);
+            }
             return $existing;
         }
 
