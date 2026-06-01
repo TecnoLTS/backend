@@ -114,6 +114,7 @@ resolve_env_file() {
     upsert_env_value "${env_file}" "ADMIN_IP_ALLOWLIST" ""
     upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
     upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "pruebas"
+    upsert_env_value "${env_file}" "FACTURADOR_API_URL" "http://facturador:8080"
     upsert_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH" "/api/test/v1/invoices"
 
     printf '%s\n' "${env_file}"
@@ -131,6 +132,7 @@ resolve_env_file() {
     upsert_env_value "${APP_DIR}/.env" "APP_URL" "${app_url%/}"
     upsert_env_value "${APP_DIR}/.env" "TRUST_PROXY_HEADERS" "false"
     upsert_env_value "${APP_DIR}/.env" "SRI_ENVIRONMENT" "produccion"
+    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_URL" "http://facturador:8080"
     upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
     printf '%s\n' "${APP_DIR}/.env"
     return 0
@@ -143,6 +145,7 @@ resolve_env_file() {
     upsert_env_value "${APP_DIR}/.env" "APP_URL" "${APP_URL:-https://paramascotasec.com}"
     upsert_env_value "${APP_DIR}/.env" "TRUST_PROXY_HEADERS" "false"
     upsert_env_value "${APP_DIR}/.env" "SRI_ENVIRONMENT" "produccion"
+    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_URL" "http://facturador:8080"
     upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
     printf '%s\n' "${APP_DIR}/.env"
     return 0

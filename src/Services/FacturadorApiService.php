@@ -9,7 +9,7 @@ class FacturadorApiService {
     private string $apiKey;
 
     public function __construct(?string $baseUrl = null, ?int $timeoutSeconds = null) {
-        $resolvedBaseUrl = rtrim((string)($baseUrl ?? ($_ENV['FACTURADOR_API_URL'] ?? getenv('FACTURADOR_API_URL') ?: 'http://facturador')), '/');
+        $resolvedBaseUrl = rtrim((string)($baseUrl ?? ($_ENV['FACTURADOR_API_URL'] ?? getenv('FACTURADOR_API_URL') ?: 'http://facturador:8080')), '/');
         if ($resolvedBaseUrl === '') {
             throw new \RuntimeException('FACTURADOR_API_URL no configurado');
         }
