@@ -103,14 +103,15 @@ if (!function_exists('hydrate_process_environment')) {
 
 hydrate_process_environment();
 
-// Load .env when it is readable. Docker can also inject the required
+// Load entorno/.env when it is readable. Docker can also inject the required
 // environment variables, so an unreadable local file should not break requests.
-$envPath = __DIR__ . '/../.env';
+$envDir = __DIR__ . '/../entorno';
+$envPath = $envDir . '/.env';
 if (is_readable($envPath)) {
-    $dotenv = Dotenv::createImmutable(__DIR__ . '/..');
+    $dotenv = Dotenv::createImmutable($envDir);
     $dotenv->safeLoad();
 } elseif (file_exists($envPath)) {
-    error_log('[ENV_WARNING] .env exists but is not readable; using process environment only.');
+    error_log('[ENV_WARNING] entorno/.env exists but is not readable; using process environment only.');
 }
 hydrate_process_environment();
 

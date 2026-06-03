@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENTORNO_DIR="${APP_DIR}/entorno"
+ENTORNO_ENV_FILE="${ENTORNO_DIR}/.env"
+ENTORNO_SERVER_FILE="${ENTORNO_DIR}/servidor.env"
 
 read_env_value() {
   local file="$1"
@@ -16,6 +19,22 @@ read_env_value() {
       exit
     }
   ' "${file}"
+}
+
+normalize_env_value() {
+  local value="$1"
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value%$'\r'}"
+
+  if [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+
+  printf '%s' "${value}"
 }
 
 ensure_docker_ready() {
@@ -69,27 +88,65 @@ path.write_text("\n".join(lines) + "\n")
 PY
 }
 
+ensure_entorno_files() {
+  local created=0
+
+  mkdir -p "${ENTORNO_DIR}"
+
+  if [[ ! -f "${ENTORNO_ENV_FILE}" ]]; then
+    if [[ ! -f "${ENTORNO_DIR}/.env.example" ]]; then
+      echo "No se encontro ${ENTORNO_DIR}/.env.example" >&2
+      exit 1
+    fi
+    cp "${ENTORNO_DIR}/.env.example" "${ENTORNO_ENV_FILE}"
+    chmod 600 "${ENTORNO_ENV_FILE}"
+    echo "Se creo ${ENTORNO_ENV_FILE} desde entorno/.env.example."
+    created=1
+  fi
+
+  if [[ ! -f "${ENTORNO_SERVER_FILE}" ]]; then
+    if [[ ! -f "${ENTORNO_DIR}/servidor.env.example" ]]; then
+      echo "No se encontro ${ENTORNO_DIR}/servidor.env.example" >&2
+      exit 1
+    fi
+    cp "${ENTORNO_DIR}/servidor.env.example" "${ENTORNO_SERVER_FILE}"
+    chmod 600 "${ENTORNO_SERVER_FILE}"
+    echo "Se creo ${ENTORNO_SERVER_FILE} desde entorno/servidor.env.example."
+    created=1
+  fi
+
+  if [[ "${created}" == "1" ]]; then
+    echo "Completa valores reales en entorno/.env y verifica ENTORNO_MODE en entorno/servidor.env antes de desplegar." >&2
+    exit 1
+  fi
+}
+
+assert_entorno_mode() {
+  local expected="$1"
+  local actual
+
+  actual="$(read_env_value "${ENTORNO_SERVER_FILE}" "ENTORNO_MODE" || true)"
+  actual="$(normalize_env_value "${actual}")"
+
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "ENTORNO_MODE=${actual:-<vacio>} en ${ENTORNO_SERVER_FILE}; esperado ${expected}." >&2
+    exit 1
+  fi
+}
+
 resolve_env_file() {
   local mode="${1:-development}"
+  local env_file="${ENTORNO_ENV_FILE}"
+
+  if [[ "${mode}" != "development" && "${mode}" != "production" ]]; then
+    echo "Modo invalido: ${mode}. Usa development o production." >&2
+    exit 1
+  fi
+
+  ensure_entorno_files
+  assert_entorno_mode "${mode}"
 
   if [[ "${mode}" == "development" ]]; then
-    local env_file="${APP_DIR}/.env.development"
-    if [[ ! -f "${env_file}" ]]; then
-      if [[ -f "${APP_DIR}/.env.development.example" ]]; then
-        cp "${APP_DIR}/.env.development.example" "${env_file}"
-        echo "Se creo ${env_file} desde .env.development.example."
-      elif [[ -f "${APP_DIR}/.env" ]]; then
-        cp "${APP_DIR}/.env" "${env_file}"
-        echo "Se creo ${env_file} desde .env para separar desarrollo de produccion."
-      elif [[ -f "${APP_DIR}/.env.example" ]]; then
-        cp "${APP_DIR}/.env.example" "${env_file}"
-        echo "Se creo ${env_file} desde .env.example."
-      else
-        echo "No se encontro .env, .env.development.example ni .env.example" >&2
-        exit 1
-      fi
-    fi
-
     local backend_bind_ip backend_port backend_public_scheme backend_public_host app_url
     backend_bind_ip="${BACKEND_BIND_IP:-$(read_env_value "${env_file}" "BACKEND_BIND_IP")}"
     backend_bind_ip="${backend_bind_ip:-0.0.0.0}"
@@ -121,38 +178,20 @@ resolve_env_file() {
     return 0
   fi
 
-  if [[ -f "${APP_DIR}/.env" ]]; then
-    local app_url
-    app_url="${APP_URL:-$(read_env_value "${APP_DIR}/.env" "APP_URL")}"
-    if [[ -z "${app_url}" || "${app_url}" == http://localhost* || "${app_url}" == http://127.0.0.1* ]]; then
-      app_url="https://paramascotasec.com"
-    fi
-
-    upsert_env_value "${APP_DIR}/.env" "APP_ENV" "production"
-    upsert_env_value "${APP_DIR}/.env" "APP_URL" "${app_url%/}"
-    upsert_env_value "${APP_DIR}/.env" "TRUST_PROXY_HEADERS" "false"
-    upsert_env_value "${APP_DIR}/.env" "SRI_ENVIRONMENT" "produccion"
-    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_URL" "http://facturador:8080"
-    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
-    printf '%s\n' "${APP_DIR}/.env"
-    return 0
+  local app_url
+  app_url="${APP_URL:-$(read_env_value "${env_file}" "APP_URL")}"
+  if [[ -z "${app_url}" || "${app_url}" == http://localhost* || "${app_url}" == http://127.0.0.1* ]]; then
+    app_url="https://paramascotasec.com"
   fi
 
-  if [[ -f "${APP_DIR}/.env.example" ]]; then
-    cp "${APP_DIR}/.env.example" "${APP_DIR}/.env"
-    echo "Se creo ${APP_DIR}/.env desde .env.example. Ajusta secretos y DB si hace falta."
-    upsert_env_value "${APP_DIR}/.env" "APP_ENV" "production"
-    upsert_env_value "${APP_DIR}/.env" "APP_URL" "${APP_URL:-https://paramascotasec.com}"
-    upsert_env_value "${APP_DIR}/.env" "TRUST_PROXY_HEADERS" "false"
-    upsert_env_value "${APP_DIR}/.env" "SRI_ENVIRONMENT" "produccion"
-    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_URL" "http://facturador:8080"
-    upsert_env_value "${APP_DIR}/.env" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
-    printf '%s\n' "${APP_DIR}/.env"
-    return 0
-  fi
-
-  echo "No se encontro .env, .env.development ni .env.example" >&2
-  exit 1
+  upsert_env_value "${env_file}" "APP_ENV" "production"
+  upsert_env_value "${env_file}" "APP_URL" "${app_url%/}"
+  upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
+  upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "produccion"
+  upsert_env_value "${env_file}" "FACTURADOR_API_URL" "http://facturador:8080"
+  upsert_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
+  printf '%s\n' "${env_file}"
+  return 0
 }
 
 detect_development_public_host() {
@@ -179,7 +218,7 @@ compose_cmd() {
 
   (
     cd "${APP_DIR}"
-    BACKEND_ENV_FILE="${env_file}" docker compose --env-file "${env_file}" "$@"
+    docker compose --env-file "${env_file}" "$@"
   )
 }
 
@@ -244,7 +283,6 @@ deploy_backend() {
     fi
 
     APP_ENV="${mode}" \
-      BACKEND_ENV_FILE="${env_file}" \
       RUN_DB_SETUP="${run_db_setup}" \
       RUN_DB_BOOTSTRAP="${run_db_setup}" \
       FACTURADOR_API_INVOICES_PATH="${facturador_path}" \

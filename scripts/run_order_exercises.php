@@ -9,8 +9,9 @@ use App\Core\TenantContext;
 use App\Repositories\OrderRepository;
 use Dotenv\Dotenv;
 
-if (file_exists(__DIR__ . '/../.env')) {
-    Dotenv::createImmutable(__DIR__ . '/..')->load();
+$envDir = __DIR__ . '/../entorno';
+if (is_readable($envDir . '/.env')) {
+    Dotenv::createImmutable($envDir)->load();
 }
 
 $tenantId = 'paramascotasec';

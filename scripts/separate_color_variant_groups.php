@@ -8,8 +8,9 @@ use App\Core\Database;
 use App\Core\TenantContext;
 use Dotenv\Dotenv;
 
-if (file_exists(__DIR__ . '/../.env')) {
-    Dotenv::createImmutable(__DIR__ . '/..')->load();
+$envDir = __DIR__ . '/../entorno';
+if (is_readable($envDir . '/.env')) {
+    Dotenv::createImmutable($envDir)->load();
 }
 
 $options = getopt('', ['tenant::', 'dry-run']);

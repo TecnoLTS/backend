@@ -7,8 +7,9 @@ require_once __DIR__ . '/../vendor/autoload.php';
 use App\Core\Database;
 use Dotenv\Dotenv;
 
-if (file_exists(__DIR__ . '/../.env')) {
-    $dotenv = Dotenv::createImmutable(__DIR__ . '/..');
+$envDir = __DIR__ . '/../entorno';
+if (is_readable($envDir . '/.env')) {
+    $dotenv = Dotenv::createImmutable($envDir);
     $dotenv->load();
 }
 

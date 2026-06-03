@@ -1,6 +1,12 @@
 .env
 .env.*
-!.env.example
+entorno/.env
+entorno/.env.*
+!entorno/.env.example
+entorno/servidor.env
+entorno/certs/
+entorno/.secrets/
+entorno/certbot/
 
 vendor/
 vendor.bak-20260410023258/

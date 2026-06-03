@@ -4,8 +4,9 @@ require_once __DIR__ . '/../vendor/autoload.php';
 
 use Dotenv\Dotenv;
 
-if (file_exists(__DIR__ . '/../.env')) {
-    Dotenv::createImmutable(__DIR__ . '/..')->safeLoad();
+$envDir = __DIR__ . '/../entorno';
+if (is_readable($envDir . '/.env')) {
+    Dotenv::createImmutable($envDir)->safeLoad();
 }
 
 $apply = in_array('--apply', $argv, true);
