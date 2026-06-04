@@ -445,6 +445,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS width integer',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS height integer',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS alt_text text',
+        'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS display_order integer',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS invoice_number text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS invoice_html text',
@@ -557,6 +558,22 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
         'UPDATE "Product" SET is_published = true WHERE is_published IS NULL',
         'ALTER TABLE "Product" ALTER COLUMN is_published SET DEFAULT true',
         'ALTER TABLE "Product" ALTER COLUMN is_published SET NOT NULL',
+        'WITH ordered_images AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY product_id, COALESCE(kind, \'gallery\')
+                    ORDER BY id
+                ) - 1 AS next_display_order
+            FROM "Image"
+        )
+        UPDATE "Image" image
+        SET display_order = ordered_images.next_display_order
+        FROM ordered_images
+        WHERE image.id = ordered_images.id
+          AND image.display_order IS NULL',
+        'ALTER TABLE "Image" ALTER COLUMN display_order SET DEFAULT 0',
+        'ALTER TABLE "Image" ALTER COLUMN display_order SET NOT NULL',
         'UPDATE "OrderItem" SET unit_cost = 0 WHERE unit_cost IS NULL',
         'ALTER TABLE "OrderItem" ALTER COLUMN unit_cost SET DEFAULT 0',
         'ALTER TABLE "OrderItem" ALTER COLUMN unit_cost SET NOT NULL',

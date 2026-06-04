@@ -2,13 +2,8 @@
 .gitignore
 .env
 .env.*
-entorno/.env
-entorno/.env.*
-!entorno/.env.example
-entorno/servidor.env
-entorno/certs/
-entorno/.secrets/
-entorno/certbot/
+entorno/
+*.bak*
 
 vendor/
 node_modules/
