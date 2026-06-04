@@ -203,8 +203,8 @@ $updateProduct = $db->prepare('
 
 $deleteImages = $db->prepare('DELETE FROM "Image" WHERE product_id = :product_id');
 $insertImage = $db->prepare('
-    INSERT INTO "Image" (id, url, product_id, kind, width, height)
-    VALUES (:id, :url, :product_id, :kind, :width, :height)
+    INSERT INTO "Image" (id, url, product_id, kind, width, height, display_order)
+    VALUES (:id, :url, :product_id, :kind, :width, :height, :display_order)
 ');
 
 $deleteTenantImages = $db->prepare('
@@ -324,7 +324,7 @@ try {
         }
 
         $deleteImages->execute(['product_id' => $productId]);
-        foreach ($galleryImages as $image) {
+        foreach ($galleryImages as $index => $image) {
             $insertImage->execute([
                 'id' => uniqid('img_', true),
                 'url' => $image['url'],
@@ -332,9 +332,10 @@ try {
                 'kind' => 'gallery',
                 'width' => $image['width'],
                 'height' => $image['height'],
+                'display_order' => $index,
             ]);
         }
-        foreach ($thumbImages as $image) {
+        foreach ($thumbImages as $index => $image) {
             $insertImage->execute([
                 'id' => uniqid('img_', true),
                 'url' => $image['url'],
@@ -342,6 +343,7 @@ try {
                 'kind' => 'thumb',
                 'width' => $image['width'],
                 'height' => $image['height'],
+                'display_order' => $index,
             ]);
         }
 

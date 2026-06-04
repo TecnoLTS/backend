@@ -91,7 +91,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
             kind text,
             width integer,
             height integer,
-            alt_text text
+            alt_text text,
+            display_order integer DEFAULT 0 NOT NULL
         )',
         'CREATE TABLE IF NOT EXISTS "Variation" (
             id text PRIMARY KEY,
@@ -610,6 +611,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
         'CREATE INDEX IF NOT EXISTS "PurchaseInvoiceItem_tenant_invoice_idx" ON "PurchaseInvoiceItem" (tenant_id, purchase_invoice_id, created_at ASC)',
         'CREATE INDEX IF NOT EXISTS "PurchaseInvoiceItem_tenant_product_idx" ON "PurchaseInvoiceItem" (tenant_id, product_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Image_product_id_idx" ON "Image" (product_id)',
+        'CREATE INDEX IF NOT EXISTS "Image_product_kind_order_idx" ON "Image" (product_id, kind, display_order, id)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_product_status_idx" ON "ProductReview" (tenant_id, product_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_status_created_idx" ON "ProductReview" (tenant_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_user_idx" ON "ProductReview" (tenant_id, user_id, created_at DESC)',

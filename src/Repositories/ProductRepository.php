@@ -135,15 +135,16 @@ class ProductRepository {
         FROM "Product" p
         LEFT JOIN LATERAL (
           SELECT
-            json_agg(i.url ORDER BY i.id) FILTER (WHERE COALESCE(i.kind, \'gallery\') = \'gallery\') AS images,
-            json_agg(i.url ORDER BY i.id) FILTER (WHERE COALESCE(i.kind, \'gallery\') = \'thumb\') AS thumbs,
+            json_agg(i.url ORDER BY i.display_order, i.id) FILTER (WHERE COALESCE(i.kind, \'gallery\') = \'gallery\') AS images,
+            json_agg(i.url ORDER BY i.display_order, i.id) FILTER (WHERE COALESCE(i.kind, \'gallery\') = \'thumb\') AS thumbs,
             json_agg(jsonb_build_object(
               \'url\', i.url,
               \'width\', i.width,
               \'height\', i.height,
               \'kind\', COALESCE(i.kind, \'gallery\'),
-              \'altText\', i.alt_text
-            ) ORDER BY i.id) AS image_meta
+              \'altText\', i.alt_text,
+              \'displayOrder\', i.display_order
+            ) ORDER BY i.display_order, i.id) AS image_meta
           FROM "Image" i
           WHERE i.product_id = p.id
         ) img ON true
@@ -780,10 +781,10 @@ class ProductRepository {
             return;
         }
         $stmt = $this->db->prepare('
-            INSERT INTO "Image" (id, url, product_id, kind, width, height, alt_text)
-            VALUES (:id, :url, :product_id, :kind, :width, :height, :alt_text)
+            INSERT INTO "Image" (id, url, product_id, kind, width, height, alt_text, display_order)
+            VALUES (:id, :url, :product_id, :kind, :width, :height, :alt_text, :display_order)
         ');
-        foreach ($entries as $entry) {
+        foreach ($entries as $index => $entry) {
             $stmt->execute([
                 'id' => uniqid('img_'),
                 'url' => $entry['url'],
@@ -791,7 +792,8 @@ class ProductRepository {
                 'kind' => $entry['kind'] ?? $kind,
                 'width' => $entry['width'],
                 'height' => $entry['height'],
-                'alt_text' => $entry['altText'] ?? null
+                'alt_text' => $entry['altText'] ?? null,
+                'display_order' => $index
             ]);
         }
     }
