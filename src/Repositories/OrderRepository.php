@@ -1990,12 +1990,31 @@ class OrderRepository {
             $monthKey = (new \DateTimeImmutable('now', new \DateTimeZone('America/Guayaquil')))->format('Y-m');
         }
 
-        $startDate = $monthKey . '-01';
+        $start = new \DateTimeImmutable($monthKey . '-01', new \DateTimeZone('America/Guayaquil'));
+        $end = $start->modify('last day of this month');
+        $endExclusive = $start->modify('+1 month');
         return [
             'period_key' => $monthKey,
-            'start_date' => $startDate,
-            'end_date' => date('Y-m-t', strtotime($startDate)),
-            'end_exclusive' => date('Y-m-d', strtotime($startDate . ' +1 month')),
+            'start_date' => $start->format('Y-m-d'),
+            'end_date' => $end->format('Y-m-d'),
+            'end_exclusive' => $endExclusive->format('Y-m-d'),
+            'timezone' => 'America/Guayaquil',
+        ];
+    }
+
+    private function resolveWeekPeriod(?string $selectedDate = null): array {
+        $timezone = new \DateTimeZone('America/Guayaquil');
+        $anchor = is_string($selectedDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $selectedDate) === 1
+            ? new \DateTimeImmutable($selectedDate, $timezone)
+            : new \DateTimeImmutable('today', $timezone);
+        $end = $anchor;
+        $start = $end->modify('-6 days');
+
+        return [
+            'period_key' => 'week:' . $start->format('Y-m-d') . ':' . $end->format('Y-m-d'),
+            'start_date' => $start->format('Y-m-d'),
+            'end_date' => $end->format('Y-m-d'),
+            'end_exclusive' => $end->modify('+1 day')->format('Y-m-d'),
             'timezone' => 'America/Guayaquil',
         ];
     }
@@ -2008,28 +2027,19 @@ class OrderRepository {
                 'period_key' => (new \DateTimeImmutable('now', $timezone))->format('Y-m'),
                 'start_date' => '2000-01-01',
                 'end_date' => '2099-12-31',
-                'end_exclusive' => '2099-12-31',
+                'end_exclusive' => '2100-01-01',
                 'timezone' => 'America/Guayaquil',
             ];
         } elseif ($scope === 'week') {
-            $end = $selectedDate
-                ? new \DateTimeImmutable($selectedDate, $timezone)
-                : new \DateTimeImmutable('today', $timezone);
-            $start = $end->modify('-6 days');
-            $period = [
-                'period_key' => 'week:' . $start->format('Y-m-d') . ':' . $end->format('Y-m-d'),
-                'start_date' => $start->format('Y-m-d'),
-                'end_date' => $end->format('Y-m-d'),
-                'end_exclusive' => $end->modify('+1 day')->format('Y-m-d'),
-                'timezone' => 'America/Guayaquil',
-            ];
+            $period = $this->resolveWeekPeriod($selectedDate);
         } elseif ($selectedDate) {
-            $monthKey = (new \DateTimeImmutable($selectedDate, $timezone))->format('Y-m');
+            $date = new \DateTimeImmutable($selectedDate, $timezone);
+            $monthKey = $date->format('Y-m');
             $period = [
                 'period_key' => $monthKey,
-                'start_date' => $selectedDate,
-                'end_date' => $selectedDate,
-                'end_exclusive' => date('Y-m-d', strtotime($selectedDate . ' +1 day')),
+                'start_date' => $date->format('Y-m-d'),
+                'end_date' => $date->format('Y-m-d'),
+                'end_exclusive' => $date->modify('+1 day')->format('Y-m-d'),
                 'timezone' => 'America/Guayaquil',
             ];
         } else {

@@ -233,6 +233,32 @@ class FinancialPeriodRepository {
         ];
     }
 
+    private function adjustmentSummaryForDateRange(string $startDate, string $endDate): array {
+        if (
+            preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate) !== 1
+            || preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate) !== 1
+        ) {
+            throw new \InvalidArgumentException('Rango financiero inválido.');
+        }
+
+        $stmt = $this->db->prepare('
+            SELECT COALESCE(SUM(total), 0) AS total, COUNT(*) AS count
+            FROM "FinancialAdjustment"
+            WHERE tenant_id = :tenant_id
+              AND adjustment_date BETWEEN :start_date AND :end_date
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+        ]);
+        $row = $stmt->fetch() ?: [];
+        return [
+            'total' => round((float)($row['total'] ?? 0), 2),
+            'count' => (int)($row['count'] ?? 0),
+        ];
+    }
+
     public function createAdjustment(array $data, string $userId): array {
         $date = $this->cleanDate($data['adjustment_date'] ?? null);
         $this->assertDateOpen($date, 'ajuste financiero');
@@ -459,7 +485,7 @@ class FinancialPeriodRepository {
         $expenseStmt->execute(['tenant_id' => $this->getTenantId(), 'start_date' => $startDate, 'end_date' => $endDate]);
         $expenses = $expenseStmt->fetch() ?: [];
 
-        $adjustments = $this->adjustmentSummary($periodKey);
+        $adjustments = $this->adjustmentSummaryForDateRange($startDate, $endDate);
         $netSales = (float)($sales['net_sales'] ?? 0);
         $paidExpenses = (float)($expenses['paid'] ?? 0);
         $periodExpenses = (float)($expenses['period_expenses'] ?? 0);
