@@ -17,6 +17,10 @@ use Dompdf\Options;
 class OrderController {
     private const FINAL_CONSUMER_IDENTIFICATION = '9999999999999';
     private const FINAL_CONSUMER_MAX_TOTAL = 50.00;
+    private const FINAL_CONSUMER_PLACEHOLDERS = [
+        '9999999999' => true,
+        '9999999999999' => true,
+    ];
 
     private $orderRepository;
     private $userRepository;
@@ -661,7 +665,11 @@ class OrderController {
         $rawIdentification = trim((string)($customerAddressData['documentNumber'] ?? $customerAddressData['document_number'] ?? ''));
         $normalizedIdentification = $this->digitsOnly($rawIdentification);
         $documentType = strtolower(trim((string)($customerAddressData['documentType'] ?? $customerAddressData['document_type'] ?? '')));
-        $requestedFinalConsumer = in_array($documentType, ['consumidor_final', 'consumidor final', 'final_consumer'], true);
+        $requestedFinalConsumer = $this->isRequestedFinalConsumer(
+            $documentType,
+            $normalizedIdentification,
+            $customerName
+        );
         $fallbackReason = null;
         $identification = $normalizedIdentification;
 
@@ -699,6 +707,21 @@ class OrderController {
         $digits = preg_replace('/\D+/', '', $value);
 
         return is_string($digits) ? $digits : '';
+    }
+
+    private function isRequestedFinalConsumer(string $documentType, string $identification, string $customerName): bool
+    {
+        if (isset(self::FINAL_CONSUMER_PLACEHOLDERS[$identification])) {
+            return true;
+        }
+
+        if (in_array($documentType, ['consumidor_final', 'consumidor final', 'final_consumer'], true)) {
+            return true;
+        }
+
+        $normalizedName = strtolower(trim(preg_replace('/\s+/', ' ', $customerName) ?? $customerName));
+
+        return in_array($normalizedName, ['consumidor final', 'consumidorfinal'], true);
     }
 
     private function exceedsFinalConsumerLimit(float $amount): bool
