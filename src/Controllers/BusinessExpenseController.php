@@ -168,4 +168,19 @@ class BusinessExpenseController {
             Response::error($e->getMessage(), 400, 'BUSINESS_EXPENSE_RECURRENCE_UPDATE_FAILED');
         }
     }
+
+    public function deleteRecurrence($id): void {
+        $this->adminUser();
+        try {
+            $result = $this->repository->deleteRecurrence((string)$id);
+            Response::json([
+                'deleted' => true,
+                'recurrence' => $result['recurrence'] ?? null,
+                'generated_expenses_count' => $result['generated_expenses_count'] ?? 0,
+                'summary' => $this->repository->summary(),
+            ]);
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 400, 'BUSINESS_EXPENSE_RECURRENCE_DELETE_FAILED');
+        }
+    }
 }

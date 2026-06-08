@@ -473,6 +473,26 @@ class BusinessExpenseRepository {
         return $this->normalizeRecurrenceRow($row);
     }
 
+    public function deleteRecurrence(string $id): array {
+        $tenantId = $this->getTenantId();
+        $stmt = $this->db->prepare('SELECT * FROM "BusinessExpenseRecurrence" WHERE id = :id AND tenant_id = :tenant_id LIMIT 1');
+        $stmt->execute(['id' => $id, 'tenant_id' => $tenantId]);
+        $row = $stmt->fetch();
+        if (!$row) throw new \Exception('Recurrencia no encontrada.');
+
+        $count = $this->db->prepare('SELECT COUNT(*) FROM "BusinessExpense" WHERE tenant_id = :tenant_id AND recurrence_id = :id');
+        $count->execute(['tenant_id' => $tenantId, 'id' => $id]);
+        $generatedCount = (int)$count->fetchColumn();
+
+        $delete = $this->db->prepare('DELETE FROM "BusinessExpenseRecurrence" WHERE id = :id AND tenant_id = :tenant_id');
+        $delete->execute(['id' => $id, 'tenant_id' => $tenantId]);
+
+        return [
+            'recurrence' => $this->normalizeRecurrenceRow($row),
+            'generated_expenses_count' => $generatedCount,
+        ];
+    }
+
     public function generateDueRecurringInstances(): void {
         $stmt = $this->db->prepare('SELECT * FROM "BusinessExpenseRecurrence" WHERE tenant_id = :tenant_id AND active = TRUE AND next_due_date <= CURRENT_DATE ORDER BY next_due_date ASC LIMIT 100');
         $stmt->execute(['tenant_id' => $this->getTenantId()]);

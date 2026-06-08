@@ -417,6 +417,7 @@ $router->add('POST', '/api/admin/financial-adjustments', 'FinancialPeriodControl
 $router->add('GET', '/api/admin/expenses/recurrences', 'BusinessExpenseController@recurrences');
 $router->add('POST', '/api/admin/expenses/recurrences', 'BusinessExpenseController@storeRecurrence');
 $router->add('PUT', '/api/admin/expenses/recurrences/{id}', 'BusinessExpenseController@updateRecurrence');
+$router->add('DELETE', '/api/admin/expenses/recurrences/{id}', 'BusinessExpenseController@deleteRecurrence');
 $router->add('PUT', '/api/admin/expenses/{id}', 'BusinessExpenseController@update');
 $router->add('PATCH', '/api/admin/expenses/{id}/status', 'BusinessExpenseController@updateStatus');
 $router->add('GET', '/api/admin/purchase-invoices', 'PurchaseInvoiceController@index');
