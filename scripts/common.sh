@@ -158,6 +158,7 @@ assert_entorno_mode() {
 resolve_env_file() {
   local mode="${1:-development}"
   local env_file="${ENTORNO_ENV_FILE}"
+  local primary_domain primary_aliases public_scheme tenant_slug public_base_url tenant_name gateway_env
 
   if [[ "${mode}" != "development" && "${mode}" != "production" ]]; then
     echo "Modo invalido: ${mode}. Usa development o production." >&2
@@ -167,6 +168,38 @@ resolve_env_file() {
   assert_no_legacy_runtime_paths
   ensure_entorno_files
   assert_entorno_mode "${mode}"
+
+  gateway_env="${APP_DIR}/../Gateway/entorno/.env"
+  tenant_slug="$(normalize_env_value "$(read_env_value "${env_file}" "PUBLIC_TENANT_SLUG" || true)")"
+  tenant_slug="${tenant_slug:-$(normalize_env_value "$(read_env_value "${env_file}" "DEFAULT_TENANT" || true)")}"
+  tenant_slug="${tenant_slug:-paramascotasec}"
+  primary_domain="$(normalize_env_value "$(read_env_value "${env_file}" "PRIMARY_SITE_DOMAIN" || true)")"
+  primary_domain="${primary_domain:-paramascotasec.com}"
+  primary_aliases="$(normalize_env_value "$(read_env_value "${env_file}" "PRIMARY_SITE_ALIASES" || true)")"
+  primary_aliases="${primary_aliases:-www.${primary_domain}}"
+  public_scheme="$(normalize_env_value "$(read_env_value "${env_file}" "PUBLIC_SCHEME" || true)")"
+  public_scheme="${public_scheme:-https}"
+  if [[ -f "${gateway_env}" ]]; then
+    tenant_slug="$(normalize_env_value "$(read_env_value "${gateway_env}" "PUBLIC_TENANT_SLUG" || true)")"
+    tenant_slug="${tenant_slug:-paramascotasec}"
+    primary_domain="$(normalize_env_value "$(read_env_value "${gateway_env}" "PRIMARY_SITE_DOMAIN" || true)")"
+    primary_domain="${primary_domain:-paramascotasec.com}"
+    primary_aliases="$(normalize_env_value "$(read_env_value "${gateway_env}" "PRIMARY_SITE_ALIASES" || true)")"
+    primary_aliases="${primary_aliases:-www.${primary_domain}}"
+    public_scheme="$(normalize_env_value "$(read_env_value "${gateway_env}" "PUBLIC_SCHEME" || true)")"
+    public_scheme="${public_scheme:-https}"
+  fi
+  public_base_url="${public_scheme}://${primary_domain}"
+  tenant_name="$(normalize_env_value "$(read_env_value "${env_file}" "TENANT_DISPLAY_NAME" || true)")"
+  tenant_name="${tenant_name:-Para Mascotas EC}"
+
+  upsert_env_value "${env_file}" "DEFAULT_TENANT" "${tenant_slug}"
+  upsert_env_value "${env_file}" "PUBLIC_TENANT_SLUG" "${tenant_slug}"
+  upsert_env_value "${env_file}" "PUBLIC_SCHEME" "${public_scheme}"
+  upsert_env_value "${env_file}" "PRIMARY_SITE_DOMAIN" "${primary_domain}"
+  upsert_env_value "${env_file}" "PRIMARY_SITE_ALIASES" "${primary_aliases}"
+  upsert_env_value "${env_file}" "PUBLIC_BASE_URL" "${public_base_url}"
+  upsert_env_value "${env_file}" "TENANT_DISPLAY_NAME" "${tenant_name}"
 
   if [[ "${mode}" == "development" ]]; then
     local backend_bind_ip backend_port backend_public_scheme backend_public_host app_url
@@ -178,10 +211,7 @@ resolve_env_file() {
     backend_public_scheme="${backend_public_scheme:-http}"
     backend_public_host="${BACKEND_PUBLIC_HOST:-$(read_env_value "${env_file}" "BACKEND_PUBLIC_HOST")}"
     backend_public_host="${backend_public_host:-$(detect_development_public_host)}"
-    app_url="${backend_public_scheme}://${backend_public_host}"
-    if [[ "${backend_port}" != "80" && "${backend_port}" != "443" ]]; then
-      app_url="${app_url}:${backend_port}"
-    fi
+    app_url="${public_base_url}"
 
     upsert_env_value "${env_file}" "APP_ENV" "development"
     upsert_env_value "${env_file}" "BACKEND_BIND_IP" "${backend_bind_ip}"
@@ -203,7 +233,7 @@ resolve_env_file() {
   local app_url
   app_url="${APP_URL:-$(read_env_value "${env_file}" "APP_URL")}"
   if [[ -z "${app_url}" || "${app_url}" == http://localhost* || "${app_url}" == http://127.0.0.1* ]]; then
-    app_url="https://paramascotasec.com"
+    app_url="${public_base_url}"
   fi
 
   upsert_env_value "${env_file}" "APP_ENV" "production"

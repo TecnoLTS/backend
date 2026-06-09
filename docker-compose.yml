@@ -25,6 +25,12 @@ services:
     environment:
       TZ: America/Guayaquil
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
+      PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+      PRIMARY_SITE_DOMAIN: ${PRIMARY_SITE_DOMAIN:-paramascotasec.com}
+      PRIMARY_SITE_ALIASES: ${PRIMARY_SITE_ALIASES:-www.paramascotasec.com}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://paramascotasec.com}
+      TENANT_DISPLAY_NAME: ${TENANT_DISPLAY_NAME:-Para Mascotas EC}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
       DB_DATABASE: ${DB_DATABASE:-paramascotasec}
