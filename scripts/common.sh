@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENTORNO_DIR="${APP_DIR}/entorno"
 ENTORNO_ENV_FILE="${ENTORNO_DIR}/.env"
-ENTORNO_SERVER_FILE="${ENTORNO_DIR}/servidor.env"
 TEMPLATE_ENTORNO_DIR="${APP_DIR}/templates/entorno"
 
 read_env_value() {
@@ -72,19 +71,34 @@ upsert_env_value() {
   local value="$3"
 
   python3 - "$file" "$key" "$value" <<'PY'
+import re
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 key = sys.argv[2]
 value = sys.argv[3]
+
+def render_env_value(raw: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_./:@,%+=-]*", raw):
+        return raw
+    escaped = (
+        raw
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+    return f'"{escaped}"'
+
+rendered = render_env_value(value)
 lines = path.read_text().splitlines()
 for index, line in enumerate(lines):
     if line.startswith(f"{key}="):
-        lines[index] = f"{key}={value}"
+        lines[index] = f"{key}={rendered}"
         break
 else:
-    lines.append(f"{key}={value}")
+    lines.append(f"{key}={rendered}")
 path.write_text("\n".join(lines) + "\n")
 PY
 }
@@ -105,19 +119,8 @@ ensure_entorno_files() {
     created=1
   fi
 
-  if [[ ! -f "${ENTORNO_SERVER_FILE}" ]]; then
-    if [[ ! -f "${TEMPLATE_ENTORNO_DIR}/servidor.env.example" ]]; then
-      echo "No se encontro ${TEMPLATE_ENTORNO_DIR}/servidor.env.example" >&2
-      exit 1
-    fi
-    cp "${TEMPLATE_ENTORNO_DIR}/servidor.env.example" "${ENTORNO_SERVER_FILE}"
-    chmod 600 "${ENTORNO_SERVER_FILE}"
-    echo "Se creo ${ENTORNO_SERVER_FILE} desde templates/entorno/servidor.env.example."
-    created=1
-  fi
-
   if [[ "${created}" == "1" ]]; then
-    echo "Completa valores reales en entorno/.env y verifica ENTORNO_MODE en entorno/servidor.env antes de desplegar." >&2
+    echo "Completa valores reales y ENTORNO_MODE en entorno/.env antes de desplegar." >&2
     exit 1
   fi
 }
@@ -146,11 +149,11 @@ assert_entorno_mode() {
   local expected="$1"
   local actual
 
-  actual="$(read_env_value "${ENTORNO_SERVER_FILE}" "ENTORNO_MODE" || true)"
+  actual="$(read_env_value "${ENTORNO_ENV_FILE}" "ENTORNO_MODE" || true)"
   actual="$(normalize_env_value "${actual}")"
 
   if [[ "${actual}" != "${expected}" ]]; then
-    echo "ENTORNO_MODE=${actual:-<vacio>} en ${ENTORNO_SERVER_FILE}; esperado ${expected}." >&2
+    echo "ENTORNO_MODE=${actual:-<vacio>} en ${ENTORNO_ENV_FILE}; esperado ${expected}." >&2
     exit 1
   fi
 }

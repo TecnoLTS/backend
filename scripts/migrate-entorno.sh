@@ -11,7 +11,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENTORNO_DIR="${APP_DIR}/entorno"
 ENTORNO_ENV_FILE="${ENTORNO_DIR}/.env"
-ENTORNO_SERVER_FILE="${ENTORNO_DIR}/servidor.env"
 TEMPLATE_ENTORNO_DIR="${APP_DIR}/templates/entorno"
 BACKUP_DIR="/home/admincenter/secure-backups/entorno-migration/paramascotasec-backend/$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -64,11 +63,8 @@ elif [[ ! -f "${ENTORNO_ENV_FILE}" ]]; then
   echo "Se creo entorno/.env desde la plantilla; completa valores reales antes de desplegar." >&2
 fi
 
-if [[ ! -f "${ENTORNO_SERVER_FILE}" ]]; then
-  cp "${TEMPLATE_ENTORNO_DIR}/servidor.env.example" "${ENTORNO_SERVER_FILE}"
-fi
-upsert_env_value "${ENTORNO_SERVER_FILE}" "ENTORNO_MODE" "${MODE}"
-chmod 600 "${ENTORNO_SERVER_FILE}"
+upsert_env_value "${ENTORNO_ENV_FILE}" "ENTORNO_MODE" "${MODE}"
+chmod 600 "${ENTORNO_ENV_FILE}"
 
 backup_legacy_path "${APP_DIR}/.env"
 backup_legacy_path "${APP_DIR}/.env.development"

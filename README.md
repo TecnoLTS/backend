@@ -33,8 +33,8 @@ RUN_DB_SETUP=1 ./scripts/deploy-development.sh
 ## 📌 3. Datos Relevantes y Contexto a Tomar en Cuenta
 
 *   **Configuracion Local:**
-    El backend usa solo `entorno/.env` y `entorno/servidor.env`. No hay fallback a `.env` o `.env.development` en la raiz del repo.
-    Las plantillas versionadas viven en `templates/entorno/.env.example` y `templates/entorno/servidor.env.example`; si falta un archivo real, el deploy crea una copia y aborta para que completes valores reales.
+    El backend usa solo `entorno/.env`. No hay fallback a `.env` o `.env.development` en la raiz del repo.
+    La plantilla versionada vive en `templates/entorno/.env.example`; si falta el archivo real, el deploy crea una copia y aborta para que completes valores reales.
 
 *   **Archivos Más Importantes al Programar:**
     *   Lógica Multi-empresa (Multi-Tenant): `config/tenants.php`
