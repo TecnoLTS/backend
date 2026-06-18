@@ -9,6 +9,22 @@ use Firebase\JWT\Key;
 class Auth {
     private static ?array $payload = null;
 
+    private static function trustedInternalProxyToken(): bool {
+        return (bool)($GLOBALS['trusted_internal_proxy_service_auth'] ?? false);
+    }
+
+    private static function internalProxyPayload(): array {
+        return [
+            'iat' => time(),
+            'sub' => 'service',
+            'email' => 'dashboard-internal@' . (TenantContext::slug() ?: 'tenant') . '.local',
+            'name' => 'Dashboard Internal Proxy',
+            'role' => 'admin',
+            'tenant_id' => TenantContext::id(),
+            'service_auth' => true,
+        ];
+    }
+
     private static function authCookieName(): string {
         return trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
     }
@@ -55,6 +71,10 @@ class Auth {
 
     public static function requireAdmin(): array {
         $payload = self::requireUser();
+        if (!empty($payload['service_auth'])) {
+            self::$payload = $payload;
+            return $payload;
+        }
         $sub = $payload['sub'] ?? null;
         if (!$sub || !is_string($sub)) {
             Response::error('No autorizado', 403, 'AUTH_FORBIDDEN');
@@ -80,6 +100,10 @@ class Auth {
 
     public static function decodeFromRequest(bool $required): ?array {
         if (self::$payload !== null) {
+            return self::$payload;
+        }
+        if (self::trustedInternalProxyToken()) {
+            self::$payload = self::internalProxyPayload();
             return self::$payload;
         }
         $candidates = self::extractTokenCandidates();

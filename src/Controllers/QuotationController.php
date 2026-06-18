@@ -17,9 +17,25 @@ class QuotationController {
     private $quotationPdfLogoPath;
 
     public function __construct() {
-        $this->quotationRepository = new QuotationRepository();
-        $this->orderRepository = new OrderRepository();
+        $this->quotationRepository = null;
+        $this->orderRepository = null;
         $this->quotationPdfLogoPath = null;
+    }
+
+    private function quotationRepository(): QuotationRepository {
+        if (!$this->quotationRepository instanceof QuotationRepository) {
+            $this->quotationRepository = new QuotationRepository();
+        }
+
+        return $this->quotationRepository;
+    }
+
+    private function orderRepository(): OrderRepository {
+        if (!$this->orderRepository instanceof OrderRepository) {
+            $this->orderRepository = new OrderRepository();
+        }
+
+        return $this->orderRepository;
     }
 
     private function getAdminUser(): array {
@@ -306,7 +322,7 @@ class QuotationController {
         $this->getAdminUser();
         try {
             $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 20;
-            Response::json($this->quotationRepository->listRecent($limit));
+            Response::json($this->quotationRepository()->listRecent($limit));
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 400, 'QUOTATION_LIST_FAILED');
         }
@@ -329,7 +345,7 @@ class QuotationController {
             }
 
             $discountCode = $this->normalizeDiscountCodeValue($data['discount_code'] ?? null);
-            $quote = $this->orderRepository->calculateQuote(
+            $quote = $this->orderRepository()->calculateQuote(
                 $items,
                 $data['delivery_method'] ?? 'pickup',
                 $discountCode,
@@ -346,7 +362,7 @@ class QuotationController {
             $validUntil = $createdAt->modify('+7 days');
             $quotationId = 'COT-' . $createdAt->format('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(2)));
 
-            $quotation = $this->quotationRepository->create([
+            $quotation = $this->quotationRepository()->create([
                 'id' => $quotationId,
                 'status' => 'quoted',
                 'customer_name' => $customerName,
@@ -387,7 +403,7 @@ class QuotationController {
     public function convert($id) {
         $user = $this->getAdminUser();
         try {
-            $quotation = $this->quotationRepository->getById((string)$id);
+            $quotation = $this->quotationRepository()->getById((string)$id);
             if (!$quotation) {
                 Response::error('Cotización no encontrada.', 404, 'QUOTATION_NOT_FOUND');
                 return;
@@ -447,8 +463,8 @@ class QuotationController {
                 }, is_array($quotation['items'] ?? null) ? $quotation['items'] : []),
             ];
 
-            $order = $this->orderRepository->create($orderPayload, $this->resolveBaseUrl());
-            $updatedQuotation = $this->quotationRepository->markConverted((string)$quotation['id'], (string)($order['id'] ?? ''));
+            $order = $this->orderRepository()->create($orderPayload, $this->resolveBaseUrl());
+            $updatedQuotation = $this->quotationRepository()->markConverted((string)$quotation['id'], (string)($order['id'] ?? ''));
 
             Response::json([
                 'quotation' => $updatedQuotation,

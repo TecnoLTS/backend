@@ -24,6 +24,16 @@ class ContactController
             return;
         }
 
+        if ($this->spamTrapFilled($body)) {
+            Response::json([
+                'id' => null,
+                'delivered' => false,
+                'confirmationDelivered' => false,
+                'spamFiltered' => true,
+            ], 202, null, 'Recibimos tu mensaje. Nuestro equipo te responderá pronto.');
+            return;
+        }
+
         $name = $this->sanitizeText($body['name'] ?? '', 140);
         $email = strtolower(trim((string)($body['email'] ?? '')));
         $phone = $this->sanitizeText($body['phone'] ?? '', 40);
@@ -47,6 +57,12 @@ class ContactController
             return;
         }
 
+        $clientIp = $this->getClientIp();
+        if ($this->isRateLimited($email, $clientIp)) {
+            Response::error('Recibimos varios mensajes en poco tiempo. Espera unos minutos antes de enviar otro.', 429, 'CONTACT_RATE_LIMITED');
+            return;
+        }
+
         $record = $this->messages->create([
             'name' => $name,
             'email' => $email,
@@ -55,7 +71,7 @@ class ContactController
             'message' => $message,
             'source' => 'contact_page',
             'status' => 'new',
-            'ip_address' => $this->getClientIp(),
+            'ip_address' => $clientIp,
             'user_agent' => trim((string)($_SERVER['HTTP_USER_AGENT'] ?? '')) ?: null,
             'metadata' => [
                 'tenant_domain' => TenantContext::get()['domain'] ?? null,
@@ -140,6 +156,26 @@ class ContactController
         }
 
         return $destination;
+    }
+
+    private function spamTrapFilled(array $body): bool
+    {
+        foreach (['website', 'company', 'url'] as $field) {
+            if (trim((string)($body[$field] ?? '')) !== '') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isRateLimited(string $email, ?string $ipAddress): bool
+    {
+        $emailLimit = max(2, (int)($_ENV['CONTACT_FORM_EMAIL_HOURLY_LIMIT'] ?? 5));
+        $ipLimit = max(5, (int)($_ENV['CONTACT_FORM_IP_HOURLY_LIMIT'] ?? 20));
+
+        return $this->messages->countRecentByEmail($email) >= $emailLimit
+            || $this->messages->countRecentByIp($ipAddress) >= $ipLimit;
     }
 
     private function sanitizeText($value, int $maxLength): string

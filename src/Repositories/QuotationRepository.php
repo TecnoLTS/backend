@@ -19,37 +19,18 @@ class QuotationRepository {
         if (self::$schemaEnsured) {
             return;
         }
-
-        $this->db->exec('
-            CREATE TABLE IF NOT EXISTS "Quotation" (
-                id varchar(64) PRIMARY KEY,
-                tenant_id varchar(120) NOT NULL,
-                status varchar(24) NOT NULL DEFAULT \'quoted\',
-                customer_name text NOT NULL,
-                customer_document_type text NULL,
-                customer_document_number text NULL,
-                customer_email text NULL,
-                customer_phone text NULL,
-                customer_address jsonb NULL,
-                delivery_method text NOT NULL DEFAULT \'pickup\',
-                payment_method text NULL,
-                discount_code text NULL,
-                notes text NULL,
-                items jsonb NOT NULL DEFAULT \'[]\'::jsonb,
-                quote_snapshot jsonb NOT NULL DEFAULT \'{}\'::jsonb,
-                created_by_user_id varchar(64) NULL,
-                converted_order_id varchar(64) NULL,
-                valid_until timestamptz NULL,
-                converted_at timestamptz NULL,
-                created_at timestamptz NOT NULL DEFAULT NOW(),
-                updated_at timestamptz NOT NULL DEFAULT NOW()
-            )
-        ');
-        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_quotation_tenant_created ON "Quotation"(tenant_id, created_at DESC)');
-        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_quotation_tenant_status ON "Quotation"(tenant_id, status, created_at DESC)');
-        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_quotation_tenant_converted_order ON "Quotation"(tenant_id, converted_order_id)');
-
+        $this->assertRequiredTables(['Quotation']);
         self::$schemaEnsured = true;
+    }
+
+    private function assertRequiredTables(array $tables): void {
+        $stmt = $this->db->prepare('SELECT to_regclass(:table_name)');
+        foreach ($tables as $table) {
+            $stmt->execute(['table_name' => 'public."' . $table . '"']);
+            if (!$stmt->fetchColumn()) {
+                throw new \RuntimeException('Schema de cotizaciones no inicializado. Ejecuta el bootstrap o migraciones de base de datos antes de usar el módulo de cotizaciones.');
+            }
+        }
     }
 
     private function getTenantId(): string {

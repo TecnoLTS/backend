@@ -41,6 +41,10 @@ class OrderRepository {
                 o.order_notes,
                 o.shipping_address,
                 o.billing_address,
+                o.payment_details,
+                o.invoice_number,
+                o.invoice_created_at,
+                o.invoice_data,
                 u.name as user_name,
                 u.email as user_email,
                 COUNT(oi.id) AS items_count
@@ -59,6 +63,10 @@ class OrderRepository {
                 o.order_notes,
                 o.shipping_address,
                 o.billing_address,
+                o.payment_details,
+                o.invoice_number,
+                o.invoice_created_at,
+                o.invoice_data,
                 u.name,
                 u.email
             ORDER BY o.created_at DESC
@@ -2019,24 +2027,45 @@ class OrderRepository {
         ];
     }
 
-    public function getReportPeriodSummary(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null): array {
+    private function resolveYearPeriod(?string $selectedYear = null): array {
+        $timezone = new \DateTimeZone('America/Guayaquil');
+        $yearKey = is_string($selectedYear) && preg_match('/^\d{4}$/', $selectedYear) === 1
+            ? $selectedYear
+            : (new \DateTimeImmutable('now', $timezone))->format('Y');
+        $start = new \DateTimeImmutable($yearKey . '-01-01', $timezone);
+        $end = new \DateTimeImmutable($yearKey . '-12-31', $timezone);
+
+        return [
+            'period_key' => $yearKey,
+            'start_date' => $start->format('Y-m-d'),
+            'end_date' => $end->format('Y-m-d'),
+            'end_exclusive' => $end->modify('+1 day')->format('Y-m-d'),
+            'timezone' => 'America/Guayaquil',
+        ];
+    }
+
+    public function getReportPeriodSummary(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null, ?string $selectedYear = null): array {
         $tenantId = $this->getTenantId();
         $timezone = new \DateTimeZone('America/Guayaquil');
         if ($scope === 'historical') {
             $period = [
-                'period_key' => (new \DateTimeImmutable('now', $timezone))->format('Y-m'),
+                'period_key' => 'historical',
                 'start_date' => '2000-01-01',
                 'end_date' => '2099-12-31',
                 'end_exclusive' => '2100-01-01',
                 'timezone' => 'America/Guayaquil',
             ];
+        } elseif ($scope === 'year') {
+            $period = $this->resolveYearPeriod($selectedYear);
         } elseif ($scope === 'week') {
             $period = $this->resolveWeekPeriod($selectedDate);
-        } elseif ($selectedDate) {
-            $date = new \DateTimeImmutable($selectedDate, $timezone);
-            $monthKey = $date->format('Y-m');
+        } elseif ($scope === 'day' || $selectedDate) {
+            $selectedDay = is_string($selectedDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $selectedDate) === 1
+                ? $selectedDate
+                : (new \DateTimeImmutable('today', $timezone))->format('Y-m-d');
+            $date = new \DateTimeImmutable($selectedDay, $timezone);
             $period = [
-                'period_key' => $monthKey,
+                'period_key' => $date->format('Y-m-d'),
                 'start_date' => $date->format('Y-m-d'),
                 'end_date' => $date->format('Y-m-d'),
                 'end_exclusive' => $date->modify('+1 day')->format('Y-m-d'),
@@ -2160,8 +2189,10 @@ class OrderRepository {
                         NULLIF(TRIM(oi.product_id), ''),
                         'name:' || COALESCE(NULLIF(TRIM(oi.product_name), ''), NULLIF(TRIM(p.name), ''), 'Producto sin nombre')
                     ) AS product_group_key,
+                    NULLIF(TRIM(p.legacy_id), '') AS legacy_id,
                     COALESCE(NULLIF(TRIM(oi.product_name), ''), NULLIF(TRIM(p.name), ''), 'Producto sin nombre') AS product_name,
                     COALESCE(NULLIF(TRIM(p.category), ''), 'Sin categoría') AS category,
+                    NULLIF(TRIM(p.attributes->>'sku'), '') AS sku,
                     o.id AS order_id,
                     COALESCE(oi.quantity, 0)::numeric AS quantity,
                     $itemGrossExpr AS line_gross_items,
@@ -2184,8 +2215,10 @@ class OrderRepository {
                 SELECT
                     product_id,
                     product_group_key,
+                    legacy_id,
                     product_name,
                     category,
+                    sku,
                     order_id,
                     quantity,
                     line_gross_items,
@@ -2206,8 +2239,10 @@ class OrderRepository {
             product_rows AS (
                 SELECT
                     COALESCE(NULLIF(MAX(product_id), ''), '') AS product_id,
+                    COALESCE(NULLIF(MAX(legacy_id), ''), '') AS legacy_id,
                     COALESCE(NULLIF(MAX(product_name), ''), 'Producto sin nombre') AS product_name,
                     category,
+                    COALESCE(NULLIF(MAX(sku), ''), '') AS sku,
                     COUNT(DISTINCT order_id)::int AS orders_count,
                     COALESCE(SUM(quantity), 0)::int AS units_sold,
                     COALESCE(SUM(line_gross_items + line_shipping), 0) AS gross_revenue,
@@ -2233,10 +2268,10 @@ class OrderRepository {
                 FROM distributed_lines
                 GROUP BY category
             )
-            SELECT 'product' AS row_type, product_id, product_name, category, orders_count, units_sold, gross_revenue, net_revenue, vat_amount, shipping_amount, cost, order_refs
+            SELECT 'product' AS row_type, product_id, legacy_id, product_name, category, sku, orders_count, units_sold, gross_revenue, net_revenue, vat_amount, shipping_amount, cost, order_refs
             FROM product_rows
             UNION ALL
-            SELECT 'category' AS row_type, NULL AS product_id, NULL AS product_name, category, orders_count, units_sold, gross_revenue, net_revenue, vat_amount, shipping_amount, cost, order_refs
+            SELECT 'category' AS row_type, NULL AS product_id, NULL AS legacy_id, NULL AS product_name, category, NULL AS sku, orders_count, units_sold, gross_revenue, net_revenue, vat_amount, shipping_amount, cost, order_refs
             FROM category_rows
             ORDER BY row_type DESC, net_revenue DESC, units_sold DESC
         ");
@@ -2269,7 +2304,9 @@ class OrderRepository {
             if (($row['row_type'] ?? '') === 'product') {
                 $products[] = array_merge($normalized, [
                     'product_id' => (string)($row['product_id'] ?? ''),
+                    'legacy_id' => trim((string)($row['legacy_id'] ?? '')) ?: null,
                     'product_name' => (string)($row['product_name'] ?? 'Producto sin nombre'),
+                    'sku' => trim((string)($row['sku'] ?? '')),
                 ]);
             } else {
                 $categories[] = $normalized;
@@ -2439,8 +2476,10 @@ class OrderRepository {
             )
             SELECT
                 p.id AS product_id,
+                p.legacy_id AS legacy_id,
                 COALESCE(NULLIF(TRIM(p.name), ''), 'Producto sin nombre') AS product_name,
                 COALESCE(NULLIF(TRIM(p.category), ''), 'Sin categoría') AS category,
+                NULLIF(TRIM(p.attributes->>'sku'), '') AS sku,
                 COALESCE(pm.month_orders_count, 0) AS month_orders_count,
                 COALESCE(pm.month_units_sold, 0) AS month_units_sold,
                 COALESCE(pm.month_gross_revenue, 0) AS month_gross_revenue,
@@ -2515,8 +2554,10 @@ class OrderRepository {
 
             return [
                 'product_id' => (string)($row['product_id'] ?? ''),
+                'legacy_id' => trim((string)($row['legacy_id'] ?? '')) ?: null,
                 'product_name' => (string)($row['product_name'] ?? 'Producto sin nombre'),
                 'category' => (string)($row['category'] ?? 'Sin categoría'),
+                'sku' => trim((string)($row['sku'] ?? '')),
                 'month_orders_count' => (int)($row['month_orders_count'] ?? 0),
                 'month_units_sold' => (int)($row['month_units_sold'] ?? 0),
                 'month_gross_revenue' => round((float)($row['month_gross_revenue'] ?? 0), 2),

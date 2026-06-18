@@ -30,12 +30,15 @@ class DashboardController {
             $selectedDate = isset($_GET['date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$_GET['date']) === 1
                 ? (string)$_GET['date']
                 : null;
-            $scope = isset($_GET['scope']) && in_array($_GET['scope'], ['historical', 'week'], true) ? (string)$_GET['scope'] : null;
+            $selectedYear = isset($_GET['year']) && preg_match('/^\d{4}$/', (string)$_GET['year']) === 1
+                ? (string)$_GET['year']
+                : null;
+            $scope = isset($_GET['scope']) && in_array($_GET['scope'], ['day', 'week', 'year', 'historical'], true) ? (string)$_GET['scope'] : null;
             $includeReportRaw = strtolower(trim((string)($_GET['include_report'] ?? '1')));
             $includeReport = !in_array($includeReportRaw, ['0', 'false', 'no', 'off'], true);
             
-            if ($scope === 'historical' || $scope === 'week' || $selectedDate) {
-                $report = $this->orderRepo->getReportPeriodSummary($selectedMonth, $selectedDate, $scope);
+            if ($scope === 'historical' || $scope === 'week' || $scope === 'year' || $scope === 'day' || $selectedDate) {
+                $report = $this->orderRepo->getReportPeriodSummary($selectedMonth, $selectedDate, $scope, $selectedYear);
                 $salesData = $report['sales'] ?? [];
                 $profitData = $report['profit'] ?? [];
                 $mappedSales = [
@@ -91,8 +94,11 @@ class DashboardController {
             $selectedDate = isset($_GET['date']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$_GET['date']) === 1
                 ? (string)$_GET['date']
                 : null;
-            $scope = isset($_GET['scope']) && in_array($_GET['scope'], ['historical', 'week'], true) ? (string)$_GET['scope'] : null;
-            $report = $this->orderRepo->getReportPeriodSummary($selectedMonth, $selectedDate, $scope);
+            $selectedYear = isset($_GET['year']) && preg_match('/^\d{4}$/', (string)$_GET['year']) === 1
+                ? (string)$_GET['year']
+                : null;
+            $scope = isset($_GET['scope']) && in_array($_GET['scope'], ['day', 'week', 'year', 'historical'], true) ? (string)$_GET['scope'] : null;
+            $report = $this->orderRepo->getReportPeriodSummary($selectedMonth, $selectedDate, $scope, $selectedYear);
             $salesData = $report['sales'] ?? [];
             $profitData = $report['profit'] ?? [];
             $mappedSales = [

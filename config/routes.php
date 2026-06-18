@@ -28,6 +28,7 @@ return [
     ['method' => 'POST', 'path' => '/api/auth/password-reset/confirm', 'handler' => 'AuthController@confirmPasswordReset', 'capability' => 'users.auth'],
     ['method' => 'GET', 'path' => '/api/auth/verify', 'handler' => 'AuthController@verify', 'capability' => 'users.auth'],
     ['method' => 'GET', 'path' => '/api/auth/session', 'handler' => 'AuthController@session', 'capability' => 'users.auth'],
+    ['method' => 'GET', 'path' => '/api/tenant/context', 'handler' => 'TenantController@context', 'capability' => 'users.auth'],
 
     ['method' => 'GET', 'path' => '/api/orders', 'handler' => 'OrderController@index', 'capability' => 'orders.admin'],
     ['method' => 'GET', 'path' => '/api/orders/my-orders', 'handler' => 'OrderController@myOrders', 'capability' => 'orders.checkout'],

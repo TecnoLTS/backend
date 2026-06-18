@@ -66,6 +66,44 @@ class ContactMessageRepository
         return $stmt->fetch() ?: ['id' => $id];
     }
 
+    public function countRecentByEmail(string $email): int
+    {
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM "ContactMessage"
+            WHERE tenant_id = :tenant_id
+              AND LOWER(email) = LOWER(:email)
+              AND created_at >= NOW() - INTERVAL \'1 hour\'
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'email' => $email,
+        ]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function countRecentByIp(?string $ipAddress): int
+    {
+        if ($ipAddress === null || trim($ipAddress) === '') {
+            return 0;
+        }
+
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM "ContactMessage"
+            WHERE tenant_id = :tenant_id
+              AND ip_address = :ip_address
+              AND created_at >= NOW() - INTERVAL \'1 hour\'
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'ip_address' => $ipAddress,
+        ]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
     private function getTenantId(): string
     {
         $tenant = TenantContext::get();

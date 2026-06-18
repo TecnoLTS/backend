@@ -42,6 +42,7 @@ class FacturadorApiService {
                 : $this->defaultInvoicesPath();
             $this->invoiceEndpoint = $resolvedBaseUrl . $this->normalizeInvoicesPath($invoicesPath);
         }
+        $this->assertInvoiceEndpointAllowed($this->invoiceEndpoint);
         $this->timeoutSeconds = max(1, (int)($timeoutSeconds ?? ($_ENV['FACTURADOR_TIMEOUT'] ?? getenv('FACTURADOR_TIMEOUT') ?: 20)));
         $this->apiKey = trim((string)($_ENV['FACTURADOR_API_KEY'] ?? getenv('FACTURADOR_API_KEY') ?: ''));
         if ($this->apiKey === '') {
@@ -222,6 +223,7 @@ class FacturadorApiService {
         }
 
         $invoiceEndpoint = $this->invoiceEndpointForAmbiente($ambiente);
+        $this->assertInvoiceEndpointAllowed($invoiceEndpoint);
         $endpoint = $invoiceEndpoint . '/' . rawurlencode($normalizedAccessKey) . '/cancel-and-reissue';
         $requestBody = json_encode([
             'reason' => trim($reason) !== '' ? trim($reason) : 'Reemision manual solicitada desde panel administrativo.',
@@ -281,7 +283,7 @@ class FacturadorApiService {
 
     private function defaultInvoicesPath(): string
     {
-        $env = strtolower(trim((string)($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production')));
+        $env = $this->appEnvironment();
         if (in_array($env, ['development', 'dev', 'local'], true)) {
             return '/api/test/v1/invoices';
         }
@@ -300,5 +302,28 @@ class FacturadorApiService {
         }
 
         return $this->invoiceEndpoint;
+    }
+
+    private function appEnvironment(): string
+    {
+        $env = strtolower(trim((string)($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'production')));
+        return $env !== '' ? $env : 'production';
+    }
+
+    private function assertInvoiceEndpointAllowed(string $endpoint): void
+    {
+        $env = $this->appEnvironment();
+        if (in_array($env, ['production', 'prod'], true)) {
+            return;
+        }
+
+        if (preg_match('#/api/production/v1/invoices(?:/|$)#', $endpoint) !== 1) {
+            return;
+        }
+
+        throw new \RuntimeException(sprintf(
+            'Uso de Facturador production bloqueado en APP_ENV=%s. En desarrollo/QA use /api/test/v1/invoices.',
+            $env
+        ));
     }
 }

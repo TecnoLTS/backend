@@ -547,7 +547,10 @@ class ProductController {
             trim((string)($effectiveProduct['variantGroupKey'] ?? '')) !== '' ||
             trim((string)($effectiveAttributes['variantLabel'] ?? '')) !== '' ||
             trim((string)($effectiveAttributes['variantBaseName'] ?? '')) !== '' ||
-            trim((string)($effectiveAttributes['variantGroupKey'] ?? '')) !== '';
+            trim((string)($effectiveAttributes['variantGroupKey'] ?? '')) !== '' ||
+            trim((string)($effectiveAttributes['catalogDisplayMode'] ?? '')) === 'grouped' ||
+            trim((string)($effectiveAttributes['variantDefinitionField'] ?? '')) !== '' ||
+            trim((string)($effectiveAttributes['variantAxis'] ?? '')) !== '';
 
         if (!$hasVariantContext) {
             return;
@@ -561,7 +564,7 @@ class ProductController {
             );
             $message = match ($normalizedType) {
                 'cuidado' => 'Selecciona o crea el peso/contenido, la presentación, la dosis o el rango recomendado del producto.',
-                'Alimento' => 'Selecciona o crea el peso neto o contenido del alimento.',
+                'Alimento' => 'Selecciona o crea el campo que define la variante del alimento: peso, contenido, empaque, sabor o etapa.',
                 default => 'Selecciona o crea la talla, color, presentación o medida que diferencia la variante.',
             };
             Response::error($message, 400, 'PRODUCT_VARIANT_LABEL_REQUIRED');

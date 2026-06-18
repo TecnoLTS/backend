@@ -134,6 +134,7 @@ if ($providedInternalProxyToken !== '') {
         }
     }
 }
+$GLOBALS['trusted_internal_proxy_token'] = $hasTrustedInternalProxyToken;
 $appEnv = strtolower((string)($_ENV['APP_ENV'] ?? 'production'));
 $proxyHeaderFlagEnabled = in_array(strtolower((string)($_ENV['TRUST_PROXY_HEADERS'] ?? 'false')), ['1', 'true', 'yes', 'on'], true);
 $isNonProduction = in_array($appEnv, ['development', 'dev', 'local'], true);
@@ -163,6 +164,20 @@ foreach ($hostCandidates as $candidate) {
 if ($host && strpos($host, ',') !== false) {
     $host = trim(explode(',', $host)[0]);
 }
+$normalizedResolvedHost = $host ? preg_replace('/:\d+$/', '', strtolower($host)) : null;
+$serviceAuthLocalHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
+$isInternalServiceHost = is_string($normalizedResolvedHost) && (
+    $normalizedResolvedHost === 'backend-web'
+    || str_ends_with($normalizedResolvedHost, '-backend-web')
+    || str_ends_with($normalizedResolvedHost, '.localhost')
+    || str_ends_with($normalizedResolvedHost, '.local')
+);
+$GLOBALS['trusted_internal_proxy_service_auth'] = $hasTrustedInternalProxyToken
+    && is_string($normalizedResolvedHost)
+    && (
+        in_array($normalizedResolvedHost, $serviceAuthLocalHosts, true)
+        || $isInternalServiceHost
+    );
 $tenant = TenantResolver::resolveFromHost($tenants, $host);
 if (!$tenant) {
     $localHosts = ['localhost', '127.0.0.1'];
@@ -404,7 +419,8 @@ $hasAuthCookie = trim((string)($_COOKIE[$authCookieName] ?? '')) !== '';
 $hasBearerAuth = preg_match('/Bearer\s+\S+/', (string)($_SERVER['HTTP_AUTHORIZATION'] ?? '')) === 1;
 $shouldEnforceCsrf = $isMutatingApiRequest
     && !in_array($uri, $csrfExemptPaths, true)
-    && ($hasAuthCookie || $uri === '/api/auth/logout');
+    && ($hasAuthCookie || $uri === '/api/auth/logout')
+    && !$hasTrustedInternalProxyToken;
 
 if ($shouldEnforceCsrf) {
     $secFetchSite = strtolower(trim((string)($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));

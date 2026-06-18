@@ -327,15 +327,32 @@ class AuthController {
         return hash('sha256', $token);
     }
 
-    private function buildPasswordResetUrl(string $token): string {
+    private function normalizePasswordResetPath(mixed $path): string {
+        $candidate = is_string($path) ? trim($path) : '';
+        if ($candidate === '') {
+            return '/reset-password';
+        }
+
+        $parsedPath = parse_url($candidate, PHP_URL_PATH);
+        $normalized = '/' . ltrim(is_string($parsedPath) ? $parsedPath : $candidate, '/');
+        $normalized = rtrim($normalized, '/') ?: '/reset-password';
+
+        if ($normalized === '/dashboard/reset-password') {
+            return $normalized;
+        }
+
+        return '/reset-password';
+    }
+
+    private function buildPasswordResetUrl(string $token, ?string $resetPath = null): string {
         $baseUrl = TenantContext::publicBaseUrl()
             ?? TenantContext::appUrl()
             ?? ($_ENV['NEXT_PUBLIC_BASE_URL'] ?? ($_ENV['APP_URL'] ?? $this->getRequestBaseUrl()));
-        return rtrim($baseUrl, '/') . '/reset-password?token=' . urlencode($token);
+        return rtrim($baseUrl, '/') . $this->normalizePasswordResetPath($resetPath) . '?token=' . urlencode($token);
     }
 
-    private function sendPasswordResetEmail(string $email, string $name, string $token): bool {
-        $resetUrl = $this->buildPasswordResetUrl($token);
+    private function sendPasswordResetEmail(string $email, string $name, string $token, ?string $resetPath = null): bool {
+        $resetUrl = $this->buildPasswordResetUrl($token, $resetPath);
         $ttlMinutes = $this->passwordResetTtlMinutes();
         $safeName = trim($name) !== '' ? trim($name) : 'Usuario';
         $subject = 'Restablece tu contraseña';
@@ -553,6 +570,18 @@ class AuthController {
 
     public function session() {
         $payload = Auth::requireUser();
+        if (!empty($payload['service_auth'])) {
+            Response::noStore();
+            Response::json([
+                'user' => [
+                    'id' => 'service',
+                    'email' => (string)($payload['email'] ?? 'dashboard-internal@service.local'),
+                    'name' => (string)($payload['name'] ?? 'Dashboard Internal Proxy'),
+                    'role' => 'admin',
+                ],
+            ]);
+            return;
+        }
         $user = $this->userRepository->getById((string)($payload['sub'] ?? ''));
         if (!$user) {
             Response::clearAuthCookie();
@@ -814,6 +843,7 @@ class AuthController {
     public function requestPasswordReset() {
         $data = json_decode(file_get_contents('php://input'), true);
         $email = strtolower(trim((string)($data['email'] ?? '')));
+        $resetPath = $this->normalizePasswordResetPath($data['resetPath'] ?? $data['reset_path'] ?? null);
 
         if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             Response::error('Ingresa un correo electrónico válido', 400, 'AUTH_PASSWORD_RESET_EMAIL_INVALID');
@@ -851,9 +881,10 @@ class AuthController {
                 $this->getUserAgent()
             );
 
-            if ($this->sendPasswordResetEmail($email, $user['name'] ?? 'Usuario', $token)) {
+            if ($this->sendPasswordResetEmail($email, $user['name'] ?? 'Usuario', $token, $resetPath)) {
                 $this->recordAuthEvent($user, 'password_reset_email_sent', 'success', [
                     'delivery' => 'email',
+                    'reset_path' => $resetPath,
                 ]);
             } else {
                 $this->recordAuthEvent($user, 'password_reset_email_failed', 'failure', [
