@@ -191,6 +191,65 @@ function assertCompatibilityTables(PDO $pdo, string $moduleKey, array $ownerMap)
     }
 }
 
+function assertForeignServerAccess(PDO $pdo, string $moduleKey): void
+{
+    if ($moduleKey === 'billing') {
+        return;
+    }
+
+    $stmt = $pdo->query(
+        "SELECT srvname
+         FROM pg_foreign_server
+         WHERE NOT has_server_privilege(current_user, srvname, 'USAGE')
+         ORDER BY srvname"
+    );
+    $missingUsage = array_map(static fn($value): string => (string)$value, $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+    if ($missingUsage !== []) {
+        fail($moduleKey . ' missing USAGE on foreign servers: ' . implode(', ', $missingUsage));
+    }
+
+    $stmt = $pdo->query(
+        "SELECT s.srvname
+         FROM pg_foreign_server s
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM pg_user_mappings um
+             WHERE um.srvid = s.oid
+               AND um.umuser = current_user::regrole
+         )
+         ORDER BY s.srvname"
+    );
+    $missingMappings = array_map(static fn($value): string => (string)$value, $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+    if ($missingMappings !== []) {
+        fail($moduleKey . ' missing user mappings for current_user on foreign servers: ' . implode(', ', $missingMappings));
+    }
+}
+
+function assertCompatibilityTablesReadable(PDO $pdo, string $moduleKey, array $ownerMap): void
+{
+    if ($moduleKey === 'billing') {
+        return;
+    }
+
+    foreach (FDW_COMPATIBILITY_TABLES as $table) {
+        $owner = $ownerMap[$table] ?? null;
+        if ($owner === null || $owner === $moduleKey) {
+            continue;
+        }
+
+        try {
+            $pdo->query('SELECT 1 FROM public.' . quoteIdentifier($table) . ' LIMIT 1')->fetchColumn();
+        } catch (Throwable $e) {
+            fail(sprintf('%s compatibility table %s is not readable: %s', $moduleKey, $table, $e->getMessage()));
+        }
+    }
+}
+
+function quoteIdentifier(string $identifier): string
+{
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
 function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $ownerMap): void
 {
     $stmt = $pdo->query(
@@ -245,6 +304,8 @@ foreach (MODULE_CONNECTIONS as $moduleKey => $expectation) {
     $pdo = Database::getModuleInstance($moduleKey);
     assertOwnerTables($pdo, $ownerModule, MODULE_OWNER_TABLES[$ownerModule]);
     assertCompatibilityTables($pdo, $ownerModule, $ownerMap);
+    assertForeignServerAccess($pdo, $ownerModule);
+    assertCompatibilityTablesReadable($pdo, $ownerModule, $ownerMap);
     assertNoCrossDomainForeignKeys($pdo, $ownerModule, $ownerMap);
     $checkedOwners[$ownerModule] = true;
 }

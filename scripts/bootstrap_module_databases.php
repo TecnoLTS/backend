@@ -203,6 +203,36 @@ function createFdwServer(PDO $pdo, string $serverName, array $targetConfig): voi
         $pdo->quote((string)$targetConfig['username']),
         $pdo->quote((string)$targetConfig['password'])
     ));
+
+    $runtimeRole = trim((string)($targetConfig['username'] ?? ''));
+    if ($runtimeRole !== '') {
+        grantFdwServerAccessForRole($pdo, $serverName, $runtimeRole, $targetConfig);
+    }
+}
+
+function grantFdwServerAccessForRole(PDO $pdo, string $serverName, string $roleName, array $targetConfig): void {
+    $roleExists = $pdo
+        ->query('SELECT to_regrole(' . $pdo->quote($roleName) . ') IS NOT NULL')
+        ->fetchColumn();
+    if (!$roleExists) {
+        return;
+    }
+
+    $quotedServer = quoteIdent($serverName);
+    $quotedRole = quoteIdent($roleName);
+    $pdo->exec(sprintf('GRANT USAGE ON FOREIGN SERVER %s TO %s', $quotedServer, $quotedRole));
+    $pdo->exec(sprintf(
+        'DROP USER MAPPING IF EXISTS FOR %s SERVER %s',
+        $quotedRole,
+        $quotedServer
+    ));
+    $pdo->exec(sprintf(
+        'CREATE USER MAPPING FOR %s SERVER %s OPTIONS (user %s, password %s)',
+        $quotedRole,
+        $quotedServer,
+        $pdo->quote((string)$targetConfig['username']),
+        $pdo->quote((string)$targetConfig['password'])
+    ));
 }
 
 function importForeignTables(PDO $pdo, string $serverName, string $schema, array $tables): void {

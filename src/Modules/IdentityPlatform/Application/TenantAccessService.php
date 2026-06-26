@@ -39,6 +39,16 @@ class TenantAccessService {
         'guest',
         'shopper',
     ];
+    private const DEFAULT_ENABLED_MODULES = [
+        'dashboard',
+        'ecommerce',
+        'products',
+        'inventory',
+        'users',
+        'tenant-admin',
+        'invoicing',
+        'billing-sri',
+    ];
 
     private SettingsRepository $settingsRepository;
     private IdentityAccessRepository $identityAccessRepository;
@@ -60,9 +70,9 @@ class TenantAccessService {
     }
 
     public function enabledModulesForTenant(array $tenant): array {
-        $configured = $tenant['enabled_modules'] ?? ['dashboard', 'ecommerce', 'tenant-admin'];
+        $configured = $tenant['enabled_modules'] ?? self::DEFAULT_ENABLED_MODULES;
         if (!is_array($configured)) {
-            $configured = ['dashboard', 'ecommerce', 'tenant-admin'];
+            $configured = self::DEFAULT_ENABLED_MODULES;
         }
 
         $configuredModules = $this->normalizeKnownModuleList($configured);
