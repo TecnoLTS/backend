@@ -10,7 +10,8 @@ use App\Core\Response;
 use App\Core\Auth;
 use App\Core\TenantContext;
 use App\Exceptions\FinancialPeriodClosedException;
-use App\Services\FacturadorApiService;
+use App\Modules\Billing\Application\BillingGateway;
+use App\Modules\Billing\Infrastructure\BillingGatewayFactory;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 
@@ -72,6 +73,10 @@ class OrderController {
         $this->authSecurityRepository = new AuthSecurityRepository();
     }
 
+    private function billingGateway(): BillingGateway {
+        return BillingGatewayFactory::create();
+    }
+
     private function authenticate() {
         return Auth::requireUser();
     }
@@ -80,15 +85,15 @@ class OrderController {
         return Auth::optionalUser();
     }
 
-    private function shouldEmitFacturadorInvoiceForStatus(?string $status): bool
+    private function shouldEmitBillingInvoiceForStatus(?string $status): bool
     {
         $normalized = strtolower(trim((string)$status));
         return in_array($normalized, ['completed', 'delivered'], true);
     }
 
-    private function dispatchFacturadorInvoiceAfterResponse(array $order): void
+    private function dispatchBillingInvoiceAfterResponse(array $order): void
     {
-        if (!$order || empty($order['id']) || !$this->shouldEmitFacturadorInvoiceForStatus($order['status'] ?? null)) {
+        if (!$order || empty($order['id']) || !$this->shouldEmitBillingInvoiceForStatus($order['status'] ?? null)) {
             return;
         }
 
@@ -98,10 +103,10 @@ class OrderController {
         }
 
         try {
-            $this->emitInvoiceWithFacturador($order);
+            $this->emitInvoiceWithBilling($order);
         } catch (\Throwable $e) {
             error_log(sprintf(
-                '[FACTURADOR_DEFERRED_DISPATCH_FAILED] orden=%s error=%s',
+                '[BILLING_DEFERRED_DISPATCH_FAILED] orden=%s error=%s',
                 (string)($order['id'] ?? 'N/A'),
                 $e->getMessage()
             ));
@@ -202,13 +207,13 @@ class OrderController {
                     return;
                 }
             }
-            if ($this->shouldEmitFacturadorInvoiceForStatus($newStatus)) {
+            if ($this->shouldEmitBillingInvoiceForStatus($newStatus)) {
                 $this->assertFinalConsumerAllowedForOrder($order, (float)($order['total'] ?? 0));
             }
 
             $updated = $this->orderRepository->updateStatus($id, $newStatus);
             Response::json($updated);
-            $this->dispatchFacturadorInvoiceAfterResponse($updated ?: []);
+            $this->dispatchBillingInvoiceAfterResponse($updated ?: []);
         } catch (FinancialPeriodClosedException $e) {
             Response::error($e->getMessage(), 409, 'FINANCIAL_PERIOD_CLOSED', [
                 'period_key' => $e->getPeriodKey(),
@@ -341,14 +346,14 @@ class OrderController {
         return is_array($decoded) ? $decoded : [];
     }
 
-    private function emitInvoiceWithFacturador(array $order): void {
+    private function emitInvoiceWithBilling(array $order): void {
         if (empty($order['id'])) {
             return;
         }
 
         try {
             $orderId = (string)$order['id'];
-            $currentBilling = $this->currentFacturadorBillingMetadata($order);
+            $currentBilling = $this->currentBillingMetadata($order);
             $currentStatus = strtolower(trim((string)($currentBilling['status'] ?? '')));
             $currentAccessKey = trim((string)($currentBilling['access_key'] ?? ''));
             if (filter_var($currentBilling['operational_error'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
@@ -358,27 +363,27 @@ class OrderController {
                 return;
             }
 
-            $facturador = new FacturadorApiService();
-            $existingInvoice = $facturador->findRideBySourceReference($orderId);
+            $billing = $this->billingGateway();
+            $existingInvoice = $billing->findRideBySourceReference($orderId);
             if (is_array($existingInvoice)) {
-                $this->syncFacturadorBillingMetadata(
+                $this->syncBillingMetadata(
                     $orderId,
                     $existingInvoice,
                     trim((string)($existingInvoice['replaced_access_key'] ?? '')) !== '' ? 'reissued' : 'issued'
                 );
 
                 error_log(sprintf(
-                    '[FACTURADOR] Factura existente sincronizada para orden %s. Clave=%s',
+                    '[BILLING] Factura existente sincronizada para orden %s. Clave=%s',
                     $orderId,
                     $existingInvoice['access_key'] ?? 'N/A'
                 ));
                 return;
             }
 
-            $payload = $this->buildFacturadorPayload($order);
-            $invoice = $facturador->emitInvoice($payload);
+            $payload = $this->buildBillingPayload($order);
+            $invoice = $billing->emitInvoice($payload);
 
-            $this->syncFacturadorBillingMetadata(
+            $this->syncBillingMetadata(
                 $orderId,
                 $invoice,
                 'issued',
@@ -387,27 +392,27 @@ class OrderController {
             );
 
             error_log(sprintf(
-                '[FACTURADOR] Factura emitida para orden %s. Clave=%s',
+                '[BILLING] Factura emitida para orden %s. Clave=%s',
                 $orderId,
                 $invoice['access_key'] ?? 'N/A'
             ));
         } catch (\Throwable $e) {
             $this->orderRepository->updateBillingMetadata((string)$order['id'], [
-                'provider' => 'facturador',
+                'provider' => 'billing-sri',
                 'status' => 'failed',
                 'last_attempt_at' => date('c'),
                 'last_error' => $e->getMessage(),
             ]);
 
             error_log(sprintf(
-                '[FACTURADOR] Error facturando orden %s: %s',
+                '[BILLING] Error facturando orden %s: %s',
                 $order['id'],
                 $e->getMessage()
             ));
         }
     }
 
-    private function currentFacturadorBillingMetadata(array $order): array {
+    private function currentBillingMetadata(array $order): array {
         $invoiceData = $order['invoice_data'] ?? null;
         if (is_string($invoiceData) && trim($invoiceData) !== '') {
             $decoded = json_decode($invoiceData, true);
@@ -420,7 +425,7 @@ class OrderController {
         return is_array($invoiceData['billing'] ?? null) ? $invoiceData['billing'] : [];
     }
 
-    private function syncFacturadorBillingMetadata(
+    private function syncBillingMetadata(
         string $orderId,
         array $invoice,
         string $billingStatus,
@@ -428,11 +433,11 @@ class OrderController {
         ?string $orderCreatedAt = null
     ): void {
         $metadata = [
-            'provider' => 'facturador',
+            'provider' => 'billing-sri',
             'status' => $billingStatus,
             'invoice_status' => $invoice['sri_status'] ?? ($invoice['status'] ?? null),
             'access_key' => $invoice['access_key'] ?? null,
-            'sequential' => $this->formatFacturadorSequential($invoice),
+            'sequential' => $this->formatBillingSequential($invoice),
             'issue_date' => $invoice['issue_date'] ?? null,
             'total' => $invoice['total'] ?? ($invoice['total_with_tax'] ?? null),
             'authorization_number' => $invoice['authorization_number'] ?? null,
@@ -466,7 +471,7 @@ class OrderController {
         $this->orderRepository->updateBillingMetadata($orderId, $metadata);
     }
 
-    private function formatFacturadorSequential(array $invoice): ?string {
+    private function formatBillingSequential(array $invoice): ?string {
         $existing = trim((string)($invoice['sequential'] ?? ''));
         if ($existing !== '' && str_contains($existing, '-')) {
             return $existing;
@@ -514,12 +519,12 @@ class OrderController {
         return !empty($user['sub']) ? (string)$user['sub'] : null;
     }
 
-    private function buildFacturadorPayload(array $order): array {
+    private function buildBillingPayload(array $order): array {
         $billingAddress = $this->decodeAddress($order['billing_address'] ?? null);
         $shippingAddress = $this->decodeAddress($order['shipping_address'] ?? null);
         $customerAddressData = $billingAddress ?: $shippingAddress;
 
-        $customer = $this->resolveFacturadorCustomer(
+        $customer = $this->resolveBillingCustomer(
             $customerAddressData,
             trim((string)($order['user_name'] ?? '')),
             (float)($order['total'] ?? 0)
@@ -576,14 +581,14 @@ class OrderController {
             $items[] = [
                 'code' => (string)($item['product_id'] ?? ('ITEM-' . ($index + 1))),
                 'description' => (string)($item['product_name'] ?? 'Producto'),
-                'quantity' => $this->facturadorDecimal($quantity, 6),
-                'unit_price' => $this->facturadorDecimal($originalNetUnitPrice, 6),
-                'discount' => $this->facturadorDecimal($discountNetAmount, 6),
-                'line_subtotal_net' => $this->facturadorDecimal($lineSubtotalNet, 6),
-                'tax_rate' => $this->facturadorDecimal($itemTaxRate, 2),
+                'quantity' => $this->billingDecimal($quantity, 6),
+                'unit_price' => $this->billingDecimal($originalNetUnitPrice, 6),
+                'discount' => $this->billingDecimal($discountNetAmount, 6),
+                'line_subtotal_net' => $this->billingDecimal($lineSubtotalNet, 6),
+                'tax_rate' => $this->billingDecimal($itemTaxRate, 2),
                 'tax_code' => '2',
                 'tax_percentage_code' => $this->resolveSriVatPercentageCode($itemTaxRate),
-                'tax_amount' => $this->facturadorDecimal($taxAmount, 6),
+                'tax_amount' => $this->billingDecimal($taxAmount, 6),
             ];
         }
 
@@ -597,22 +602,26 @@ class OrderController {
             $items[] = [
                 'code' => 'ENVIO',
                 'description' => 'Servicio de envio',
-                'quantity' => $this->facturadorDecimal(1, 6),
-                'unit_price' => $this->facturadorDecimal($shippingBase, 6),
-                'discount' => $this->facturadorDecimal(0, 6),
-                'line_subtotal_net' => $this->facturadorDecimal($shippingBase, 6),
-                'tax_rate' => $this->facturadorDecimal($shippingTaxRate, 2),
+                'quantity' => $this->billingDecimal(1, 6),
+                'unit_price' => $this->billingDecimal($shippingBase, 6),
+                'discount' => $this->billingDecimal(0, 6),
+                'line_subtotal_net' => $this->billingDecimal($shippingBase, 6),
+                'tax_rate' => $this->billingDecimal($shippingTaxRate, 2),
                 'tax_code' => '2',
                 'tax_percentage_code' => $this->resolveSriVatPercentageCode($shippingTaxRate),
-                'tax_amount' => $this->facturadorDecimal($shippingTaxAmount, 6),
+                'tax_amount' => $this->billingDecimal($shippingTaxAmount, 6),
             ];
         }
 
         $paymentMethod = $this->resolveSriPaymentMethod((string)($order['payment_method'] ?? ''));
         $orderCreatedAt = trim((string)($order['created_at'] ?? ''));
         $accountingDate = $this->resolveOrderAccountingDate($orderCreatedAt);
+        $billingMetadata = $this->decodeAddress($order['billing_metadata'] ?? $order['billing'] ?? null);
+        $branchId = (int)($order['billing_branch_id'] ?? $order['branch_id'] ?? $billingMetadata['branch_id'] ?? 0);
+        $branchCode = trim((string)($order['billing_branch_code'] ?? $billingMetadata['branch_code'] ?? ''));
+        $emissionPoint = trim((string)($order['billing_emission_point'] ?? $billingMetadata['emission_point'] ?? ''));
 
-        return [
+        $payload = [
             'customer_identification' => $customerIdentification,
             'customer_name' => $customerName,
             'customer_address' => $customerAddress,
@@ -632,13 +641,23 @@ class OrderController {
                 'identification_fallback_reason' => $customer['fallback_reason'],
             ], static fn($value) => $value !== null && $value !== ''),
         ];
+        if ($branchId > 0) {
+            $payload['branch_id'] = $branchId;
+        } elseif ($branchCode !== '' || $emissionPoint !== '') {
+            $payload['branch'] = [
+                'code' => $branchCode,
+                'emission_point' => $emissionPoint,
+            ];
+        }
+
+        return $payload;
     }
 
     private function assertFinalConsumerAllowedForOrder(array $order, float $orderTotal): void
     {
         $billingAddress = $this->decodeAddress($order['billing_address'] ?? null);
         $shippingAddress = $this->decodeAddress($order['shipping_address'] ?? null);
-        $this->resolveFacturadorCustomer(
+        $this->resolveBillingCustomer(
             $billingAddress ?: $shippingAddress,
             trim((string)($order['user_name'] ?? '')),
             $orderTotal
@@ -649,10 +668,10 @@ class OrderController {
     {
         $billingAddress = $this->decodeAddress($data['billing_address'] ?? null);
         $shippingAddress = $this->decodeAddress($data['shipping_address'] ?? null);
-        $this->resolveFacturadorCustomer($billingAddress ?: $shippingAddress, '', $orderTotal);
+        $this->resolveBillingCustomer($billingAddress ?: $shippingAddress, '', $orderTotal);
     }
 
-    private function resolveFacturadorCustomer(array $customerAddressData, string $fallbackName, float $orderTotal): array
+    private function resolveBillingCustomer(array $customerAddressData, string $fallbackName, float $orderTotal): array
     {
         $customerName = trim(($customerAddressData['firstName'] ?? '') . ' ' . ($customerAddressData['lastName'] ?? ''));
         if ($customerName === '') {
@@ -680,7 +699,7 @@ class OrderController {
                 : null;
         } elseif ($normalizedIdentification === self::FINAL_CONSUMER_IDENTIFICATION) {
             $identification = self::FINAL_CONSUMER_IDENTIFICATION;
-        } elseif (!$this->isValidFacturadorCustomerIdentification($normalizedIdentification)) {
+        } elseif (!$this->isValidBillingCustomerIdentification($normalizedIdentification)) {
             $identification = self::FINAL_CONSUMER_IDENTIFICATION;
             $fallbackReason = 'invalid_customer_identification';
         }
@@ -737,7 +756,7 @@ class OrderController {
         return is_numeric($value) ? (float)$value : null;
     }
 
-    private function facturadorDecimal($value, int $decimals): string {
+    private function billingDecimal($value, int $decimals): string {
         $number = is_numeric($value) ? (float)$value : 0.0;
         if (abs($number) < 0.0000005) {
             $number = 0.0;
@@ -799,7 +818,7 @@ class OrderController {
         }
     }
 
-    private function isValidFacturadorCustomerIdentification(string $identification): bool {
+    private function isValidBillingCustomerIdentification(string $identification): bool {
         $value = $this->digitsOnly($identification);
         if ($value === '') {
             return false;
@@ -1335,7 +1354,7 @@ class OrderController {
             $order = $this->orderRepository->create($data, $baseUrl);
 
             Response::json($order, 201);
-            $this->dispatchFacturadorInvoiceAfterResponse($order ?: []);
+            $this->dispatchBillingInvoiceAfterResponse($order ?: []);
         } catch (\DomainException $e) {
             Response::error($e->getMessage(), 409, 'FINAL_CONSUMER_LIMIT_EXCEEDED');
         } catch (\Exception $e) {

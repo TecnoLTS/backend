@@ -12,6 +12,12 @@ db/backup.sql
 db/backups/
 logs/
 storage/logs/
+storage/billing/cache/
+storage/billing/certs/
+storage/billing/log/
+storage/billing/logs/
+storage/billing/pdf/
+storage/billing/xml/
 storage/imports/
 storage/repairs/
 storage/sri/certs/*.p12

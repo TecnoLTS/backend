@@ -4,6 +4,7 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Domain\CommerceDomain;
 use App\Repositories\FinancialPeriodRepository;
 use PDO;
 
@@ -23,7 +24,7 @@ class OrderRepository {
     private $shippingTaxRateCache = null;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(CommerceDomain::KEY);
         $this->discountRepository = new DiscountRepository($this->db);
     }
 

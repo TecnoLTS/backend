@@ -20,6 +20,11 @@ storage/sri/xml/*.xml
 storage/sri/signed/*.xml
 storage/sri/authorized/*.xml
 storage/sri/ride/*.pdf
+storage/billing/certs/*.p12
+storage/billing/certs/*.key
+storage/billing/xml/**/*.xml
+storage/billing/pdf/**/*.pdf
 
 # Keep directory structure
 !storage/sri/**/.gitkeep
+!storage/billing/**/.gitkeep

@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 1,
+  "key": "platform-core",
+  "name": "Paramascotas Core API",
+  "kind": "service",
+  "repoPath": "paramascotasec-backend",
+  "description": "API principal multi-tenant para ecommerce, administracion, RBAC, catalogo, pedidos, reportes y coordinacion operativa del tenant.",
+  "lifecycle": {
+    "status": "active",
+    "currentTopology": "shared-backend",
+    "targetTopology": "extractable-services"
+  },
+  "modes": {
+    "standalone": {
+      "supported": true,
+      "summary": "Puede operar por su cuenta como runtime PHP/Nginx con tenant resolution, auth, APIs admin y dominios internos sobre bases logicas dedicadas.",
+      "requires": [
+        "PostgreSQL unico con bases logicas por dominio",
+        "Configuracion de tenants",
+        "Variables de JWT, CSRF y proxy interno"
+      ],
+      "operationFlow": [
+        "Expone su API multi-tenant y resuelve tenant, autenticacion y permisos desde el propio runtime.",
+        "Aplica reglas de negocio de ecommerce, administracion, RBAC y operaciones generales.",
+        "Lee y escribe cada bounded context en su base logica dedicada mediante ConnectionRegistry.",
+        "Publica contratos HTTP para el sitio publico, el Dashboard y otros consumidores autorizados."
+      ],
+      "sourceOfTruth": "owner-runtime",
+      "writePolicy": "owner-api-only",
+      "integrationStyle": "native-runtime"
+    },
+    "orchestrated": {
+      "supported": true,
+      "summary": "Sirve como backend operativo unico para Dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas dedicadas.",
+      "requires": [
+        "Dashboard como orquestador visual",
+        "Gateway/APISIX para contrato publico",
+        "module-registry.json del Dashboard"
+      ],
+      "operationFlow": [
+        "El Dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
+        "La UI consume el Core API por proxy Dashboard o por el contrato publico del Gateway.",
+        "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a su base logica dedicada.",
+        "El Dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
+      ],
+      "sourceOfTruth": "owner-runtime",
+      "writePolicy": "owner-api-only",
+      "integrationStyle": "dashboard-proxy-http-contract",
+      "orchestratorKey": "dashboard",
+      "registryFile": "Dashboard/public/module-registry.json"
+    }
+  },
+  "http": {
+    "enabled": true,
+    "healthEndpoint": "/api/health",
+    "manifestEndpoint": "/module.json",
+    "runtimeBaseUrlExample": "http://paramascotasec-backend-web:8080",
+    "orchestratedEntryPoints": [
+      {
+        "key": "public-tenant-api",
+        "path": "/${PUBLIC_TENANT_SLUG}/${PUBLIC_API_SERVICE_SEGMENT}",
+        "notes": "Contrato publico APISIX para ecommerce, administracion y operaciones tenant-aware."
+      },
+      {
+        "key": "dashboard-api-proxy",
+        "path": "/dashboard/api",
+        "notes": "Consumo del Dashboard mediante su proxy interno hacia la API principal."
+      },
+      {
+        "key": "public-billing-api",
+        "path": "/${PUBLIC_TENANT_SLUG}/${PUBLIC_BILLING_SERVICE_SEGMENT}/${PUBLIC_BILLING_ENV_SEGMENT}/v1",
+        "notes": "Contrato publico fiscal APISIX; reescribe hacia /api/{test|production}/v1 dentro de platform-core/Billing."
+      }
+    ]
+  },
+  "dataOwnership": {
+    "mode": "owns-database",
+    "storesBusinessData": true,
+    "databaseKey": "identity_platform",
+    "additionalDatabaseKeys": [
+      "catalog_inventory",
+      "commerce_orders",
+      "billing_service",
+      "reporting_finance",
+      "mailer_service"
+    ],
+    "boundedContexts": [
+      {
+        "key": "identity-platform",
+        "summary": "Tenants, usuarios, roles, permisos, sesiones, APIs y rutas de recuperacion superadmin.",
+        "extractionStatus": "dedicated-logical-db"
+      },
+      {
+        "key": "catalog-inventory",
+        "summary": "Catalogo, referencias, compras, stock, inteligencia y reglas de inventario.",
+        "extractionStatus": "dedicated-logical-db"
+      },
+      {
+        "key": "commerce-orders",
+        "summary": "Checkout, cotizaciones, pedidos, envios, descuentos, precios y ventas.",
+        "extractionStatus": "dedicated-logical-db"
+      },
+      {
+        "key": "billing-sri",
+        "summary": "Frontera Billing dentro del Core API para emitir, consultar y recuperar XML/RIDE.",
+        "extractionStatus": "dedicated-logical-db"
+      },
+      {
+        "key": "reporting-finance",
+        "summary": "Reportes, balances, gastos y analitica financiera/operativa por tenant.",
+        "extractionStatus": "dedicated-logical-db"
+      },
+      {
+        "key": "mailer-service",
+        "summary": "Mensajes de contacto, outbox y auditoria de entregas de correo del backend.",
+        "extractionStatus": "dedicated-logical-db-internal"
+      }
+    ],
+    "rules": [
+      "No crear foreign keys entre bases de datos de modulos distintos.",
+      "Usar IDs estables, snapshots o contratos API para relaciones entre modulos.",
+      "Las tablas foraneas FDW son una capa de compatibilidad para consultas existentes, no ownership funcional.",
+      "Billing SRI corre dentro del Core API y usa la base logica billing_service como store fiscal.",
+      "Mailer corre dentro del Core API y usa la base logica mailer_service para mensajes, outbox y logs."
+    ],
+    "identityAccessModel": {
+      "owner": "identity-platform",
+      "userScope": "tenant",
+      "moduleScope": "permission-grants",
+      "rules": [
+        "Los usuarios humanos se registran una sola vez por tenant en IdentityPlatform.",
+        "Los modulos no crean cuentas auth propias; consumen tenant_id, user_id y permisos emitidos por IdentityPlatform.",
+        "Los clientes ecommerce son identity_type=customer y no aparecen en la administracion operativa de usuarios del tenant.",
+        "Los superadmins son identity_type=platform y se gestionan desde platform-access.",
+        "Los perfiles propios de modulo solo pueden referenciar tenant_id y user_id; no guardan password, sesion ni rol global."
+      ],
+      "contractTables": [
+        "tenant_module_entitlements",
+        "tenant_memberships",
+        "tenant_roles",
+        "tenant_user_roles"
+      ],
+      "permissionFormat": "module.action"
+    }
+  },
+  "integration": {
+    "dependsOn": [
+      "postgresql-main",
+      "gateway-public-contract"
+    ],
+    "consumesApis": [],
+    "emitsEvents": [],
+    "migrationBoundaries": [
+      "Mantener compatibilidad de contratos API aunque los dominios ya escriban en bases logicas dedicadas.",
+      "No crear runtimes nuevos hasta que el dominio tenga module.json, health, migraciones y backup/restore propios.",
+      "Retirar gradualmente las tablas FDW de compatibilidad cuando las consultas cross-domain migren a contratos API o snapshots.",
+      "Billing puede extraerse luego como runtime propio, pero hoy no existe dependencia HTTP fiscal paralela en modo orquestado.",
+      "Mailer puede crecer como runtime propio de correo; hasta entonces vive como modulo tecnico interno del Core API con base mailer_service."
+    ]
+  },
+  "contracts": {
+    "health": true,
+    "manifest": true,
+    "openApi": false,
+    "capabilityRegistry": true,
+    "migrations": true,
+    "backupRestore": true,
+    "permissionsProjection": true
+  },
+  "backendModules": [
+    {
+      "moduleKey": "identity-platform",
+      "databaseKey": "identity_platform",
+      "ownsUsers": true,
+      "dependsOnIdentityPlatform": false,
+      "permissions": [
+        "users.read",
+        "users.create",
+        "users.update",
+        "users.delete",
+        "roles.read",
+        "roles.create",
+        "roles.update",
+        "roles.delete",
+        "platform-admin"
+      ],
+      "standaloneRequires": [
+        "PostgreSQL logico identity_platform",
+        "JWT/CSRF config",
+        "tenant registry"
+      ]
+    },
+    {
+      "moduleKey": "ecommerce",
+      "databaseKey": "commerce_orders",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "ecommerce.read",
+        "ecommerce.create",
+        "ecommerce.update",
+        "ecommerce.delete"
+      ],
+      "moduleProfiles": [
+        "pos-cashier",
+        "sales-operator"
+      ]
+    },
+    {
+      "moduleKey": "products",
+      "databaseKey": "catalog_inventory",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "products.read",
+        "products.create",
+        "products.update",
+        "products.delete"
+      ],
+      "moduleProfiles": [
+        "catalog-operator"
+      ]
+    },
+    {
+      "moduleKey": "inventory",
+      "databaseKey": "catalog_inventory",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "inventory.read",
+        "inventory.create",
+        "inventory.update",
+        "inventory.delete"
+      ],
+      "moduleProfiles": [
+        "inventory-operator"
+      ]
+    },
+    {
+      "moduleKey": "billing-sri",
+      "databaseKey": "billing_service",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "billing-sri.read",
+        "billing-sri.create",
+        "billing-sri.update"
+      ],
+      "moduleProfiles": [
+        "sri-issuer",
+        "sri-reviewer"
+      ]
+    },
+    {
+      "moduleKey": "mailer-service",
+      "databaseKey": "mailer_service",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "mailer-service.read",
+        "mailer-service.create",
+        "mailer-service.update"
+      ],
+      "moduleProfiles": [
+        "mailer-operator"
+      ],
+      "status": "active-internal"
+    },
+    {
+      "moduleKey": "monitoring",
+      "databaseKey": "reporting_finance",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "monitoring.read",
+        "monitoring.create",
+        "monitoring.update"
+      ],
+      "moduleProfiles": [
+        "monitoring-operator"
+      ]
+    }
+  ],
+  "dashboardProjection": {
+    "tenantModules": [
+      "ecommerce",
+      "users",
+      "invoicing",
+      "billing-sri",
+      "products",
+      "inventory",
+      "monitoring",
+      "workspace",
+      "tenant-admin"
+    ],
+    "routeSources": [
+      "ecommerce",
+      "users",
+      "business",
+      "billing-services",
+      "products",
+      "inventory",
+      "monitoring",
+      "workspace",
+      "tenant-admin"
+    ],
+    "notes": [
+      "Estas features viven en la UI del Dashboard, pero su ownership de datos y contratos runtime sigue en el Core API.",
+      "Billing SRI ya entra por el Core API y su driver nativo usa billing_service sin runtime fiscal paralelo.",
+      "IdentityPlatform, CatalogInventory, Commerce, ReportingFinance y Mailer ya resuelven bases logicas dedicadas dentro del PostgreSQL unico.",
+      "Al extraer dominios desde el core a runtimes propios, esta proyeccion debe migrarse al nuevo modulo duenio sin cambiar la clave del modulo contratado."
+    ]
+  },
+  "docs": {
+    "architecture": "Dashboard/docs/MODULAR-ORCHESTRATION.md",
+    "operatingModel": "Dashboard/docs/MODULE-OPERATING-MODEL.md",
+    "operations": "AGENTS.md",
+    "aiContext": "paramascotasec/docs/AI_CONTEXT.md"
+  }
+}

@@ -4,12 +4,7 @@
 
 $issues = array();
 
-if (!(PHP_VERSION_ID >= 80500)) {
-    $issues[] = 'Your Composer dependencies require a PHP version ">= 8.5.0". You are running ' . PHP_VERSION . '.';
-}
-
 $missingExtensions = array();
-extension_loaded('dom') || $missingExtensions[] = 'dom';
 extension_loaded('filter') || $missingExtensions[] = 'filter';
 extension_loaded('hash') || $missingExtensions[] = 'hash';
 extension_loaded('iconv') || $missingExtensions[] = 'iconv';
@@ -17,7 +12,6 @@ extension_loaded('json') || $missingExtensions[] = 'json';
 extension_loaded('openssl') || $missingExtensions[] = 'openssl';
 extension_loaded('pcre') || $missingExtensions[] = 'pcre';
 extension_loaded('pdo') || $missingExtensions[] = 'pdo';
-extension_loaded('pdo_pgsql') || $missingExtensions[] = 'pdo_pgsql';
 extension_loaded('zip') || $missingExtensions[] = 'zip';
 
 if ($missingExtensions) {
@@ -35,7 +29,8 @@ if ($issues) {
             echo 'Composer detected issues in your platform:' . PHP_EOL.PHP_EOL . str_replace('You are running '.PHP_VERSION.'.', '', implode(PHP_EOL, $issues)) . PHP_EOL.PHP_EOL;
         }
     }
-    throw new \RuntimeException(
-        'Composer detected issues in your platform: ' . implode(' ', $issues)
+    trigger_error(
+        'Composer detected issues in your platform: ' . implode(' ', $issues),
+        E_USER_ERROR
     );
 }

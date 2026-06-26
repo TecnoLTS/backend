@@ -1,3 +1,9 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   app:
     build:
@@ -5,6 +11,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: paramascotasec-backend-app
     restart: unless-stopped
+    logging: *default-logging
     user: "82:82"
     read_only: true
     cap_drop:
@@ -15,7 +22,7 @@ services:
     env_file:
       - ./entorno/.env
     command: >
-      sh -c "if [ \"${RUN_DB_BOOTSTRAP:-0}\" = \"1\" ]; then php /var/www/html/scripts/bootstrap_schema.php; fi
+      sh -c "if [ \"${RUN_DB_BOOTSTRAP:-0}\" = \"1\" ]; then php /var/www/html/scripts/bootstrap_schema.php && php /var/www/html/scripts/bootstrap_module_databases.php; fi
       && exec php-fpm"
     volumes:
       - ./storage:/var/www/html/storage:rw
@@ -66,23 +73,104 @@ services:
       SRI_RUC: ${SRI_RUC:-}
       SRI_CERT_PATH: ${SRI_CERT_PATH:-}
       SRI_CERT_PASSWORD: ${SRI_CERT_PASSWORD:-}
-      FACTURADOR_API_URL: ${FACTURADOR_API_URL:-http://facturador:8080}
-      FACTURADOR_API_INVOICES_PATH: ${FACTURADOR_API_INVOICES_PATH:-}
-      FACTURADOR_TIMEOUT: ${FACTURADOR_TIMEOUT:-20}
-      FACTURADOR_API_KEY: ${FACTURADOR_API_KEY}
+      SRI_WS_RECEPCION_PRUEBAS: ${SRI_WS_RECEPCION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
+      SRI_WS_AUTORIZACION_PRUEBAS: ${SRI_WS_AUTORIZACION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
+      SRI_WS_RECEPCION_PRODUCCION: ${SRI_WS_RECEPCION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
+      SRI_WS_AUTORIZACION_PRODUCCION: ${SRI_WS_AUTORIZACION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
+      DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
+      DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
+      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-billing_service}
+      DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
+      DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
+      BILLING_GATEWAY_DRIVER: ${BILLING_GATEWAY_DRIVER:-native}
+      BILLING_STORAGE_PATH: ${BILLING_STORAGE_PATH:-/var/www/html/storage/billing}
+      BILLING_RECOVERY_SWEEP_BATCH_SIZE: ${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50}
+      BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS: ${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600}
+      BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS: ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}
+      BILLING_API_KEY: ${BILLING_API_KEY:-}
       DOMPDF_REMOTE_ENABLED: ${DOMPDF_REMOTE_ENABLED:-false}
     networks:
       backend_internal:
         aliases:
           - paramascotasec-backend-app
       db_internal:
-      services_internal:
+      backend_egress:
+
+  billing-recovery-worker:
+    image: paramascotasec-backend-app
+    container_name: paramascotasec-backend-billing-worker
+    restart: unless-stopped
+    logging: *default-logging
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    env_file:
+      - ./entorno/.env
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        while true; do
+          php /var/www/html/scripts/process_billing_recovery.php \
+            --limit=${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50} \
+            --min-age-seconds=${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600} || true;
+          sleep ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600};
+        done
+    volumes:
+      - ./storage:/var/www/html/storage:rw
+      - ./public/uploads:/var/www/html/public/uploads:rw
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      TZ: America/Guayaquil
+      DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
+      PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE:-paramascotasec}
+      DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
+      DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
+      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-billing_service}
+      DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
+      DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
+      APP_ENV: ${APP_ENV:-production}
+      APP_URL: ${APP_URL}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Guayaquil}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:-produccion}
+      SRI_WS_RECEPCION_PRUEBAS: ${SRI_WS_RECEPCION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
+      SRI_WS_AUTORIZACION_PRUEBAS: ${SRI_WS_AUTORIZACION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
+      SRI_WS_RECEPCION_PRODUCCION: ${SRI_WS_RECEPCION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
+      SRI_WS_AUTORIZACION_PRODUCCION: ${SRI_WS_AUTORIZACION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
+      BILLING_GATEWAY_DRIVER: ${BILLING_GATEWAY_DRIVER:-native}
+      BILLING_STORAGE_PATH: ${BILLING_STORAGE_PATH:-/var/www/html/storage/billing}
+      BILLING_RECOVERY_SWEEP_BATCH_SIZE: ${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50}
+      BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS: ${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600}
+      BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS: ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}
+      BILLING_API_KEY: ${BILLING_API_KEY:-}
+    depends_on:
+      - app
+    networks:
+      db_internal:
       backend_egress:
 
   web:
     image: nginxinc/nginx-unprivileged:1.31-alpine
     container_name: paramascotasec-backend-web
     restart: unless-stopped
+    logging: *default-logging
     user: "101:101"
     read_only: true
     cap_drop:
@@ -121,8 +209,5 @@ networks:
   db_internal:
     external: true
     name: paramascotasec-db-internal
-  services_internal:
-    external: true
-    name: paramascotasec-services-internal
   backend_egress:
     driver: bridge

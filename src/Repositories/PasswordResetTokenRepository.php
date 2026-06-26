@@ -4,13 +4,14 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
 
 class PasswordResetTokenRepository {
     private $db;
     private static bool $schemaEnsured = false;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
     }
 
     private function ensureSchema(): void {

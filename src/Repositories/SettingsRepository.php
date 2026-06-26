@@ -4,12 +4,13 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
 
 class SettingsRepository {
     private $db;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
     }
 
     public function get($key) {

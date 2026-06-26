@@ -5,12 +5,15 @@ RUN set -eux; \
     apk upgrade --no-cache; \
     apk add --no-cache \
         ca-certificates \
+        libxml2 \
+        openssl \
         postgresql-libs \
         libzip \
         tzdata; \
     apk add --no-cache --virtual .build-deps \
         $PHPIZE_DEPS \
         postgresql-dev \
+        libxml2-dev \
         libzip-dev \
         git \
         unzip
@@ -20,7 +23,7 @@ ENV TZ=America/Guayaquil
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Install PHP extensions
-RUN docker-php-ext-install pdo_pgsql zip
+RUN docker-php-ext-install pdo_pgsql soap zip
 
 # Configurar zona horaria de PHP
 RUN { \
@@ -48,7 +51,16 @@ RUN set -eux; \
     COMPOSER_ALLOW_SUPERUSER=1 composer clear-cache; \
     rm -f /usr/bin/composer; \
     apk del .build-deps; \
-    mkdir -p /var/www/html/public/uploads/products /var/www/html/storage/logs; \
+    mkdir -p \
+        /var/www/html/public/uploads/products \
+        /var/www/html/storage/logs \
+        /var/www/html/storage/billing/cache \
+        /var/www/html/storage/billing/certs \
+        /var/www/html/storage/billing/logs \
+        /var/www/html/storage/billing/pdf/rides \
+        /var/www/html/storage/billing/xml/autorizados \
+        /var/www/html/storage/billing/xml/firmados \
+        /var/www/html/storage/billing/xml/generados; \
     chown -R www-data:www-data /var/www/html/public/uploads /var/www/html/storage; \
     find /var/www/html/public/uploads -type d -exec chmod 755 {} +; \
     find /var/www/html/public/uploads -type f -exec chmod 644 {} +; \

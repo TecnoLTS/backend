@@ -8,6 +8,8 @@ use App\Core\Response;
 use App\Core\TenantContext;
 use App\Core\TenantResolver;
 use App\Core\Auth;
+use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Repositories\UserRepository;
 
 ini_set('display_errors', '0');
 ini_set('html_errors', '0');
@@ -115,6 +117,32 @@ if (is_readable($envPath)) {
 }
 hydrate_process_environment();
 
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+    $requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    if ($requestPath === '/module.json') {
+        $manifestPath = __DIR__ . '/../module.json';
+        if (!is_readable($manifestPath)) {
+            respond_with_json_error('Module manifest no disponible', 500, 'MODULE_MANIFEST_NOT_FOUND');
+            exit;
+        }
+
+        $manifestContents = file_get_contents($manifestPath);
+        $manifest = is_string($manifestContents) ? json_decode($manifestContents, true) : null;
+        if (!is_array($manifest)) {
+            respond_with_json_error('Module manifest invalido', 500, 'MODULE_MANIFEST_INVALID');
+            exit;
+        }
+
+        if (!headers_sent()) {
+            header('Content-Type: application/json');
+            header('Cache-Control: no-store');
+        }
+
+        echo json_encode($manifest, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+}
+
 header_remove('X-Powered-By');
 
 $tenants = require __DIR__ . '/../config/tenants.php';
@@ -213,7 +241,7 @@ if ($origin) {
 }
 header('Content-Type: application/json');
 header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token, X-API-Key');
 header('Access-Control-Max-Age: 600');
 header('Vary: Origin');
 Response::noStore();
@@ -355,9 +383,26 @@ foreach ($routes as $route) {
         $route['capability'] ?? null
     );
 }
+$matchedRoute = $router->match($method, $uri);
+$routeCapability = is_array($matchedRoute)
+    ? (string)($matchedRoute['route']['capability'] ?? '')
+    : '';
+
+function is_public_billing_api_request(string $uri, string $method): bool {
+    $normalizedMethod = strtoupper($method);
+    if (!in_array($normalizedMethod, ['GET', 'HEAD', 'POST'], true)) {
+        return false;
+    }
+
+    return preg_match('#^/api/(test|production)/v1/#', $uri) === 1;
+}
 
 function is_public_api_request(string $uri, string $method): bool {
     $normalizedMethod = strtoupper($method);
+
+    if (is_public_billing_api_request($uri, $method)) {
+        return true;
+    }
 
     if ($normalizedMethod === 'GET' || $normalizedMethod === 'HEAD') {
         if (in_array($uri, [
@@ -399,6 +444,7 @@ function is_public_api_request(string $uri, string $method): bool {
 
 // Global auth: all API requests require a valid token (except auth endpoints).
 $isPublic = is_public_api_request($uri, $method);
+$isPublicBillingApi = is_public_billing_api_request($uri, $method);
 $authCookieName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
 $csrfCookieName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
 $csrfExemptPaths = [
@@ -419,6 +465,7 @@ $hasAuthCookie = trim((string)($_COOKIE[$authCookieName] ?? '')) !== '';
 $hasBearerAuth = preg_match('/Bearer\s+\S+/', (string)($_SERVER['HTTP_AUTHORIZATION'] ?? '')) === 1;
 $shouldEnforceCsrf = $isMutatingApiRequest
     && !in_array($uri, $csrfExemptPaths, true)
+    && !$isPublicBillingApi
     && ($hasAuthCookie || $uri === '/api/auth/logout')
     && !$hasTrustedInternalProxyToken;
 
@@ -478,6 +525,47 @@ if ($requiresAuth) {
             }
         }
         Auth::requireAdmin();
+    }
+
+    $tenantAccess = new TenantAccessService();
+    $accessDecision = $tenantAccess->routeAccessDecision($routeCapability, $method, $uri);
+    if (!empty($accessDecision['requiresPermission'])) {
+        $payload = Auth::requireUser();
+        if (empty($payload['service_auth'])) {
+            $userRepository = new UserRepository();
+            $currentUser = $userRepository->getById((string)($payload['sub'] ?? ''));
+            if (!$currentUser) {
+                Response::error('Sesión inválida', 401, 'AUTH_TOKEN_REVOKED');
+                exit;
+            }
+
+            $moduleKey = $accessDecision['module'] ?? null;
+            $isPlatformAdmin = $tenantAccess->userHasPermission(
+                $currentUser,
+                TenantContext::get() ?? [],
+                TenantAccessService::PLATFORM_ADMIN_PERMISSION
+            );
+            if (!$isPlatformAdmin && !$tenantAccess->moduleEnabledForTenant($moduleKey, TenantContext::get() ?? [])) {
+                Response::error(
+                    'El tenant no tiene contratado este módulo.',
+                    403,
+                    'TENANT_MODULE_NOT_ENABLED',
+                    ['module' => $moduleKey]
+                );
+                exit;
+            }
+
+            $permission = (string)($accessDecision['permission'] ?? '');
+            if (!$tenantAccess->userHasPermission($currentUser, TenantContext::get() ?? [], $permission)) {
+                Response::error(
+                    'No tienes permiso para usar esta función del módulo.',
+                    403,
+                    'TENANT_MODULE_PERMISSION_DENIED',
+                    ['permission' => $permission, 'module' => $moduleKey]
+                );
+                exit;
+            }
+        }
     }
 }
 

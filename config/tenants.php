@@ -27,8 +27,9 @@ $aliases = $csv($env('PRIMARY_SITE_ALIASES', "www.{$primaryDomain}"));
 $appUrl = rtrim($env('APP_URL', "https://{$primaryDomain}"), '/');
 $publicBaseUrl = rtrim($env('PUBLIC_BASE_URL', $appUrl), '/');
 $scheme = parse_url($publicBaseUrl, PHP_URL_SCHEME) ?: $env('PUBLIC_SCHEME', 'https');
-$dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,ecommerce,tenant-admin'));
+$dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,ecommerce,users,tenant-admin,invoicing,billing-sri'));
 $dashboardPlatformAdminEmails = $csv($env('DASHBOARD_PLATFORM_ADMIN_EMAILS', ''));
+$dashboardPlatformAdminDomains = $csv($env('DASHBOARD_PLATFORM_ADMIN_DOMAINS', 'tecnolts.com'));
 
 $domains = array_values(array_unique(array_filter([$primaryDomain, ...$aliases])));
 $allowedOrigins = array_values(array_unique(array_map(
@@ -50,6 +51,7 @@ return [
         'public_base_url' => $publicBaseUrl,
         'enabled_modules' => $dashboardEnabledModules,
         'platform_admin_emails' => $dashboardPlatformAdminEmails,
+        'platform_admin_domains' => $dashboardPlatformAdminDomains,
         'branding' => [
             'logo_url' => $env('DASHBOARD_BRANDING_LOGO_URL', 'assets/images/logo.png'),
             'logo_light_url' => $env('DASHBOARD_BRANDING_LOGO_LIGHT_URL', 'assets/images/logo-light.png'),

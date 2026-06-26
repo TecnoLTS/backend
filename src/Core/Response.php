@@ -50,6 +50,8 @@ class Response {
             return false;
         }
         $allowed = [
+            'BILLING_RIDE_PDF_FAILED',
+            'BILLING_XML_FAILED',
             'STORE_SALES_DISABLED',
         ];
         return in_array($code, $allowed, true);

@@ -2,6 +2,7 @@
 
 namespace App\Core;
 
+use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Repositories\UserRepository;
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
@@ -84,12 +85,19 @@ class Auth {
         $repo = new UserRepository();
         $state = $repo->getAuthState($sub ?? '');
         $dbRole = strtolower((string)($state['role'] ?? 'customer'));
-        if ($dbRole !== 'admin') {
+        $tenantAccess = new TenantAccessService();
+        $platformAdmin = $state
+            ? $tenantAccess->isPlatformAdmin($state, $dbRole, TenantContext::get() ?? [])
+            : false;
+        $managedTenantStaff = $state
+            ? $tenantAccess->identityTypeForUser($state, TenantContext::get() ?? []) === 'tenant_staff'
+            : false;
+        if ($dbRole !== 'admin' && !$platformAdmin && !$managedTenantStaff) {
             Response::error('No autorizado', 403, 'AUTH_FORBIDDEN');
             exit;
         }
 
-        $payload['role'] = $dbRole;
+        $payload['role'] = 'admin';
         self::$payload = $payload;
         return $payload;
     }

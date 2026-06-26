@@ -4,13 +4,14 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use PDO;
 
 class PurchaseInvoiceRepository {
     private $db;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
     public function recordStockEntry(array $purchaseInvoiceData, string $productId, string $productName, int $quantity, float $unitCost, array $metadata = []): array {

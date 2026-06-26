@@ -4,6 +4,7 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Domain\CommerceDomain;
 use PDO;
 
 class QuotationRepository {
@@ -11,7 +12,7 @@ class QuotationRepository {
     private static $schemaEnsured = false;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(CommerceDomain::KEY);
         $this->ensureSchema();
     }
 
@@ -195,5 +196,42 @@ class QuotationRepository {
         ]);
 
         return $this->getById($id);
+    }
+
+    public function markClosed(string $id): ?array {
+        $stmt = $this->db->prepare('
+            UPDATE "Quotation"
+            SET status = :status,
+                updated_at = NOW()
+            WHERE id = :id
+              AND tenant_id = :tenant_id
+              AND status NOT IN (\'converted\', \'closed\')
+        ');
+        $stmt->execute([
+            'status' => 'closed',
+            'id' => $id,
+            'tenant_id' => $this->getTenantId(),
+        ]);
+
+        return $this->getById($id);
+    }
+
+    public function closeExpired(): array {
+        $stmt = $this->db->prepare('
+            UPDATE "Quotation"
+            SET status = :status,
+                updated_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND status = \'quoted\'
+              AND valid_until IS NOT NULL
+              AND valid_until < NOW()
+            RETURNING *
+        ');
+        $stmt->execute([
+            'status' => 'closed',
+            'tenant_id' => $this->getTenantId(),
+        ]);
+
+        return array_map(fn(array $row) => $this->normalizeRow($row), $stmt->fetchAll() ?: []);
     }
 }

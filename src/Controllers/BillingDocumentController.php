@@ -4,13 +4,284 @@ namespace App\Controllers;
 
 use App\Core\Auth;
 use App\Core\Response;
+use App\Core\TenantContext;
+use App\Modules\Billing\Application\BillingGateway;
+use App\Modules\Billing\Infrastructure\BillingGatewayFactory;
 use App\Repositories\OrderRepository;
-use App\Services\FacturadorApiException;
-use App\Services\FacturadorApiService;
+use App\Repositories\ProductRepository;
+use App\Services\BillingApiException;
 
 class BillingDocumentController {
+    private const CERTIFICATE_MAX_BYTES = 10485760;
+
+    private function billingGateway(): BillingGateway {
+        return BillingGatewayFactory::create();
+    }
+
     private function authenticate(): void {
         Auth::requireAdmin();
+    }
+
+    public function health(): void {
+        $this->authenticate();
+
+        try {
+            $billing = $this->billingGateway();
+            Response::json($billing->health());
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 502, 'BILLING_HEALTH_FAILED');
+        }
+    }
+
+    public function configuration(): void {
+        $this->authenticate();
+
+        try {
+            $billing = $this->billingGateway();
+            Response::json($billing->configuration($this->queryAmbiente()));
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_CONFIGURATION_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_CONFIGURATION_FAILED');
+        }
+    }
+
+    public function updateConfiguration(): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $billing = $this->billingGateway();
+            Response::json($billing->updateConfiguration($data, $this->queryAmbiente()));
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_CONFIGURATION_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_CONFIGURATION_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_CONFIGURATION_SAVE_FAILED');
+        }
+    }
+
+    public function createBranch(): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $billing = $this->billingGateway();
+            Response::json($billing->createBranch($data, $this->queryAmbiente()), 201);
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_BRANCH_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_BRANCH_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_BRANCH_CREATE_FAILED');
+        }
+    }
+
+    public function updateBranch(string $branchId): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $billing = $this->billingGateway();
+            Response::json($billing->updateBranch((int)$branchId, $data, $this->queryAmbiente()));
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_BRANCH_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_BRANCH_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_BRANCH_UPDATE_FAILED');
+        }
+    }
+
+    public function uploadCertificate(): void {
+        $this->authenticate();
+
+        try {
+            $upload = is_array($_FILES['certificate'] ?? null) ? $_FILES['certificate'] : null;
+            if ($upload === null || (int)($upload['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+                Response::error('Selecciona un archivo .p12 para cargar.', 400, 'BILLING_CERTIFICATE_REQUIRED');
+                return;
+            }
+
+            $tmpName = (string)($upload['tmp_name'] ?? '');
+            $fileName = basename((string)($upload['name'] ?? 'certificado.p12'));
+            $password = trim((string)($_POST['certificate_password'] ?? $_POST['password'] ?? ''));
+            if ($password === '') {
+                Response::error('Ingresa la contraseña del certificado .p12.', 400, 'BILLING_CERTIFICATE_PASSWORD_REQUIRED');
+                return;
+            }
+            if (!preg_match('/\.p12$/i', $fileName)) {
+                Response::error('El certificado debe tener extension .p12.', 400, 'BILLING_CERTIFICATE_INVALID_EXTENSION');
+                return;
+            }
+            $size = (int)($upload['size'] ?? 0);
+            if ($size <= 0 || $size > self::CERTIFICATE_MAX_BYTES) {
+                Response::error('El certificado .p12 debe pesar hasta 10 MB.', 400, 'BILLING_CERTIFICATE_TOO_LARGE');
+                return;
+            }
+            if ($tmpName === '' || !is_uploaded_file($tmpName)) {
+                Response::error('El certificado no llego correctamente al servidor.', 400, 'BILLING_CERTIFICATE_UPLOAD_INVALID');
+                return;
+            }
+
+            $billing = $this->billingGateway();
+            Response::json($billing->uploadCertificate($tmpName, $fileName, $password, $this->queryAmbiente()));
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_CERTIFICATE_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_CERTIFICATE_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_CERTIFICATE_UPLOAD_FAILED');
+        }
+    }
+
+    public function emit(): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $billing = $this->billingGateway();
+            Response::json($billing->emitInvoice($data), 201);
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_EMIT_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_EMIT_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_EMIT_FAILED');
+        }
+    }
+
+    public function products(): void {
+        $this->authenticate();
+
+        try {
+            $search = trim((string)($_GET['search'] ?? ''));
+            $limit = max(1, min(100, (int)($_GET['limit'] ?? 12)));
+            $repository = new ProductRepository();
+            $products = $repository->searchForBilling($search, $limit + 1, [
+                'includeUnpublished' => true,
+                'includeProcurement' => false,
+                'includeOutOfStock' => true,
+            ]);
+
+            $hasMore = count($products) > $limit;
+            $data = [];
+            foreach (array_slice($products, 0, $limit) as $product) {
+                if (!is_array($product)) {
+                    continue;
+                }
+
+                $data[] = $this->normalizeBillingProduct($product);
+            }
+
+            Response::json($data, 200, [
+                'source' => $this->billingProductSource(),
+                'ecommerce_enabled' => $this->tenantHasEcommerce(),
+                'query' => $search,
+                'limit' => $limit,
+                'returned' => count($data),
+                'has_more' => $hasMore,
+            ]);
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_PRODUCTS_LIST_FAILED');
+        }
+    }
+
+    public function storeProduct(): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $name = trim((string)($data['name'] ?? ''));
+            if ($name === '') {
+                Response::error('Nombre del producto requerido.', 400, 'BILLING_PRODUCT_NAME_REQUIRED');
+                return;
+            }
+
+            $sku = strtoupper(trim((string)($data['sku'] ?? '')));
+            $repository = new ProductRepository();
+            if ($sku !== '' && $repository->skuExists($sku)) {
+                Response::error('Ya existe un producto con ese SKU.', 409, 'BILLING_PRODUCT_SKU_DUPLICATED');
+                return;
+            }
+
+            $taxExempt = $this->boolValue($data['tax_exempt'] ?? false);
+            $taxRate = $taxExempt ? 0.0 : $this->number($data['tax_rate'] ?? 15, 15);
+            $taxRate = max(0, round($taxRate, 2));
+            $priceGross = round(max(0, $this->number($data['price_gross'] ?? $data['price'] ?? 0)), 2);
+            $priceNet = $this->splitGrossAmountByTaxRate($priceGross, $taxRate)['net'];
+            $cost = round(max(0, $this->number($data['cost'] ?? 0)), 2);
+            $initialStock = max(0, (int)$this->number($data['quantity'] ?? $data['stock'] ?? 0));
+            $attributes = [
+                'sku' => $sku !== '' ? $sku : strtoupper('BILL-' . substr(md5($name . microtime(true)), 0, 8)),
+                'auxCode' => trim((string)($data['code_aux'] ?? $data['aux_code'] ?? '')),
+                'species' => trim((string)($data['species'] ?? 'General')),
+                'unitMeasure' => trim((string)($data['unit_measure'] ?? $data['unitMeasure'] ?? 'unidad')) ?: 'unidad',
+                'taxRate' => (string)$taxRate,
+                'taxExempt' => $taxExempt ? 'true' : 'false',
+                'billingActive' => $this->boolValue($data['active'] ?? true) ? 'true' : 'false',
+                'billingOnly' => $this->tenantHasEcommerce() ? 'true' : 'false',
+                'sourceModule' => 'billing-sri',
+            ];
+
+            $product = $repository->create([
+                'name' => $name,
+                'category' => trim((string)($data['category'] ?? 'Facturacion')),
+                'productType' => trim((string)($data['product_type'] ?? $data['productType'] ?? 'accesorios')),
+                'gender' => trim((string)($data['gender'] ?? 'Unisex')),
+                'brand' => trim((string)($data['brand'] ?? 'Generico')) ?: 'Generico',
+                'price' => $priceNet,
+                'originPrice' => $priceNet,
+                'cost' => $cost,
+                'quantity' => 0,
+                'description' => trim((string)($data['description'] ?? $name)),
+                'published' => false,
+                'image' => $this->productImagePayload($data, $name),
+                'attributes' => $attributes,
+            ]);
+
+            if ($initialStock > 0 && is_array($product)) {
+                $updated = $repository->update((string)$product['id'], [
+                    'quantity' => $initialStock,
+                    'inventoryAction' => 'adjustment',
+                    'inventoryAdjustmentReason' => 'Stock inicial registrado desde Billing SRI',
+                ]);
+                if (is_array($updated)) {
+                    $product = $updated;
+                }
+            }
+
+            Response::json($this->normalizeBillingProduct($product), 201);
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_PRODUCT_INVALID_PAYLOAD');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_PRODUCT_CREATE_FAILED');
+        }
+    }
+
+    public function emitFromProducts(): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody();
+            $prepared = $this->buildInvoicePayloadFromProducts($data);
+            $billing = $this->billingGateway();
+            $result = $billing->emitInvoice($prepared['payload']);
+            $movements = $this->consumeBillingInventory($prepared['lines'], $prepared['source_reference']);
+
+            Response::json([
+                ...$result,
+                'source_reference' => $prepared['source_reference'],
+                'stock_movements' => $movements,
+            ], 201);
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_PRODUCTS_INVOICE_INVALID_PAYLOAD');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_PRODUCTS_INVOICE_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_PRODUCTS_INVOICE_FAILED');
+        }
     }
 
     public function rides(): void {
@@ -19,10 +290,83 @@ class BillingDocumentController {
         try {
             $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 100;
             $includeCancelled = filter_var($_GET['include_cancelled'] ?? $_GET['includeCancelled'] ?? false, FILTER_VALIDATE_BOOLEAN);
-            $facturador = new FacturadorApiService();
-            Response::json($this->enrichRidesWithAccountingDates($facturador->listRidePdfs($limit, $includeCancelled)));
+            $billing = $this->billingGateway();
+            Response::json($this->enrichRidesWithAccountingDates($billing->listRidePdfs($limit, $includeCancelled)));
         } catch (\Throwable $e) {
             Response::error($e->getMessage(), 500, 'BILLING_RIDES_LIST_FAILED');
+        }
+    }
+
+    public function source(string $sourceReference): void {
+        $this->authenticate();
+
+        try {
+            $billing = $this->billingGateway();
+            $ride = $billing->findRideBySourceReference(rawurldecode($sourceReference));
+            if (!is_array($ride)) {
+                Response::error('No existe una factura activa para la referencia indicada.', 404, 'BILLING_SOURCE_NOT_FOUND');
+                return;
+            }
+
+            $enriched = $this->enrichRidesWithAccountingDates([$ride]);
+            Response::json($enriched[0] ?? $ride);
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_SOURCE_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_SOURCE_FAILED');
+        }
+    }
+
+    public function status(string $accessKey): void {
+        $this->authenticate();
+
+        try {
+            $billing = $this->billingGateway();
+            Response::json($billing->getInvoiceStatus($accessKey, $this->queryAmbiente()));
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_STATUS_INVALID_KEY');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_STATUS_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_STATUS_FAILED');
+        }
+    }
+
+    public function xml(string $accessKey): void {
+        $this->authenticate();
+
+        try {
+            $billing = $this->billingGateway();
+            $xml = $billing->getInvoiceXml($accessKey, $this->queryAmbiente());
+            $content = (string)($xml['content'] ?? '');
+            $filename = (string)($xml['filename'] ?? $accessKey . '.xml');
+
+            if (trim($content) === '') {
+                Response::error(
+                    $this->fiscalDocumentUnavailableMessage('xml'),
+                    404,
+                    'BILLING_XML_NOT_AVAILABLE',
+                    $this->fiscalDocumentUnavailableDetails('xml')
+                );
+                return;
+            }
+
+            Response::noStore();
+            header('Content-Type: application/xml; charset=UTF-8');
+            header('Content-Disposition: inline; filename="' . addslashes($filename) . '"');
+            header('Content-Length: ' . strlen($content));
+            echo $content;
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_XML_INVALID_KEY');
+        } catch (BillingApiException $e) {
+            Response::error(
+                $this->fiscalDocumentErrorMessage('xml', $e),
+                $this->fiscalDocumentStatus($e),
+                $this->fiscalDocumentErrorCode('xml', $e),
+                $this->fiscalDocumentErrorDetails('xml', $e)
+            );
+        } catch (\Throwable $e) {
+            Response::error('No se pudo preparar el XML autorizado. Consulta el estado del comprobante o intenta nuevamente mas tarde.', 500, 'BILLING_XML_FAILED');
         }
     }
 
@@ -30,13 +374,18 @@ class BillingDocumentController {
         $this->authenticate();
 
         try {
-            $facturador = new FacturadorApiService();
-            $pdf = $facturador->getRidePdf($accessKey);
+            $billing = $this->billingGateway();
+            $pdf = $billing->getRidePdf($accessKey);
             $content = (string)($pdf['content'] ?? '');
             $filename = (string)($pdf['filename'] ?? 'RIDE.pdf');
 
             if ($content === '') {
-                Response::error('RIDE PDF vacío o no disponible', 404, 'BILLING_RIDE_PDF_EMPTY');
+                Response::error(
+                    $this->fiscalDocumentUnavailableMessage('ride-pdf'),
+                    404,
+                    'BILLING_RIDE_PDF_NOT_AVAILABLE',
+                    $this->fiscalDocumentUnavailableDetails('ride-pdf')
+                );
                 return;
             }
 
@@ -47,20 +396,15 @@ class BillingDocumentController {
             echo $content;
         } catch (\InvalidArgumentException $e) {
             Response::error($e->getMessage(), 400, 'BILLING_RIDE_PDF_INVALID_KEY');
-        } catch (FacturadorApiException $e) {
-            $status = $e->httpStatusCode();
-            if ($status === 404) {
-                Response::error($e->getMessage(), 404, 'BILLING_RIDE_PDF_NOT_FOUND');
-                return;
-            }
-            if ($status === 409) {
-                Response::error($e->getMessage(), 409, 'BILLING_RIDE_PDF_NOT_AVAILABLE');
-                return;
-            }
-
-            Response::error($e->getMessage(), 502, 'BILLING_RIDE_PDF_UPSTREAM_FAILED');
+        } catch (BillingApiException $e) {
+            Response::error(
+                $this->fiscalDocumentErrorMessage('ride-pdf', $e),
+                $this->fiscalDocumentStatus($e),
+                $this->fiscalDocumentErrorCode('ride-pdf', $e),
+                $this->fiscalDocumentErrorDetails('ride-pdf', $e)
+            );
         } catch (\Throwable $e) {
-            Response::error($e->getMessage(), 500, 'BILLING_RIDE_PDF_FAILED');
+            Response::error('No se pudo preparar el RIDE PDF. Consulta el estado del comprobante o intenta nuevamente mas tarde.', 500, 'BILLING_RIDE_PDF_FAILED');
         }
     }
 
@@ -83,8 +427,8 @@ class BillingDocumentController {
             }
 
             $ambiente = trim((string)($data['ambiente'] ?? ''));
-            $facturador = new FacturadorApiService();
-            $result = $facturador->cancelAndReissueInvoice($accessKey, $reason, $ambiente !== '' ? $ambiente : null);
+            $billing = $this->billingGateway();
+            $result = $billing->cancelAndReissueInvoice($accessKey, $reason, $ambiente !== '' ? $ambiente : null);
             $this->syncOrderBillingMetadata($result);
 
             Response::json($result);
@@ -95,6 +439,525 @@ class BillingDocumentController {
         } catch (\Throwable $e) {
             Response::error($e->getMessage(), 500, 'BILLING_REISSUE_FAILED');
         }
+    }
+
+    public function mailTest(string $accessKey): void {
+        $this->authenticate();
+
+        try {
+            $data = $this->jsonBody(false);
+            $ambiente = trim((string)($data['ambiente'] ?? $_GET['ambiente'] ?? ''));
+            $billing = $this->billingGateway();
+            Response::json($billing->sendMailTest($accessKey, $ambiente !== '' ? $ambiente : null));
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'BILLING_MAIL_TEST_INVALID_KEY');
+        } catch (BillingApiException $e) {
+            Response::error($e->getMessage(), $this->proxyStatus($e), 'BILLING_MAIL_TEST_UPSTREAM_FAILED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'BILLING_MAIL_TEST_FAILED');
+        }
+    }
+
+    private function buildInvoicePayloadFromProducts(array $data): array {
+        $customer = is_array($data['customer'] ?? null) ? $data['customer'] : [];
+        $identification = $this->digitsOnly((string)($customer['identification'] ?? $data['customer_identification'] ?? ''));
+        $customerName = trim((string)($customer['name'] ?? $data['customer_name'] ?? ''));
+        if ($identification === '') {
+            throw new \InvalidArgumentException('Identificacion del cliente requerida.');
+        }
+        if ($customerName === '') {
+            throw new \InvalidArgumentException('Nombre del cliente requerido.');
+        }
+
+        $rawItems = is_array($data['items'] ?? null) ? $data['items'] : [];
+        if (count($rawItems) === 0) {
+            throw new \InvalidArgumentException('Agrega al menos un producto para emitir la factura.');
+        }
+
+        $requested = [];
+        foreach ($rawItems as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $productId = trim((string)($item['product_id'] ?? $item['id'] ?? ''));
+            if ($productId === '') {
+                continue;
+            }
+            $quantity = max(1, (int)$this->number($item['quantity'] ?? 1, 1));
+            $requested[$productId] = ($requested[$productId] ?? 0) + $quantity;
+        }
+
+        if (count($requested) === 0) {
+            throw new \InvalidArgumentException('Las lineas de factura no tienen productos validos.');
+        }
+
+        $repository = new ProductRepository();
+        $items = [];
+        $lines = [];
+        foreach ($requested as $productId => $quantity) {
+            $product = $repository->getById($productId, [
+                'includeUnpublished' => true,
+                'includeProcurement' => true,
+                'includeOutOfStock' => true,
+            ]);
+            if (!is_array($product)) {
+                throw new \InvalidArgumentException('Producto no encontrado para facturar.');
+            }
+
+            $available = max(0, (int)($product['inventory']['available'] ?? $product['quantity'] ?? 0));
+            if ($available < $quantity) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Stock insuficiente para %s. Disponible: %d uds.',
+                    (string)($product['name'] ?? 'producto'),
+                    $available
+                ));
+            }
+
+            $tax = is_array($product['tax'] ?? null) ? $product['tax'] : [];
+            $taxRate = max(0, $this->number($tax['rate'] ?? $this->attribute($product, 'taxRate') ?? 15, 15));
+            $priceGross = round(max(0, $this->number($product['price'] ?? 0)), 2);
+            $lineGross = round($priceGross * $quantity, 2);
+            $breakdown = $this->splitGrossAmountByTaxRate($lineGross, $taxRate);
+            $unitNet = $quantity > 0 ? round($breakdown['net'] / $quantity, 6) : 0.0;
+            $sku = trim((string)($this->attribute($product, 'sku') ?? $product['id']));
+
+            $items[] = [
+                'code' => $sku !== '' ? $sku : (string)$product['id'],
+                'description' => (string)($product['name'] ?? 'Producto'),
+                'quantity' => $quantity,
+                'unit_price' => $this->billingDecimal($unitNet, 6),
+                'discount' => '0.00',
+                'line_subtotal_net' => $this->billingDecimal($breakdown['net'], 2),
+                'tax_rate' => $this->billingDecimal($taxRate, 2),
+                'tax_code' => '2',
+                'tax_percentage_code' => $this->resolveSriVatPercentageCode($taxRate),
+                'tax_amount' => $this->billingDecimal($breakdown['tax'], 2),
+                'additional_detail' => 'Producto ' . (string)$product['id'] . ' · ' . $this->normalizeBillingProduct($product)['source'],
+            ];
+
+            $lines[] = [
+                'product_id' => (string)$product['id'],
+                'name' => (string)($product['name'] ?? 'Producto'),
+                'quantity' => $quantity,
+                'current_quantity' => $available,
+            ];
+        }
+
+        $payment = $this->resolveSriPaymentMethod((string)($data['payment_method'] ?? 'cash'));
+        $sourceReference = trim((string)($data['source_reference'] ?? ''));
+        if ($sourceReference === '') {
+            $sourceReference = 'BILL-' . date('Ymd-His') . '-' . strtoupper(substr(bin2hex(random_bytes(3)), 0, 6));
+        }
+
+        $branch = is_array($data['branch'] ?? null) ? $data['branch'] : [];
+        $branchId = (int)($data['branch_id'] ?? $data['branchId'] ?? $branch['id'] ?? 0);
+        $branchCode = trim((string)($data['branch_code'] ?? $data['establishment_code'] ?? $branch['code'] ?? ''));
+        $emissionPoint = trim((string)($data['emission_point'] ?? $data['emissionPoint'] ?? $branch['emission_point'] ?? ''));
+
+        $payload = [
+            'customer_identification' => $identification,
+            'customer_name' => $customerName,
+            'customer_address' => trim((string)($customer['address'] ?? $data['customer_address'] ?? 'Ecuador')) ?: 'Ecuador',
+            'customer_email' => trim((string)($customer['email'] ?? $data['customer_email'] ?? '')),
+            'items' => $items,
+            'payment_method' => $payment['label'],
+            'payment_method_code' => $payment['code'],
+            'additional_info' => [
+                'order_id' => $sourceReference,
+                'source' => 'billing-sri',
+                'tenant_slug' => TenantContext::slug(),
+                'product_source' => $this->billingProductSource(),
+                'payment_method' => $payment['label'],
+                'payment_method_code' => $payment['code'],
+            ],
+        ];
+        if ($branchId > 0) {
+            $payload['branch_id'] = $branchId;
+        } elseif ($branchCode !== '' || $emissionPoint !== '') {
+            $payload['branch'] = [
+                'code' => $branchCode,
+                'emission_point' => $emissionPoint,
+            ];
+        }
+
+        return [
+            'source_reference' => $sourceReference,
+            'lines' => $lines,
+            'payload' => $payload,
+        ];
+    }
+
+    private function consumeBillingInventory(array $lines, string $sourceReference): array {
+        $repository = new ProductRepository();
+        $movements = [];
+        foreach ($lines as $line) {
+            if (!is_array($line)) {
+                continue;
+            }
+
+            $productId = trim((string)($line['product_id'] ?? ''));
+            $quantity = max(0, (int)($line['quantity'] ?? 0));
+            $currentQuantity = max(0, (int)($line['current_quantity'] ?? 0));
+            if ($productId === '' || $quantity <= 0) {
+                continue;
+            }
+
+            $nextQuantity = max(0, $currentQuantity - $quantity);
+            $updated = $repository->update($productId, [
+                'quantity' => $nextQuantity,
+                'inventoryAction' => 'adjustment',
+                'inventoryAdjustmentReason' => 'Venta facturada en SRI ' . $sourceReference,
+            ]);
+
+            $movements[] = [
+                'product_id' => $productId,
+                'name' => (string)($line['name'] ?? ''),
+                'quantity' => $quantity,
+                'previous_stock' => $currentQuantity,
+                'new_stock' => is_array($updated) ? (int)($updated['quantity'] ?? $nextQuantity) : $nextQuantity,
+            ];
+        }
+
+        return $movements;
+    }
+
+    private function normalizeBillingProduct(array $product): array {
+        $tax = is_array($product['tax'] ?? null) ? $product['tax'] : [];
+        $taxRate = max(0, $this->number($tax['rate'] ?? $this->attribute($product, 'taxRate') ?? 15, 15));
+        $multiplier = 1 + ($taxRate / 100);
+        $priceGross = round(max(0, $this->number($product['price'] ?? 0)), 2);
+        $priceNet = $taxRate > 0 ? round($priceGross / $multiplier, 2) : $priceGross;
+        $quantity = max(0, (int)($product['inventory']['available'] ?? $product['quantity'] ?? 0));
+        $sku = trim((string)($this->attribute($product, 'sku') ?? ''));
+        $images = $this->productImageUrls($product);
+
+        return [
+            'id' => (string)($product['id'] ?? ''),
+            'sku' => $sku,
+            'code_aux' => (string)($this->attribute($product, 'auxCode') ?? ''),
+            'name' => (string)($product['name'] ?? ''),
+            'description' => (string)($product['description'] ?? ''),
+            'category' => (string)($product['category'] ?? ''),
+            'product_type' => (string)($product['productType'] ?? $product['product_type'] ?? ''),
+            'brand' => (string)($product['brand'] ?? ''),
+            'unit_measure' => (string)($this->attribute($product, 'unitMeasure') ?? 'unidad'),
+            'image_url' => $images[0] ?? '',
+            'images' => $images,
+            'price_gross' => $priceGross,
+            'price_net' => $priceNet,
+            'tax_rate' => round($taxRate, 2),
+            'tax_exempt' => $taxRate <= 0 || $this->boolValue($this->attribute($product, 'taxExempt') ?? false),
+            'quantity' => $quantity,
+            'inventory_status' => (string)($product['inventoryStatus'] ?? $product['inventory']['status'] ?? ''),
+            'active' => $this->boolValue($this->attribute($product, 'billingActive') ?? true),
+            'source' => $this->boolValue($this->attribute($product, 'billingOnly') ?? false)
+                ? 'billing'
+                : $this->billingProductSource(),
+        ];
+    }
+
+    private function productImagePayload(array $data, string $name): array {
+        $raw = $data['image'] ?? $data['image_url'] ?? $data['images'] ?? [];
+        if (is_string($raw)) {
+            $raw = trim($raw);
+            if ($raw === '') {
+                return [];
+            }
+            return [[
+                'url' => $raw,
+                'altText' => $name,
+                'kind' => 'gallery',
+            ]];
+        }
+
+        return is_array($raw) ? $raw : [];
+    }
+
+    private function productImageUrls(array $product): array {
+        $urls = [];
+        foreach (['thumbImage', 'images'] as $key) {
+            $items = $product[$key] ?? [];
+            if (!is_array($items)) {
+                continue;
+            }
+            foreach ($items as $item) {
+                $url = is_string($item) ? trim($item) : '';
+                if ($url !== '' && !in_array($url, $urls, true)) {
+                    $urls[] = $url;
+                }
+            }
+        }
+
+        $meta = $product['imageMeta'] ?? [];
+        if (is_array($meta)) {
+            foreach ($meta as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $url = trim((string)($item['url'] ?? ''));
+                if ($url !== '' && !in_array($url, $urls, true)) {
+                    $urls[] = $url;
+                }
+            }
+        }
+
+        return $urls;
+    }
+
+    private function productMatchesSearch(array $product, string $search): bool {
+        if ($search === '') {
+            return true;
+        }
+
+        $needle = $this->searchToken($search);
+        $haystack = $this->searchToken(implode(' ', [
+            $product['name'] ?? '',
+            $product['category'] ?? '',
+            $product['brand'] ?? '',
+            $this->attribute($product, 'sku') ?? '',
+            $this->attribute($product, 'supplier') ?? '',
+        ]));
+
+        return $needle === '' || str_contains($haystack, $needle);
+    }
+
+    private function attribute(array $product, string $key): mixed {
+        $attributes = $product['attributes'] ?? [];
+        if (is_string($attributes)) {
+            $decoded = json_decode($attributes, true);
+            $attributes = is_array($decoded) ? $decoded : [];
+        }
+        if (!is_array($attributes)) {
+            return null;
+        }
+
+        return $attributes[$key] ?? null;
+    }
+
+    private function tenantHasEcommerce(): bool {
+        $tenant = TenantContext::get() ?? [];
+        $modules = is_array($tenant['enabled_modules'] ?? null) ? $tenant['enabled_modules'] : [];
+        return in_array('ecommerce', $modules, true);
+    }
+
+    private function billingProductSource(): string {
+        return $this->tenantHasEcommerce() ? 'ecommerce' : 'billing';
+    }
+
+    private function number(mixed $value, float $default = 0): float {
+        if (is_string($value)) {
+            $normalized = trim(str_replace(['$', ' '], '', $value));
+            if (str_contains($normalized, ',') && str_contains($normalized, '.')) {
+                $normalized = str_replace('.', '', $normalized);
+                $normalized = str_replace(',', '.', $normalized);
+            } elseif (str_contains($normalized, ',')) {
+                $normalized = str_replace(',', '.', $normalized);
+            }
+            return is_numeric($normalized) ? (float)$normalized : $default;
+        }
+
+        return is_numeric($value) ? (float)$value : $default;
+    }
+
+    private function boolValue(mixed $value): bool {
+        if (is_bool($value)) {
+            return $value;
+        }
+        $normalized = strtolower(trim((string)$value));
+        return in_array($normalized, ['1', 'true', 'yes', 'si', 'on'], true);
+    }
+
+    private function digitsOnly(string $value): string {
+        return preg_replace('/\D+/', '', $value) ?? '';
+    }
+
+    private function billingDecimal($value, int $decimals): string {
+        $number = is_numeric($value) ? (float)$value : 0.0;
+        if (abs($number) < 0.0000005) {
+            $number = 0.0;
+        }
+
+        return number_format($number, $decimals, '.', '');
+    }
+
+    private function splitGrossAmountByTaxRate(float $grossAmount, float $taxRate): array {
+        $grossAmount = round(max(0, $grossAmount), 2);
+        $taxRate = max(0, $taxRate);
+        if ($grossAmount <= 0 || $taxRate <= 0) {
+            return [
+                'gross' => $grossAmount,
+                'net' => $grossAmount,
+                'tax' => 0.0,
+            ];
+        }
+
+        $divisor = 1 + ($taxRate / 100);
+        $net = round($grossAmount / $divisor, 2);
+        $tax = round($grossAmount - $net, 2);
+
+        return [
+            'gross' => $grossAmount,
+            'net' => $net,
+            'tax' => $tax,
+        ];
+    }
+
+    private function resolveSriVatPercentageCode(float $taxRate): string {
+        if ($taxRate <= 0) {
+            return '0';
+        }
+
+        return '4';
+    }
+
+    private function resolveSriPaymentMethod(string $method): array {
+        $value = strtolower(trim($method));
+        if (in_array($value, ['credit', 'card', 'credit_card', 'tarjeta'], true)) {
+            return [
+                'code' => '19',
+                'label' => 'Tarjeta de credito',
+            ];
+        }
+        if (in_array($value, ['transfer', 'bank_transfer', 'transferencia'], true)) {
+            return [
+                'code' => '20',
+                'label' => 'Otros con utilizacion del sistema financiero',
+            ];
+        }
+        if (in_array($value, ['cash', 'cod', 'efectivo'], true)) {
+            return [
+                'code' => '01',
+                'label' => 'Sin utilizacion del sistema financiero',
+            ];
+        }
+        if (preg_match('/^\d{2}$/', $method) === 1) {
+            return [
+                'code' => $method,
+                'label' => $method,
+            ];
+        }
+
+        return [
+            'code' => '20',
+            'label' => trim($method) !== '' ? trim($method) : 'Otros con utilizacion del sistema financiero',
+        ];
+    }
+
+    private function searchToken(string $value): string {
+        $ascii = strtr($value, [
+            'á' => 'a', 'à' => 'a', 'ä' => 'a', 'â' => 'a',
+            'Á' => 'a', 'À' => 'a', 'Ä' => 'a', 'Â' => 'a',
+            'é' => 'e', 'è' => 'e', 'ë' => 'e', 'ê' => 'e',
+            'É' => 'e', 'È' => 'e', 'Ë' => 'e', 'Ê' => 'e',
+            'í' => 'i', 'ì' => 'i', 'ï' => 'i', 'î' => 'i',
+            'Í' => 'i', 'Ì' => 'i', 'Ï' => 'i', 'Î' => 'i',
+            'ó' => 'o', 'ò' => 'o', 'ö' => 'o', 'ô' => 'o',
+            'Ó' => 'o', 'Ò' => 'o', 'Ö' => 'o', 'Ô' => 'o',
+            'ú' => 'u', 'ù' => 'u', 'ü' => 'u', 'û' => 'u',
+            'Ú' => 'u', 'Ù' => 'u', 'Ü' => 'u', 'Û' => 'u',
+            'ñ' => 'n', 'Ñ' => 'n',
+        ]);
+
+        return preg_replace('/[^a-z0-9]+/i', '', strtolower($ascii)) ?? '';
+    }
+
+    private function jsonBody(bool $required = true): array {
+        $rawInput = file_get_contents('php://input');
+        if (!is_string($rawInput) || trim($rawInput) === '') {
+            if (!$required) {
+                return [];
+            }
+            throw new \InvalidArgumentException('JSON requerido');
+        }
+
+        $data = json_decode($rawInput, true);
+        if (!is_array($data)) {
+            throw new \InvalidArgumentException('JSON inválido');
+        }
+
+        return $data;
+    }
+
+    private function queryAmbiente(): ?string {
+        $ambiente = trim((string)($_GET['ambiente'] ?? ''));
+        return $ambiente !== '' ? $ambiente : null;
+    }
+
+    private function proxyStatus(BillingApiException $exception): int {
+        $status = $exception->httpStatusCode();
+        if ($status >= 400 && $status < 500) {
+            return $status;
+        }
+
+        return 502;
+    }
+
+    private function fiscalDocumentStatus(BillingApiException $exception): int {
+        $status = $exception->httpStatusCode();
+        if ($status >= 400 && $status < 500) {
+            return $status;
+        }
+
+        return 502;
+    }
+
+    private function fiscalDocumentErrorCode(string $documentType, BillingApiException $exception): string {
+        $prefix = $documentType === 'xml' ? 'BILLING_XML' : 'BILLING_RIDE_PDF';
+        $status = $exception->httpStatusCode();
+        if ($status === 400) {
+            return $prefix . '_INVALID_KEY';
+        }
+        if ($status === 404 || $status === 409) {
+            return $prefix . '_NOT_AVAILABLE';
+        }
+
+        return $prefix . '_FAILED';
+    }
+
+    private function fiscalDocumentErrorMessage(string $documentType, BillingApiException $exception): string {
+        $status = $exception->httpStatusCode();
+        if ($status === 400) {
+            return 'La clave de acceso del comprobante no es valida.';
+        }
+        if ($status === 404 || $status === 409) {
+            return $this->fiscalDocumentUnavailableMessage($documentType);
+        }
+
+        if ($documentType === 'xml') {
+            return 'No se pudo preparar el XML autorizado. Consulta el estado del comprobante o intenta nuevamente mas tarde.';
+        }
+
+        return 'No se pudo preparar el RIDE PDF. Consulta el estado del comprobante o intenta nuevamente mas tarde.';
+    }
+
+    private function fiscalDocumentUnavailableMessage(string $documentType): string {
+        if ($documentType === 'xml') {
+            return 'El XML autorizado aun no esta disponible para descarga. Consulta el estado del comprobante o intenta nuevamente mas tarde.';
+        }
+
+        return 'El RIDE PDF aun no esta disponible para este comprobante. Consulta el estado o intenta nuevamente mas tarde.';
+    }
+
+    private function fiscalDocumentErrorDetails(string $documentType, BillingApiException $exception): array {
+        $status = $exception->httpStatusCode();
+        if ($status === 404 || $status === 409) {
+            return $this->fiscalDocumentUnavailableDetails($documentType);
+        }
+
+        return [
+            'document' => $documentType,
+            'status' => 'failed',
+            'action' => 'check_status',
+        ];
+    }
+
+    private function fiscalDocumentUnavailableDetails(string $documentType): array {
+        return [
+            'document' => $documentType,
+            'status' => 'pending',
+            'action' => 'check_status',
+            'retry_after_seconds' => 3600,
+        ];
     }
 
     private function syncOrderBillingMetadata(array $result): void {
@@ -110,7 +973,7 @@ class BillingDocumentController {
         $accountingDate = is_array($accountingDates[$orderId] ?? null) ? $accountingDates[$orderId] : [];
 
         $metadata = [
-            'provider' => 'facturador',
+            'provider' => 'billing-sri',
             'status' => 'reissued',
             'invoice_status' => $newInvoice['sri_status'] ?? null,
             'access_key' => $newInvoice['access_key'] ?? null,

@@ -5,6 +5,7 @@ namespace App\Repositories;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Exceptions\FinancialPeriodClosedException;
+use App\Modules\ReportingFinance\Domain\ReportingFinanceDomain;
 use DateTimeImmutable;
 use PDO;
 
@@ -17,7 +18,7 @@ class BusinessExpenseRepository {
     private array $frequencies = ['weekly', 'monthly'];
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(ReportingFinanceDomain::KEY);
         $this->financialPeriods = new FinancialPeriodRepository($this->db);
         $this->ensureSchema();
     }

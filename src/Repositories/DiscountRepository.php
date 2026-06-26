@@ -4,13 +4,14 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Domain\CommerceDomain;
 use PDO;
 
 class DiscountRepository {
     private $db;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(CommerceDomain::KEY);
     }
 
     public function listAll() {

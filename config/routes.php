@@ -1,114 +1,22 @@
 <?php
 
-return [
-    ['method' => 'GET', 'path' => '/api/products', 'handler' => 'ProductController@index', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/products/{id}/reviews', 'handler' => 'ProductReviewController@indexForProduct', 'capability' => 'catalog.reviews'],
-    ['method' => 'POST', 'path' => '/api/products/{id}/reviews', 'handler' => 'ProductReviewController@storeForProduct', 'capability' => 'catalog.reviews'],
-    ['method' => 'GET', 'path' => '/api/products/{id}/movement', 'handler' => 'ProductController@movement', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/products/{id}', 'handler' => 'ProductController@show', 'capability' => 'catalog.public'],
-    ['method' => 'POST', 'path' => '/api/products', 'handler' => 'ProductController@store', 'capability' => 'catalog.admin'],
-    ['method' => 'PUT', 'path' => '/api/products/{id}', 'handler' => 'ProductController@update', 'capability' => 'catalog.admin'],
-    ['method' => 'DELETE', 'path' => '/api/products/{id}', 'handler' => 'ProductController@destroy', 'capability' => 'catalog.admin'],
-
-    ['method' => 'GET', 'path' => '/api/users', 'handler' => 'UserController@index', 'capability' => 'users.admin'],
-    ['method' => 'POST', 'path' => '/api/users', 'handler' => 'UserController@store', 'capability' => 'users.admin'],
-    ['method' => 'PUT', 'path' => '/api/users/{id}', 'handler' => 'UserController@update', 'capability' => 'users.admin'],
-    ['method' => 'POST', 'path' => '/api/users/{id}/unlock', 'handler' => 'UserController@unlock', 'capability' => 'users.admin'],
-    ['method' => 'GET', 'path' => '/api/user/addresses', 'handler' => 'UserController@getAddresses', 'capability' => 'users.profile'],
-    ['method' => 'PUT', 'path' => '/api/user/addresses', 'handler' => 'UserController@updateAddresses', 'capability' => 'users.profile'],
-    ['method' => 'GET', 'path' => '/api/user/profile', 'handler' => 'UserController@getProfile', 'capability' => 'users.profile'],
-    ['method' => 'PUT', 'path' => '/api/user/profile', 'handler' => 'UserController@updateProfile', 'capability' => 'users.profile'],
-    ['method' => 'PUT', 'path' => '/api/user/password', 'handler' => 'UserController@updatePassword', 'capability' => 'users.profile'],
-    ['method' => 'POST', 'path' => '/api/auth/login', 'handler' => 'AuthController@login', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/logout', 'handler' => 'AuthController@logout', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/register', 'handler' => 'AuthController@register', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/request-otp', 'handler' => 'AuthController@requestOtp', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/verify-otp', 'handler' => 'AuthController@verifyOtp', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/password-reset/request', 'handler' => 'AuthController@requestPasswordReset', 'capability' => 'users.auth'],
-    ['method' => 'POST', 'path' => '/api/auth/password-reset/confirm', 'handler' => 'AuthController@confirmPasswordReset', 'capability' => 'users.auth'],
-    ['method' => 'GET', 'path' => '/api/auth/verify', 'handler' => 'AuthController@verify', 'capability' => 'users.auth'],
-    ['method' => 'GET', 'path' => '/api/auth/session', 'handler' => 'AuthController@session', 'capability' => 'users.auth'],
-    ['method' => 'GET', 'path' => '/api/tenant/context', 'handler' => 'TenantController@context', 'capability' => 'users.auth'],
-
-    ['method' => 'GET', 'path' => '/api/orders', 'handler' => 'OrderController@index', 'capability' => 'orders.admin'],
-    ['method' => 'GET', 'path' => '/api/orders/my-orders', 'handler' => 'OrderController@myOrders', 'capability' => 'orders.checkout'],
-    ['method' => 'GET', 'path' => '/api/orders/{id}', 'handler' => 'OrderController@show', 'capability' => 'orders.checkout'],
-    ['method' => 'PATCH', 'path' => '/api/orders/{id}/status', 'handler' => 'OrderController@updateStatus', 'capability' => 'orders.admin'],
-    ['method' => 'GET', 'path' => '/api/orders/{id}/invoice', 'handler' => 'OrderController@invoice', 'capability' => 'orders.checkout'],
-    ['method' => 'POST', 'path' => '/api/orders', 'handler' => 'OrderController@store', 'capability' => 'orders.checkout'],
-    ['method' => 'POST', 'path' => '/api/orders/quote', 'handler' => 'OrderController@quote', 'capability' => 'orders.checkout'],
-    ['method' => 'POST', 'path' => '/api/admin/historical-sales', 'handler' => 'OrderController@storeHistoricalSale', 'capability' => 'orders.admin'],
-
-    ['method' => 'GET', 'path' => '/api/admin/dashboard/stats', 'handler' => 'DashboardController@stats', 'capability' => 'admin.reporting'],
-    ['method' => 'GET', 'path' => '/api/admin/report', 'handler' => 'DashboardController@report', 'capability' => 'admin.reporting'],
-    ['method' => 'GET', 'path' => '/api/admin/inventory/intelligence', 'handler' => 'InventoryController@intelligence', 'capability' => 'admin.reporting'],
-    ['method' => 'GET', 'path' => '/api/admin/reviews', 'handler' => 'ProductReviewController@adminIndex', 'capability' => 'catalog.reviews.admin'],
-    ['method' => 'PATCH', 'path' => '/api/admin/reviews/{id}', 'handler' => 'ProductReviewController@adminUpdate', 'capability' => 'catalog.reviews.admin'],
-
-    ['method' => 'GET', 'path' => '/api/admin/settings/tax', 'handler' => 'SettingsController@getVat', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/tax', 'handler' => 'SettingsController@updateVat', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/session', 'handler' => 'SettingsController@getSessionSettings', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/session', 'handler' => 'SettingsController@updateSessionSettings', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/settings/shipping', 'handler' => 'SettingsController@getShipping', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/settings/store-status', 'handler' => 'SettingsController@getStoreStatus', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/settings/brand-logos', 'handler' => 'SettingsController@getPublicBrandLogos', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/settings/product-categories', 'handler' => 'SettingsController@getPublicProductCategories', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/settings/product-category-references', 'handler' => 'SettingsController@getPublicProductCategoryReferences', 'capability' => 'catalog.public'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/shipping', 'handler' => 'SettingsController@getShipping', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/shipping', 'handler' => 'SettingsController@updateShipping', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/store-status', 'handler' => 'SettingsController@getStoreStatus', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/store-status', 'handler' => 'SettingsController@updateStoreStatus', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/product-page', 'handler' => 'SettingsController@getProductPage', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/product-page', 'handler' => 'SettingsController@updateProductPage', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/pricing-margins', 'handler' => 'SettingsController@getPricingMargins', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/pricing-margins', 'handler' => 'SettingsController@updatePricingMargins', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/pricing-calc', 'handler' => 'SettingsController@getPricingCalc', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/pricing-calc', 'handler' => 'SettingsController@updatePricingCalc', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/pricing-rules', 'handler' => 'SettingsController@getPricingRules', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/pricing-rules', 'handler' => 'SettingsController@updatePricingRules', 'capability' => 'admin.settings'],
-    ['method' => 'GET', 'path' => '/api/admin/settings/product-reference-data', 'handler' => 'SettingsController@getProductReferenceData', 'capability' => 'admin.settings'],
-    ['method' => 'PUT', 'path' => '/api/admin/settings/product-reference-data', 'handler' => 'SettingsController@updateProductReferenceData', 'capability' => 'admin.settings'],
-
-    ['method' => 'GET', 'path' => '/api/admin/discounts', 'handler' => 'DiscountController@index', 'capability' => 'admin.discounts'],
-    ['method' => 'POST', 'path' => '/api/admin/discounts', 'handler' => 'DiscountController@store', 'capability' => 'admin.discounts'],
-    ['method' => 'GET', 'path' => '/api/admin/discounts/audit', 'handler' => 'DiscountController@audit', 'capability' => 'admin.discounts'],
-    ['method' => 'GET', 'path' => '/api/admin/discounts/{id}', 'handler' => 'DiscountController@show', 'capability' => 'admin.discounts'],
-    ['method' => 'PUT', 'path' => '/api/admin/discounts/{id}', 'handler' => 'DiscountController@update', 'capability' => 'admin.discounts'],
-    ['method' => 'PATCH', 'path' => '/api/admin/discounts/{id}/status', 'handler' => 'DiscountController@updateStatus', 'capability' => 'admin.discounts'],
-
-    ['method' => 'GET', 'path' => '/api/admin/expenses', 'handler' => 'BusinessExpenseController@index', 'capability' => 'admin.finance'],
-    ['method' => 'POST', 'path' => '/api/admin/expenses', 'handler' => 'BusinessExpenseController@store', 'capability' => 'admin.finance'],
-    ['method' => 'GET', 'path' => '/api/admin/financial-periods', 'handler' => 'FinancialPeriodController@index', 'capability' => 'admin.finance'],
-    ['method' => 'GET', 'path' => '/api/admin/financial-periods/{period}/preview', 'handler' => 'FinancialPeriodController@preview', 'capability' => 'admin.finance'],
-    ['method' => 'POST', 'path' => '/api/admin/financial-periods/{period}/close', 'handler' => 'FinancialPeriodController@close', 'capability' => 'admin.finance'],
-    ['method' => 'POST', 'path' => '/api/admin/financial-adjustments', 'handler' => 'FinancialPeriodController@storeAdjustment', 'capability' => 'admin.finance'],
-    ['method' => 'GET', 'path' => '/api/admin/expenses/recurrences', 'handler' => 'BusinessExpenseController@recurrences', 'capability' => 'admin.finance'],
-    ['method' => 'POST', 'path' => '/api/admin/expenses/recurrences', 'handler' => 'BusinessExpenseController@storeRecurrence', 'capability' => 'admin.finance'],
-    ['method' => 'PUT', 'path' => '/api/admin/expenses/recurrences/{id}', 'handler' => 'BusinessExpenseController@updateRecurrence', 'capability' => 'admin.finance'],
-    ['method' => 'DELETE', 'path' => '/api/admin/expenses/recurrences/{id}', 'handler' => 'BusinessExpenseController@deleteRecurrence', 'capability' => 'admin.finance'],
-    ['method' => 'PUT', 'path' => '/api/admin/expenses/{id}', 'handler' => 'BusinessExpenseController@update', 'capability' => 'admin.finance'],
-    ['method' => 'PATCH', 'path' => '/api/admin/expenses/{id}/status', 'handler' => 'BusinessExpenseController@updateStatus', 'capability' => 'admin.finance'],
-
-    ['method' => 'GET', 'path' => '/api/admin/purchase-invoices', 'handler' => 'PurchaseInvoiceController@index', 'capability' => 'admin.procurement'],
-    ['method' => 'GET', 'path' => '/api/admin/purchase-invoices/{id}', 'handler' => 'PurchaseInvoiceController@show', 'capability' => 'admin.procurement'],
-    ['method' => 'GET', 'path' => '/api/admin/billing/rides', 'handler' => 'BillingDocumentController@rides', 'capability' => 'billing.documents'],
-    ['method' => 'GET', 'path' => '/api/admin/billing/rides/{accessKey}/pdf', 'handler' => 'BillingDocumentController@ridePdf', 'capability' => 'billing.documents'],
-    ['method' => 'POST', 'path' => '/api/admin/billing/rides/{accessKey}/cancel-and-reissue', 'handler' => 'BillingDocumentController@cancelAndReissue', 'capability' => 'billing.documents'],
-
-    ['method' => 'GET', 'path' => '/api/admin/pos/shift/active', 'handler' => 'PosController@activeShift', 'capability' => 'admin.pos'],
-    ['method' => 'GET', 'path' => '/api/admin/pos/shifts', 'handler' => 'PosController@shifts', 'capability' => 'admin.pos'],
-    ['method' => 'GET', 'path' => '/api/admin/pos/movements', 'handler' => 'PosController@movements', 'capability' => 'admin.pos'],
-    ['method' => 'GET', 'path' => '/api/admin/pos/customer-by-document', 'handler' => 'PosController@customerByDocument', 'capability' => 'admin.pos'],
-    ['method' => 'POST', 'path' => '/api/admin/pos/shift/open', 'handler' => 'PosController@openShift', 'capability' => 'admin.pos'],
-    ['method' => 'POST', 'path' => '/api/admin/pos/shift/close', 'handler' => 'PosController@closeShift', 'capability' => 'admin.pos'],
-    ['method' => 'POST', 'path' => '/api/admin/pos/movements', 'handler' => 'PosController@addMovement', 'capability' => 'admin.pos'],
-    ['method' => 'GET', 'path' => '/api/admin/quotes', 'handler' => 'QuotationController@index', 'capability' => 'admin.quotes'],
-    ['method' => 'POST', 'path' => '/api/admin/quotes', 'handler' => 'QuotationController@store', 'capability' => 'admin.quotes'],
-    ['method' => 'POST', 'path' => '/api/admin/quotes/{id}/convert', 'handler' => 'QuotationController@convert', 'capability' => 'admin.quotes'],
-    ['method' => 'GET', 'path' => '/api/shipments', 'handler' => 'ShippingController@index', 'capability' => 'admin.operations'],
-
-    ['method' => 'POST', 'path' => '/api/contact', 'handler' => 'ContactController@store', 'capability' => 'content.contact'],
-    ['method' => 'GET', 'path' => '/api/reports/recent-orders', 'handler' => 'ReportController@recentOrders', 'capability' => 'admin.reporting'],
-    ['method' => 'GET', 'path' => '/api/health', 'handler' => 'HealthController@status', 'capability' => 'system.health'],
-    ['method' => 'POST', 'path' => '/api/security/csp-report', 'handler' => 'SecurityController@cspReport', 'capability' => 'security.telemetry'],
+$routeRegistryPaths = [
+    dirname(__DIR__) . '/src/Modules/IdentityPlatform/routes.php',
+    dirname(__DIR__) . '/src/Modules/CatalogInventory/routes.php',
+    dirname(__DIR__) . '/src/Modules/Commerce/routes.php',
+    dirname(__DIR__) . '/src/Modules/Billing/routes.php',
+    dirname(__DIR__) . '/src/Modules/Mailer/routes.php',
+    dirname(__DIR__) . '/src/Modules/ReportingFinance/routes.php',
 ];
+
+$routes = [];
+foreach ($routeRegistryPaths as $registryPath) {
+    $registry = require $registryPath;
+    if (!is_array($registry)) {
+        throw new \RuntimeException(sprintf('Route registry inválido: %s', $registryPath));
+    }
+
+    $routes = array_merge($routes, $registry);
+}
+
+return $routes;

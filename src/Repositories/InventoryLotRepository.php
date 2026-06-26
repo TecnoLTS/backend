@@ -4,13 +4,14 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use PDO;
 
 class InventoryLotRepository {
     private $db;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
     public function previewSaleAllocation(string $productId, int $quantity, int $availableQuantity, float $fallbackUnitCost): array {
@@ -267,15 +268,15 @@ class InventoryLotRepository {
         $stmt = $this->db->prepare('
             UPDATE "InventoryLot"
             SET metadata = COALESCE(metadata, \'{}\'::jsonb)
-                    || :metadata::jsonb
+                    || CAST(:metadata AS jsonb)
                     || jsonb_build_object(
                         \'previous_remaining_quantity\', remaining_quantity,
-                        \'closure_reason\', :reason
+                        \'closure_reason\', CAST(:reason AS text)
                     ),
                 remaining_quantity = 0,
                 updated_at = NOW()
-            WHERE tenant_id = :tenant_id
-              AND product_id = :product_id
+            WHERE tenant_id = CAST(:tenant_id AS text)
+              AND product_id = CAST(:product_id AS text)
               AND remaining_quantity > 0
             RETURNING id, remaining_quantity AS closed_remaining_quantity
         ');

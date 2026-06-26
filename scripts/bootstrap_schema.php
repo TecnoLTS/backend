@@ -45,7 +45,7 @@ function connect(array $config): PDO {
     ]);
 }
 
-function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
+function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options = []): void {
     $statements = [
         'CREATE TABLE IF NOT EXISTS "Tenant" (id text PRIMARY KEY, name text, created_at timestamp without time zone DEFAULT NOW())',
         'CREATE TABLE IF NOT EXISTS "User" (
@@ -59,6 +59,42 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
             email_verified boolean DEFAULT false NOT NULL,
             verification_token text,
             role text DEFAULT \'customer\' NOT NULL
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_module_entitlements (
+            tenant_id text NOT NULL,
+            module_key text NOT NULL,
+            status text NOT NULL DEFAULT \'active\',
+            source text NOT NULL DEFAULT \'configured-tenant\',
+            granted_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, module_key)
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_memberships (
+            tenant_id text NOT NULL,
+            user_id text NOT NULL,
+            identity_type text NOT NULL DEFAULT \'customer\',
+            status text NOT NULL DEFAULT \'active\',
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, user_id)
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_roles (
+            tenant_id text NOT NULL,
+            role_id text NOT NULL,
+            name text NOT NULL,
+            description text,
+            permissions jsonb NOT NULL DEFAULT \'[]\'::jsonb,
+            system_role boolean NOT NULL DEFAULT false,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, role_id)
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_user_roles (
+            tenant_id text NOT NULL,
+            user_id text NOT NULL,
+            role_id text NOT NULL,
+            assigned_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, user_id, role_id)
         )',
         'CREATE TABLE IF NOT EXISTS "Product" (
             id text PRIMARY KEY,
@@ -598,6 +634,24 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
         'CREATE INDEX IF NOT EXISTS "User_tenant_id_idx" ON "User" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "User_tenant_email_idx" ON "User" (tenant_id, email)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "User_tenant_email_uidx" ON "User" (tenant_id, email)',
+        'CREATE INDEX IF NOT EXISTS tenant_module_entitlements_status_idx ON tenant_module_entitlements (tenant_id, status, module_key)',
+        'CREATE INDEX IF NOT EXISTS tenant_memberships_identity_idx ON tenant_memberships (tenant_id, identity_type, status)',
+        'CREATE INDEX IF NOT EXISTS tenant_roles_system_idx ON tenant_roles (tenant_id, system_role)',
+        'CREATE INDEX IF NOT EXISTS tenant_user_roles_role_idx ON tenant_user_roles (tenant_id, role_id)',
+        'INSERT INTO tenant_memberships (tenant_id, user_id, identity_type, status, created_at, updated_at)
+            SELECT
+                COALESCE(tenant_id, \'' . str_replace("'", "''", $defaultTenant) . '\'),
+                id,
+                CASE
+                    WHEN LOWER(COALESCE(role, \'\')) = \'admin\' THEN \'tenant_staff\'
+                    ELSE \'customer\'
+                END,
+                CASE WHEN COALESCE(email_verified, false) THEN \'active\' ELSE \'inactive\' END,
+                COALESCE(created_at, NOW()),
+                COALESCE(updated_at, NOW())
+            FROM "User"
+            WHERE tenant_id IS NOT NULL
+            ON CONFLICT (tenant_id, user_id) DO NOTHING',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_id_idx" ON "Product" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_published_idx" ON "Product" (tenant_id, is_published)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_slug_idx" ON "Product" (tenant_id, slug)',
@@ -672,8 +726,26 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
         'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'InventoryLotAllocation_order_item_id_fkey\') THEN ALTER TABLE "InventoryLotAllocation" ADD CONSTRAINT "InventoryLotAllocation_order_item_id_fkey" FOREIGN KEY (order_item_id) REFERENCES "OrderItem"(id) ON UPDATE CASCADE ON DELETE SET NULL; END IF; END $$',
     ];
 
+    $skipConstraints = array_flip(array_map('strval', $options['skip_constraints'] ?? []));
+
     foreach ($statements as $sql) {
-        $pdo->exec($sql);
+        foreach ($skipConstraints as $constraintName => $_) {
+            if ($constraintName !== '' && str_contains($sql, $constraintName)) {
+                continue 2;
+            }
+        }
+
+        try {
+            $pdo->exec($sql);
+        } catch (PDOException $e) {
+            if ((string)$e->getCode() === '42501') {
+                $summary = trim(preg_replace('/\s+/', ' ', substr($sql, 0, 160)) ?? '');
+                fwrite(STDERR, '[schema] warning skipped insufficient-privilege statement: ' . $summary . PHP_EOL);
+                continue;
+            }
+
+            throw $e;
+        }
     }
 
     $stmtUser = $pdo->prepare('UPDATE "User" SET tenant_id = COALESCE(tenant_id, :tenant)');
@@ -853,6 +925,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant): void {
     }
 }
 
+function runSchemaBootstrap(): int {
 $defaultConfig = [
     'host' => envValue('DB_HOST', 'db'),
     'port' => envValue('DB_PORT', '5432'),
@@ -919,7 +992,12 @@ try {
     }
 } catch (Throwable $e) {
     fwrite(STDERR, '[schema] error: ' . $e->getMessage() . PHP_EOL);
-    exit(1);
+    return 1;
 }
 
-exit(0);
+return 0;
+}
+
+if (realpath((string)($_SERVER['SCRIPT_FILENAME'] ?? '')) === __FILE__) {
+    exit(runSchemaBootstrap());
+}

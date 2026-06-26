@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use App\Repositories\SettingsRepository;
 use PDO;
 
@@ -12,7 +13,7 @@ class InventoryIntelligenceService {
     private float $defaultVatRate;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
         $settings = new SettingsRepository();
         $vatRate = $settings->get('vat_rate');
         $this->defaultVatRate = is_numeric($vatRate) ? max(0.0, (float)$vatRate) : 0.0;

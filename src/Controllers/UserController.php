@@ -5,12 +5,16 @@ namespace App\Controllers;
 use App\Repositories\UserRepository;
 use App\Core\Response;
 use App\Core\Auth;
+use App\Core\TenantContext;
+use App\Modules\IdentityPlatform\Application\TenantAccessService;
 
 class UserController {
     private $userRepository;
+    private TenantAccessService $tenantAccessService;
 
     public function __construct() {
         $this->userRepository = new UserRepository();
+        $this->tenantAccessService = new TenantAccessService();
     }
 
     private function authenticate() {
@@ -42,7 +46,7 @@ class UserController {
         return 'customer';
     }
 
-    private function normalizeManagedProfile(array $data, array $existingProfile = []): array {
+    private function normalizeManagedProfile(array $data, array $existingProfile = [], string $databaseRole = 'customer'): array {
         $profile = $existingProfile;
         $phone = $this->normalizeText($data['phone'] ?? ($data['profile']['phone'] ?? null), 60);
 
@@ -51,6 +55,35 @@ class UserController {
         } else {
             unset($profile['phone']);
         }
+
+        $department = $this->normalizeText($data['department'] ?? ($data['profile']['department'] ?? null), 120);
+        if ($department !== null) {
+            $profile['department'] = $department;
+        }
+
+        $position = $this->normalizeText($data['position'] ?? ($data['profile']['position'] ?? null), 120);
+        if ($position !== null) {
+            $profile['position'] = $position;
+        }
+
+        $description = $this->normalizeText($data['description'] ?? ($data['profile']['description'] ?? null), 500);
+        if ($description !== null) {
+            $profile['description'] = $description;
+        } else {
+            unset($profile['description']);
+        }
+
+        $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
+        if ($roleIds !== []) {
+            $profile['roleIds'] = $roleIds;
+        } elseif (empty($profile['roleIds'])) {
+            $profile['roleIds'] = [
+                $databaseRole === 'admin'
+                    ? $this->defaultRoleId('admin')
+                    : $this->defaultRoleId('reader')
+            ];
+        }
+        $profile['identityType'] = $this->managedIdentityTypeFromRoleIds($profile['roleIds']);
 
         return $profile;
     }
@@ -68,11 +101,11 @@ class UserController {
             exit;
         }
 
-        $role = $this->normalizeRole($data['role'] ?? 'customer');
+        $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
+        $role = $roleIds !== [] ? $this->databaseRoleFromRoleIds($roleIds) : $this->normalizeRole($data['role'] ?? 'customer');
         $password = trim((string)($data['password'] ?? ''));
         if ($isCreate && $password === '') {
-            Response::error('La contraseña es obligatoria', 400, 'USER_PASSWORD_REQUIRED');
-            exit;
+            $password = bin2hex(random_bytes(24));
         }
 
         if ($password !== '' && mb_strlen($password) < 12) {
@@ -101,22 +134,74 @@ class UserController {
             'email' => $email,
             'role' => $role,
             'password' => $password,
-            'email_verified' => (bool)($data['emailVerified'] ?? ($data['email_verified'] ?? true)),
+            'email_verified' => $this->isTruthyDbValue($data['emailVerified'] ?? ($data['email_verified'] ?? true)),
             'document_type' => $documentType,
             'document_number' => $documentNumber,
             'business_name' => $this->normalizeText($data['businessName'] ?? ($data['business_name'] ?? null), 180),
-            'profile' => $this->normalizeManagedProfile($data, $existingProfile),
+            'profile' => $this->normalizeManagedProfile($data, $existingProfile, $role),
         ];
     }
 
     public function index() {
         Auth::requireAdmin();
         try {
-            $users = $this->userRepository->getAll();
-            Response::json($users);
+            Response::noStore();
+            $query = $_GET;
+            $search = strtolower(trim((string)($query['search'] ?? '')));
+            $scope = strtolower(trim((string)($query['scope'] ?? 'tenant')));
+            $status = strtolower(trim((string)($query['status'] ?? 'all')));
+            $page = max(1, (int)($query['page'] ?? 1));
+            $pageSize = max(1, min(100, (int)($query['pageSize'] ?? 10)));
+            $managedUsers = array_values(array_filter(
+                $this->userRepository->getAll(),
+                fn (array $user): bool => $this->matchesDashboardScope($user, $scope)
+            ));
+            $users = array_map(fn (array $user): array => $this->dashboardUser($user), $managedUsers);
+
+            if ($search !== '') {
+                $users = array_values(array_filter($users, static function (array $user) use ($search): bool {
+                    $haystack = strtolower(implode(' ', [
+                        $user['name'] ?? '',
+                        $user['email'] ?? '',
+                        $user['department'] ?? '',
+                        $user['position'] ?? '',
+                        implode(' ', $user['roles'] ?? []),
+                    ]));
+                    return str_contains($haystack, $search);
+                }));
+            }
+
+            if (in_array($status, ['active', 'inactive', 'blocked'], true)) {
+                $users = array_values(array_filter($users, static fn (array $user): bool => ($user['status'] ?? '') === $status));
+            }
+
+            $totalItems = count($users);
+            $totalPages = max(1, (int)ceil($totalItems / $pageSize));
+            $page = min($page, $totalPages);
+            $offset = ($page - 1) * $pageSize;
+
+            Response::json(array_slice($users, $offset, $pageSize), 200, [
+                'page' => $page,
+                'pageSize' => $pageSize,
+                'totalItems' => $totalItems,
+                'totalPages' => $totalPages,
+            ]);
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USERS_LIST_FAILED');
         }
+    }
+
+    public function show($id) {
+        Auth::requireAdmin();
+
+        $user = $this->userRepository->getAdminUserById($id);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+
+        Response::noStore();
+        Response::json($this->dashboardUser($user));
     }
 
     public function store() {
@@ -137,7 +222,7 @@ class UserController {
 
         try {
             $created = $this->userRepository->createManaged($payload);
-            Response::json($created, 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
+            Response::json($this->dashboardUser($created), 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_CREATE_FAILED');
         }
@@ -153,7 +238,7 @@ class UserController {
         }
 
         $existingUser = $this->userRepository->getAdminUserById($id);
-        if (!$existingUser) {
+        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
@@ -172,7 +257,66 @@ class UserController {
 
         try {
             $updated = $this->userRepository->updateManaged($id, $payload);
-            Response::json($updated, 200, null, 'Usuario actualizado correctamente.');
+            Response::json($this->dashboardUser($updated), 200, null, 'Usuario actualizado correctamente.');
+        } catch (\Exception $e) {
+            Response::error($e->getMessage(), 500, 'USER_UPDATE_FAILED');
+        }
+    }
+
+    public function patch($id) {
+        $admin = Auth::requireAdmin();
+        $data = json_decode(file_get_contents('php://input'), true);
+
+        if (!is_array($data)) {
+            Response::error('Carga inválida', 400, 'USER_PAYLOAD_INVALID');
+            return;
+        }
+
+        $existingUser = $this->userRepository->getAdminUserById($id);
+        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+
+        $existingProfile = $this->decodeProfile($existingUser['profile'] ?? null);
+        $merged = [
+            'name' => $existingUser['name'] ?? null,
+            'email' => $existingUser['email'] ?? null,
+            'role' => $existingUser['role'] ?? 'customer',
+            'email_verified' => $this->isTruthyDbValue($existingUser['email_verified'] ?? false),
+            'document_type' => $existingUser['document_type'] ?? null,
+            'document_number' => $existingUser['document_number'] ?? null,
+            'business_name' => $existingUser['business_name'] ?? null,
+            'phone' => $existingProfile['phone'] ?? null,
+            'department' => $existingProfile['department'] ?? null,
+            'position' => $existingProfile['position'] ?? null,
+            'description' => $existingProfile['description'] ?? null,
+            'roles' => $existingProfile['roleIds'] ?? null,
+        ];
+        $merged = array_replace($merged, $data);
+
+        if (isset($data['status']) && in_array($data['status'], ['active', 'inactive'], true)) {
+            $merged['email_verified'] = $data['status'] === 'active';
+        }
+
+        $payload = $this->validateManagedPayload($merged, false, $existingUser);
+
+        if (($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
+            Response::error('No puedes quitarte tu propio rol de administrador desde aquí', 400, 'USER_SELF_ROLE_CHANGE_FORBIDDEN');
+            return;
+        }
+
+        if ($this->userRepository->emailExists($payload['email'], $id)) {
+            Response::error('Ya existe otro usuario con ese correo', 409, 'USER_EMAIL_EXISTS');
+            return;
+        }
+
+        try {
+            $updated = $this->userRepository->updateManaged($id, $payload);
+            if (isset($data['status'])) {
+                $updated = $this->userRepository->setManagedStatus($id, (string)$data['status']);
+            }
+            Response::json($this->dashboardUser($updated), 200, null, 'Usuario actualizado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UPDATE_FAILED');
         }
@@ -182,14 +326,14 @@ class UserController {
         Auth::requireAdmin();
 
         $existingUser = $this->userRepository->getAdminUserById($id);
-        if (!$existingUser) {
+        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
 
         try {
             $updated = $this->userRepository->unlockManagedUser($id);
-            Response::json($updated, 200, null, 'Usuario desbloqueado correctamente.');
+            Response::json($this->dashboardUser($updated), 200, null, 'Usuario desbloqueado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UNLOCK_FAILED');
         }
@@ -341,5 +485,151 @@ class UserController {
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_PASSWORD_UPDATE_FAILED');
         }
+    }
+
+    private function dashboardUser(array $user): array {
+        $managedUser = $this->isManagedWorkspaceUserRecord($user);
+        $profile = $this->decodeProfile($user['profile'] ?? null);
+        $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
+        if ($roleIds === []) {
+            $roleIds = $managedUser
+                ? [($user['role'] ?? 'customer') === 'admin' ? $this->defaultRoleId('admin') : $this->defaultRoleId('reader')]
+                : ['customer'];
+        }
+
+        return [
+            'id' => (string)($user['id'] ?? ''),
+            'name' => (string)($user['name'] ?? 'Usuario'),
+            'email' => (string)($user['email'] ?? ''),
+            'phone' => $this->normalizeText($profile['phone'] ?? null, 60),
+            'department' => $this->normalizeText($profile['department'] ?? null, 120)
+                ?? ($managedUser
+                    ? (($user['role'] ?? '') === 'admin' ? 'Administracion' : 'Operacion')
+                    : 'Clientes'),
+            'position' => $this->normalizeText($profile['position'] ?? null, 120)
+                ?? ($managedUser
+                    ? (($user['role'] ?? '') === 'admin' ? 'Administrador' : 'Usuario gestionado')
+                    : 'Cliente'),
+            'status' => $this->dashboardUserStatus($user),
+            'roles' => $roleIds,
+            'avatarUrl' => 'assets/images/user.png',
+            'coverUrl' => 'assets/images/user-grid/user-grid-bg1.png',
+            'description' => $this->normalizeText($profile['description'] ?? null, 500),
+            'createdAt' => $this->formatDate($user['created_at'] ?? null),
+            'updatedAt' => $this->formatDate($user['updated_at'] ?? null),
+        ];
+    }
+
+    private function matchesDashboardScope(array $user, string $scope): bool {
+        if (!$this->isManagedWorkspaceUserRecord($user)) {
+            return false;
+        }
+
+        if ($scope === 'platform') {
+            return $this->isPlatformWorkspaceUserRecord($user);
+        }
+
+        if ($scope === 'all') {
+            return true;
+        }
+
+        return !$this->isPlatformWorkspaceUserRecord($user);
+    }
+
+    private function isManagedWorkspaceUserRecord(array $user): bool {
+        return in_array(
+            $this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []),
+            ['platform', 'tenant_staff'],
+            true
+        );
+    }
+
+    private function isPlatformWorkspaceUserRecord(array $user): bool {
+        return $this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []) === 'platform';
+    }
+
+    private function dashboardUserStatus(array $user): string {
+        $lockedUntil = strtotime((string)($user['login_locked_until'] ?? ''));
+        if ($lockedUntil !== false && $lockedUntil > time()) {
+            return 'blocked';
+        }
+
+        return $this->isTruthyDbValue($user['email_verified'] ?? false) ? 'active' : 'inactive';
+    }
+
+    private function decodeProfile($profile): array {
+        if (is_array($profile)) {
+            return $profile;
+        }
+
+        if (!is_string($profile) || trim($profile) === '') {
+            return [];
+        }
+
+        $decoded = json_decode($profile, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function normalizeRoleIds($value): array {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $roleIds = [];
+        foreach ($value as $roleId) {
+            $normalized = strtolower(trim((string)$roleId));
+            if ($normalized !== '') {
+                $roleIds[] = $normalized;
+            }
+        }
+
+        return array_values(array_unique($roleIds));
+    }
+
+    private function databaseRoleFromRoleIds(array $roleIds): string {
+        if ($roleIds === []) {
+            return 'customer';
+        }
+
+        foreach ($roleIds as $roleId) {
+            if (!in_array($roleId, ['buyer', 'customer', 'guest', 'shopper'], true)) {
+                return 'admin';
+            }
+        }
+
+        return 'customer';
+    }
+
+    private function managedIdentityTypeFromRoleIds(array $roleIds): string {
+        foreach ($roleIds as $roleId) {
+            if (in_array($roleId, ['platform_admin', 'superadmin'], true)) {
+                return 'platform';
+            }
+        }
+
+        return 'tenant_staff';
+    }
+
+    private function defaultRoleId(string $type): string {
+        $tenantSlug = TenantContext::slug() ?: 'tenant';
+        return "{$tenantSlug}_{$type}";
+    }
+
+    private function formatDate($value): string {
+        $timestamp = strtotime((string)($value ?? ''));
+        return $timestamp !== false ? gmdate('c', $timestamp) : gmdate('c');
+    }
+
+    private function isTruthyDbValue($value): bool {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return (int)$value === 1;
+        }
+
+        $normalized = strtolower(trim((string)$value));
+        return in_array($normalized, ['1', 'true', 't', 'yes', 'y', 'on'], true);
     }
 }

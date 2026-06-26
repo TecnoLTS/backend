@@ -4,7 +4,9 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use App\Support\ProductAudience;
+use App\Support\ProductSeoMetadata;
 
 class ProductRepository {
     private $db;
@@ -12,7 +14,7 @@ class ProductRepository {
     private $pricingSettingsCache = null;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
     private function getBaseQuery(bool $includeProcurement = false) {
@@ -198,6 +200,87 @@ class ProductRepository {
         $stmt = $this->db->prepare($sql);
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $rows = $stmt->fetchAll();
+        return array_map([$this, 'formatRow'], $rows);
+    }
+
+    public function searchForBilling(string $search = '', int $limit = 12, array $options = []): array {
+        $includeUnpublished = (bool)($options['includeUnpublished'] ?? true);
+        $includeProcurement = (bool)($options['includeProcurement'] ?? false);
+        $includeArchived = (bool)($options['includeArchived'] ?? false);
+        $includeOutOfStock = array_key_exists('includeOutOfStock', $options)
+            ? (bool)$options['includeOutOfStock']
+            : true;
+        $limit = max(1, min(101, $limit));
+        $search = trim($search);
+        $params = ['tenant_id' => $this->getTenantId()];
+        $visibilityFilter = $includeUnpublished ? '' : ' AND p.is_published = true';
+        $stockFilter = $includeOutOfStock ? '' : ' AND p.quantity > 0';
+        $archivedFilter = $this->getArchivedFilter($includeArchived);
+        $searchFilter = '';
+        $orderBy = ' ORDER BY (p.quantity > 0) DESC, p.updated_at DESC, p.created_at DESC, p.id DESC';
+
+        if ($search !== '') {
+            $tokens = array_slice(preg_split('/\s+/', $search) ?: [], 0, 6);
+            foreach ($tokens as $index => $token) {
+                $token = trim($token);
+                if ($token === '') {
+                    continue;
+                }
+                $key = 'q' . $index;
+                $params[$key] = '%' . $token . '%';
+                $searchFilter .= "
+                    AND (
+                      p.name ILIKE :{$key}
+                      OR COALESCE(p.brand, '') ILIKE :{$key}
+                      OR COALESCE(p.category, '') ILIKE :{$key}
+                      OR COALESCE(p.product_type, '') ILIKE :{$key}
+                      OR COALESCE(p.attributes->>'sku', '') ILIKE :{$key}
+                      OR COALESCE(p.attributes->>'presentation', '') ILIKE :{$key}
+                      OR COALESCE(p.attributes->>'variantLabel', '') ILIKE :{$key}
+                      OR ROUND(p.price::numeric, 2)::text ILIKE :{$key}
+                      OR ROUND((
+                        p.price * (
+                          1 + (
+                            CASE
+                              WHEN COALESCE(p.attributes->>'taxRate', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                THEN (p.attributes->>'taxRate')::numeric
+                              ELSE 15
+                            END
+                          ) / 100
+                        )
+                      )::numeric, 2)::text ILIKE :{$key}
+                    )
+                ";
+            }
+
+            $params['exact_search'] = strtolower($search);
+            $params['prefix_search'] = $search . '%';
+            $orderBy = "
+                ORDER BY
+                  (p.quantity > 0) DESC,
+                  CASE
+                    WHEN LOWER(COALESCE(p.attributes->>'sku', '')) = :exact_search THEN 0
+                    WHEN p.name ILIKE :prefix_search THEN 1
+                    WHEN COALESCE(p.brand, '') ILIKE :prefix_search THEN 2
+                    ELSE 3
+                  END,
+                  p.name ASC,
+                  p.id DESC
+            ";
+        }
+
+        $sql = $this->getBaseQuery($includeProcurement)
+            . ' WHERE p.tenant_id = :tenant_id'
+            . $visibilityFilter
+            . $stockFilter
+            . $archivedFilter
+            . $searchFilter
+            . $orderBy
+            . ' LIMIT ' . $limit;
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
         return array_map([$this, 'formatRow'], $rows);
     }
 
@@ -564,6 +647,8 @@ class ProductRepository {
             }
             return $variation;
         }, $row['variations']);
+
+        ProductSeoMetadata::applyDefaults($row);
 
         $taxRate = $this->getProductTaxRateForAttributes($row['attributes']);
         $taxMultiplier = $this->getProductTaxMultiplierForAttributes($row['attributes']);
@@ -1871,15 +1956,16 @@ class ProductRepository {
         $tenantId = $this->getTenantId();
         try {
             $selectStmt = $this->db->prepare('
-                SELECT id, legacy_id, name, attributes
+                SELECT id, legacy_id, name, quantity, attributes
                 FROM "Product"
-                WHERE (id = :id OR legacy_id = :id)
-                  AND tenant_id = :tenant_id
+                WHERE (id = CAST(:id AS text) OR legacy_id = CAST(:legacy_id AS text))
+                  AND tenant_id = CAST(:tenant_id AS text)
                 LIMIT 1
                 FOR UPDATE
             ');
             $selectStmt->execute([
                 'id' => $id,
+                'legacy_id' => $id,
                 'tenant_id' => $tenantId,
             ]);
             $current = $selectStmt->fetch();
@@ -1896,6 +1982,30 @@ class ProductRepository {
                 $attributes = [];
             }
 
+            $stockStmt = $this->db->prepare('
+                SELECT
+                    COALESCE(SUM(remaining_quantity), 0)::int AS remaining_units,
+                    COUNT(*)::int AS open_lots_count
+                FROM "InventoryLot"
+                WHERE tenant_id = CAST(:tenant_id AS text)
+                  AND product_id = CAST(:product_id AS text)
+                  AND remaining_quantity > 0
+            ');
+            $stockStmt->execute([
+                'tenant_id' => $tenantId,
+                'product_id' => $current['id'],
+            ]);
+            $stockState = $stockStmt->fetch() ?: [];
+            $currentQuantity = max(0, (int)($current['quantity'] ?? 0));
+            $remainingUnits = max(0, (int)($stockState['remaining_units'] ?? 0));
+            $openLotsCount = max(0, (int)($stockState['open_lots_count'] ?? 0));
+
+            if ($currentQuantity > 0 || $remainingUnits > 0 || $openLotsCount > 0) {
+                throw new \DomainException(
+                    'No se puede archivar un producto con stock activo. Primero registra un ajuste de inventario hasta dejarlo en 0; las compras, facturas y ventas historicas se conservan.'
+                );
+            }
+
             $attributes['archived'] = 'true';
             $attributes['archivedAt'] = gmdate('c');
             $attributes['archivedProductId'] = (string)($current['id'] ?? '');
@@ -1909,9 +2019,9 @@ class ProductRepository {
                 SET is_published = false,
                     quantity = 0,
                     updated_at = NOW(),
-                    attributes = :attributes::jsonb
-                WHERE id = :product_id
-                  AND tenant_id = :tenant_id
+                    attributes = CAST(:attributes AS jsonb)
+                WHERE id = CAST(:product_id AS text)
+                  AND tenant_id = CAST(:tenant_id AS text)
             ');
 
             $updateStmt->execute([

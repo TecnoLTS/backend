@@ -4,6 +4,7 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Mailer\Domain\MailerDomain;
 
 class ContactMessageRepository
 {
@@ -11,7 +12,7 @@ class ContactMessageRepository
 
     public function __construct()
     {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(MailerDomain::KEY);
     }
 
     public function create(array $payload): array

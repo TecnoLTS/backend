@@ -4,6 +4,7 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Domain\CommerceDomain;
 
 class PosRepository {
     private $db;
@@ -11,7 +12,7 @@ class PosRepository {
     private $movementTypes = ['income', 'expense', 'withdrawal', 'deposit', 'adjustment'];
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(CommerceDomain::KEY);
         $this->ensureSchema();
     }
 

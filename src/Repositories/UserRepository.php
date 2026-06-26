@@ -4,12 +4,16 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
 
 class UserRepository {
     private $db;
+    private TenantAccessService $tenantAccessService;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
+        $this->tenantAccessService = new TenantAccessService();
     }
 
     public function getAll() {
@@ -114,7 +118,23 @@ class UserRepository {
     }
 
     public function getById($id) {
-        $stmt = $this->db->prepare('SELECT id, name, email, role FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT
+                id,
+                name,
+                email,
+                role,
+                email_verified,
+                document_type,
+                document_number,
+                business_name,
+                profile,
+                addresses,
+                failed_login_attempts,
+                login_locked_until
+            FROM "User"
+            WHERE id = :id AND tenant_id = :tenant_id
+        ');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId()
@@ -222,7 +242,7 @@ class UserRepository {
     }
 
     public function getAuthState($id) {
-        $stmt = $this->db->prepare('SELECT id, role, active_token_id FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('SELECT id, name, email, role, profile, active_token_id FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId()
@@ -449,6 +469,13 @@ class UserRepository {
             'profile' => !empty($profile) ? json_encode($profile) : null,
             'addresses' => !empty($addresses) ? json_encode($addresses) : null,
         ]);
+        $this->syncIdentityMembership([
+            'id' => $id,
+            'name' => $data['name'],
+            'email' => $data['email'],
+            'role' => $data['role'] ?? 'customer',
+            'profile' => !empty($profile) ? json_encode($profile) : null,
+        ]);
         return ['id' => $id, 'token' => $token];
     }
 
@@ -500,6 +527,13 @@ class UserRepository {
             'business_name' => $data['business_name'] ?? null,
             'profile' => !empty($profile) ? json_encode($profile) : null,
             'addresses' => !empty($addresses) ? json_encode($addresses) : null,
+        ]);
+        $this->syncIdentityMembership([
+            'id' => $id,
+            'name' => $data['name'],
+            'email' => $data['email'],
+            'role' => $data['role'] ?? 'customer',
+            'profile' => !empty($profile) ? json_encode($profile) : null,
         ]);
 
         return ['id' => $id, 'token' => $token];
@@ -559,6 +593,13 @@ class UserRepository {
             'business_name' => $data['business_name'] ?? null,
             'profile' => json_encode($data['profile'] ?? (object)[]),
         ]);
+        $this->syncIdentityMembership([
+            'id' => $id,
+            'name' => $data['name'],
+            'email' => $data['email'],
+            'role' => $data['role'],
+            'profile' => json_encode($data['profile'] ?? (object)[]),
+        ], !empty($data['email_verified']) ? 'active' : 'inactive');
 
         return $this->getAdminUserById($id);
     }
@@ -708,7 +749,62 @@ class UserRepository {
         $stmt = $this->db->prepare($sql);
         $stmt->execute($params);
 
-        return $this->getAdminUserById($id);
+        $updated = $this->getAdminUserById($id);
+        if ($updated) {
+            $this->syncIdentityMembership($updated, !empty($data['email_verified']) ? 'active' : 'inactive');
+        }
+
+        return $updated;
+    }
+
+    public function setManagedStatus(string $id, string $status) {
+        $normalized = strtolower(trim($status));
+        if (!in_array($normalized, ['active', 'inactive', 'blocked'], true)) {
+            return $this->getAdminUserById($id);
+        }
+
+        if ($normalized === 'blocked') {
+            $stmt = $this->db->prepare('
+                UPDATE "User"
+                SET failed_login_attempts = GREATEST(COALESCE(failed_login_attempts, 0), 999),
+                    login_locked_until = :locked_until,
+                    updated_at = NOW()
+                WHERE id = :id AND tenant_id = :tenant_id
+            ');
+            $stmt->execute([
+                'id' => $id,
+                'tenant_id' => $this->getTenantId(),
+                'locked_until' => '2099-12-31 23:59:59',
+            ]);
+
+            $updated = $this->getAdminUserById($id);
+            if ($updated) {
+                $this->syncIdentityMembership($updated, 'blocked');
+            }
+
+            return $updated;
+        }
+
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET email_verified = :email_verified,
+                failed_login_attempts = 0,
+                login_locked_until = NULL,
+                updated_at = NOW()
+            WHERE id = :id AND tenant_id = :tenant_id
+        ');
+        $stmt->execute([
+            'id' => $id,
+            'tenant_id' => $this->getTenantId(),
+            'email_verified' => $normalized === 'active' ? 1 : 0,
+        ]);
+
+        $updated = $this->getAdminUserById($id);
+        if ($updated) {
+            $this->syncIdentityMembership($updated, $normalized);
+        }
+
+        return $updated;
     }
 
     public function verifyToken($token) {
@@ -756,6 +852,19 @@ class UserRepository {
 
     private function getTenantId() {
         return TenantContext::id() ?? ($_ENV['DEFAULT_TENANT'] ?? 'paramascotasec');
+    }
+
+    private function syncIdentityMembership(array $user, string $status = 'active'): void {
+        try {
+            $this->tenantAccessService->syncUserMembership($user, TenantContext::get() ?? [], $status);
+        } catch (\Throwable $e) {
+            error_log(sprintf(
+                '[IDENTITY_MEMBERSHIP_SYNC_FAILED] tenant=%s user=%s error=%s',
+                $this->getTenantId(),
+                (string)($user['id'] ?? ''),
+                $e->getMessage()
+            ));
+        }
     }
 
     private function decodeJsonObject($value): array {

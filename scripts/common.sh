@@ -60,9 +60,6 @@ ensure_docker_ready() {
     docker network create --internal paramascotasec-db-internal >/dev/null
   fi
 
-  if ! docker network inspect paramascotasec-services-internal >/dev/null 2>&1; then
-    docker network create --internal paramascotasec-services-internal >/dev/null
-  fi
 }
 
 upsert_env_value() {
@@ -195,6 +192,10 @@ resolve_env_file() {
   public_base_url="${public_scheme}://${primary_domain}"
   tenant_name="$(normalize_env_value "$(read_env_value "${env_file}" "TENANT_DISPLAY_NAME" || true)")"
   tenant_name="${tenant_name:-Para Mascotas EC}"
+  local db_username db_password
+  db_username="$(normalize_env_value "$(read_env_value "${env_file}" "DB_USERNAME" || true)")"
+  db_username="${db_username:-paramascotasec_backend_app}"
+  db_password="$(normalize_env_value "$(read_env_value "${env_file}" "DB_PASSWORD" || true)")"
 
   upsert_env_value "${env_file}" "DEFAULT_TENANT" "${tenant_slug}"
   upsert_env_value "${env_file}" "PUBLIC_TENANT_SLUG" "${tenant_slug}"
@@ -203,6 +204,16 @@ resolve_env_file() {
   upsert_env_value "${env_file}" "PRIMARY_SITE_ALIASES" "${primary_aliases}"
   upsert_env_value "${env_file}" "PUBLIC_BASE_URL" "${public_base_url}"
   upsert_env_value "${env_file}" "TENANT_DISPLAY_NAME" "${tenant_name}"
+  upsert_env_value "${env_file}" "DB_DATABASE_IDENTITY_PLATFORM" "identity_platform"
+  upsert_env_value "${env_file}" "DB_DATABASE_CATALOG_INVENTORY" "catalog_inventory"
+  upsert_env_value "${env_file}" "DB_DATABASE_COMMERCE" "commerce_orders"
+  upsert_env_value "${env_file}" "DB_DATABASE_REPORTING_FINANCE" "reporting_finance"
+  upsert_env_value "${env_file}" "DB_DATABASE_BILLING" "billing_service"
+  upsert_env_value "${env_file}" "DB_USERNAME_BILLING" "${db_username}"
+  if [[ -n "${db_password}" ]]; then
+    upsert_env_value "${env_file}" "DB_PASSWORD_BILLING" "${db_password}"
+  fi
+  upsert_env_value "${env_file}" "DB_DATABASE_MAILER_SERVICE" "mailer_service"
 
   if [[ "${mode}" == "development" ]]; then
     local backend_bind_ip backend_port backend_public_scheme backend_public_host app_url
@@ -226,8 +237,7 @@ resolve_env_file() {
     upsert_env_value "${env_file}" "ADMIN_IP_ALLOWLIST" ""
     upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
     upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "pruebas"
-    upsert_env_value "${env_file}" "FACTURADOR_API_URL" "http://facturador:8080"
-    upsert_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH" "/api/test/v1/invoices"
+    upsert_env_value "${env_file}" "BILLING_GATEWAY_DRIVER" "native"
 
     printf '%s\n' "${env_file}"
     return 0
@@ -243,8 +253,7 @@ resolve_env_file() {
   upsert_env_value "${env_file}" "APP_URL" "${app_url%/}"
   upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
   upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "produccion"
-  upsert_env_value "${env_file}" "FACTURADOR_API_URL" "http://facturador:8080"
-  upsert_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH" "/api/production/v1/invoices"
+  upsert_env_value "${env_file}" "BILLING_GATEWAY_DRIVER" "native"
   printf '%s\n' "${env_file}"
   return 0
 }
@@ -324,27 +333,23 @@ deploy_backend() {
   env_file="$(resolve_env_file "${mode}")"
 
   echo "Levantando backend Paramascotasec en ${mode} usando ${env_file}..."
+  if [[ "${run_db_setup}" == "1" && -x "${APP_DIR}/../paramascotasec-DB/scripts/sync-module-databases.sh" ]]; then
+    (
+      cd "${APP_DIR}/../paramascotasec-DB"
+      ./scripts/sync-module-databases.sh "${mode}"
+    )
+  fi
   (
     cd "${APP_DIR}"
-
-    local facturador_path
-    facturador_path="$(read_env_value "${env_file}" "FACTURADOR_API_INVOICES_PATH")"
-    if [[ -z "${facturador_path}" ]]; then
-      if [[ "${mode}" == "development" ]]; then
-        facturador_path="/api/test/v1/invoices"
-      else
-        facturador_path="/api/production/v1/invoices"
-      fi
-    fi
 
     APP_ENV="${mode}" \
       RUN_DB_SETUP="${run_db_setup}" \
       RUN_DB_BOOTSTRAP="${run_db_setup}" \
-      FACTURADOR_API_INVOICES_PATH="${facturador_path}" \
-      docker compose --env-file "${env_file}" up -d --build --force-recreate --remove-orphans app web
+      docker compose --env-file "${env_file}" up -d --build --force-recreate --remove-orphans app web billing-recovery-worker
   )
   wait_for_container_state paramascotasec-backend-app
   wait_for_container_state paramascotasec-backend-web
+  wait_for_container_state paramascotasec-backend-billing-worker
   assert_backend_mode "${mode}"
   compose_cmd "${env_file}" ps
   echo "Backend Paramascotasec ${mode} listo"

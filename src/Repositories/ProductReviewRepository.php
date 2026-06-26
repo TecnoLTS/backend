@@ -4,13 +4,14 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use PDO;
 
 class ProductReviewRepository {
     private PDO $db;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
     public function listApprovedForProduct(string $productId): array {

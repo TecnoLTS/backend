@@ -4,12 +4,13 @@ namespace App\Repositories;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 
 class ProductReferenceCatalogRepository {
     private $db;
 
     public function __construct() {
-        $this->db = Database::getInstance();
+        $this->db = Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
     private function getTenantId(): string {

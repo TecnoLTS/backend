@@ -925,7 +925,9 @@ class ProductController {
                 return;
             }
 
-            Response::json($result, 200, null, 'Producto retirado correctamente');
+            Response::json($result, 200, null, 'Producto archivado correctamente');
+        } catch (\DomainException $e) {
+            Response::error($e->getMessage(), 409, 'PRODUCT_ARCHIVE_STOCK_ACTIVE');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'PRODUCT_DELETE_FAILED');
         }

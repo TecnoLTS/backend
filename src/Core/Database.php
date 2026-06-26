@@ -4,7 +4,6 @@ namespace App\Core;
 
 use PDO;
 use PDOException;
-use App\Core\TenantContext;
 
 class Database {
     private static $instances = [];
@@ -31,36 +30,26 @@ class Database {
         }
     }
 
-    private static function resolveConfig(): array {
-        $tenant = TenantContext::get();
-        $tenantDb = $tenant['db'] ?? [];
-
-        $host = $tenantDb['host'] ?? ($_ENV['DB_HOST'] ?? 'localhost');
-        $port = $tenantDb['port'] ?? ($_ENV['DB_PORT'] ?? 5432);
-        $database = $tenantDb['database'] ?? ($_ENV['DB_DATABASE'] ?? 'paramascotasec');
-        $username = $tenantDb['username'] ?? ($_ENV['DB_USERNAME'] ?? 'postgres');
-        $password = $tenantDb['password'] ?? ($_ENV['DB_PASSWORD'] ?? '');
-
-        return [
-            'host' => $host,
-            'port' => $port,
-            'database' => $database,
-            'username' => $username,
-            'password' => $password
-        ];
+    private static function resolveConfig(?string $moduleKey = null): array {
+        return ConnectionRegistry::resolveDatabaseConfig($moduleKey);
     }
 
-    public static function getInstance() {
-        $config = self::resolveConfig();
+    public static function getInstance(?string $moduleKey = null) {
+        $config = self::resolveConfig($moduleKey);
         $key = implode('|', [
             $config['host'],
             $config['port'],
             $config['database'],
-            $config['username']
+            $config['username'],
+            $config['module'] ?? 'primary',
         ]);
         if (!isset(self::$instances[$key])) {
             self::$instances[$key] = new self($config);
         }
         return self::$instances[$key]->connection;
+    }
+
+    public static function getModuleInstance(string $moduleKey) {
+        return self::getInstance($moduleKey);
     }
 }

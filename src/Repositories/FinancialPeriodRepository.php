@@ -5,6 +5,7 @@ namespace App\Repositories;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Exceptions\FinancialPeriodClosedException;
+use App\Modules\ReportingFinance\Domain\ReportingFinanceDomain;
 use DateTimeImmutable;
 use DateTimeZone;
 use PDO;
@@ -15,7 +16,7 @@ class FinancialPeriodRepository {
     private DateTimeZone $timezone;
 
     public function __construct(?PDO $db = null) {
-        $this->db = $db ?: Database::getInstance();
+        $this->db = $db ?: Database::getModuleInstance(ReportingFinanceDomain::KEY);
         $this->timezone = new DateTimeZone('America/Guayaquil');
         $this->ensureSchema();
     }
