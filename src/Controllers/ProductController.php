@@ -126,22 +126,79 @@ class ProductController {
         $data['inventoryAction'] = $action;
     }
 
+    private function normalizeRestockQuantityField(array &$data, int $currentQuantity): void {
+        $action = strtolower(trim((string)($data['inventoryAction'] ?? '')));
+        if ($action !== 'restock') {
+            return;
+        }
+
+        $incrementKeys = [
+            'restockQuantity',
+            'restock_quantity',
+            'stockIncrease',
+            'stock_increase',
+            'quantityDelta',
+            'quantity_delta',
+            'purchaseQuantity',
+            'purchase_quantity',
+        ];
+
+        foreach ($incrementKeys as $key) {
+            if (!array_key_exists($key, $data)) {
+                continue;
+            }
+
+            $rawValue = $data[$key];
+            if (!$this->isNonNegativeIntegerValue($rawValue)) {
+                Response::error('La cantidad de compra debe ser un entero mayor o igual a 0.', 400, 'PRODUCT_RESTOCK_QUANTITY_INVALID');
+                exit;
+            }
+
+            $restockQuantity = intval($rawValue);
+            $data['restockQuantity'] = $restockQuantity;
+            $data['quantity'] = $currentQuantity + $restockQuantity;
+            return;
+        }
+
+        $quantityMode = strtolower(trim((string)($data['quantityMode'] ?? $data['quantity_mode'] ?? '')));
+        unset($data['quantityMode'], $data['quantity_mode']);
+        if (!in_array($quantityMode, ['increment', 'delta', 'add', 'addition', 'purchase', 'restock'], true)) {
+            return;
+        }
+
+        if (!array_key_exists('quantity', $data) || !is_numeric($data['quantity'])) {
+            Response::error('La cantidad de compra debe ser un entero mayor o igual a 0.', 400, 'PRODUCT_RESTOCK_QUANTITY_INVALID');
+            exit;
+        }
+
+        $rawQuantity = $data['quantity'];
+        if (!$this->isNonNegativeIntegerValue($rawQuantity)) {
+            Response::error('La cantidad de compra debe ser un entero mayor o igual a 0.', 400, 'PRODUCT_RESTOCK_QUANTITY_INVALID');
+            exit;
+        }
+
+        $restockQuantity = intval($rawQuantity);
+        $data['restockQuantity'] = $restockQuantity;
+        $data['quantity'] = $currentQuantity + $restockQuantity;
+    }
+
     private function validateInventoryIntent(array &$data, int $stockDelta): void {
+        $action = strtolower(trim((string)($data['inventoryAction'] ?? '')));
+        if ($action === 'restock' && $stockDelta <= 0) {
+            Response::error('Registrar compra solo puede aumentar el stock.', 400, 'PRODUCT_RESTOCK_QUANTITY_INVALID');
+            exit;
+        }
+
         if ($stockDelta === 0) {
             return;
         }
 
-        $action = strtolower(trim((string)($data['inventoryAction'] ?? '')));
         if ($action === '') {
             Response::error('Indica si el cambio de stock es una compra o un ajuste de inventario.', 400, 'PRODUCT_INVENTORY_ACTION_REQUIRED');
             exit;
         }
 
         if ($action === 'restock') {
-            if ($stockDelta <= 0) {
-                Response::error('Registrar compra solo puede aumentar el stock.', 400, 'PRODUCT_RESTOCK_QUANTITY_INVALID');
-                exit;
-            }
             return;
         }
 
@@ -158,6 +215,15 @@ class ProductController {
 
         Response::error('Acción de inventario no válida para actualizar stock.', 400, 'PRODUCT_INVENTORY_ACTION_INVALID');
         exit;
+    }
+
+    private function isNonNegativeIntegerValue(mixed $value): bool {
+        if (is_bool($value) || is_array($value) || is_object($value) || !is_numeric($value)) {
+            return false;
+        }
+
+        $number = (float)$value;
+        return $number >= 0 && abs($number - (float)intval($number)) < 0.0000001;
     }
 
     private function normalizeBooleanFlag(mixed $value, bool $default = false): bool {
@@ -656,7 +722,7 @@ class ProductController {
                 Response::error('Precio inválido', 400, 'PRODUCT_PRICE_INVALID');
                 return;
             }
-            if (!is_numeric($data['quantity']) || intval($data['quantity']) < 0) {
+            if (!$this->isNonNegativeIntegerValue($data['quantity'])) {
                 Response::error('Cantidad inválida', 400, 'PRODUCT_QUANTITY_INVALID');
                 return;
             }
@@ -773,6 +839,10 @@ class ProductController {
             ];
             foreach ($numericRules as $field => $errorCode) {
                 if (isset($data[$field])) {
+                    if ($field === 'quantity' && !$this->isNonNegativeIntegerValue($data[$field])) {
+                        Response::error('Valor inválido', 400, $errorCode, ['field' => $field]);
+                        return;
+                    }
                     if (!is_numeric($data[$field]) || floatval($data[$field]) < 0) {
                         Response::error('Valor inválido', 400, $errorCode, ['field' => $field]);
                         return;
@@ -831,9 +901,11 @@ class ProductController {
                     (string)($currentProduct['productType'] ?? ''),
                     (string)($currentProduct['category'] ?? '')
                 );
+                $currentQuantity = intval($currentProduct['quantity'] ?? 0);
+                $this->normalizeRestockQuantityField($data, $currentQuantity);
                 $effectiveQuantity = isset($data['quantity']) && is_numeric($data['quantity'])
                     ? intval($data['quantity'])
-                    : intval($currentProduct['quantity'] ?? 0);
+                    : $currentQuantity;
                 $expirationDateRaw = trim((string)($attributes['expirationDate'] ?? $attributes['expiryDate'] ?? ''));
                 if ($effectiveType === 'Alimento' && $effectiveQuantity > 0 && $expirationDateRaw === '') {
                     Response::error('La fecha de vencimiento es obligatoria para productos de Alimento.', 400, 'PRODUCT_EXPIRY_DATE_REQUIRED');
@@ -863,7 +935,6 @@ class ProductController {
                 } else {
                     unset($attributes['expirationDate'], $attributes['expiryDate'], $attributes['expirationAlertDays'], $attributes['expiryAlertDays']);
                 }
-                $currentQuantity = intval($currentProduct['quantity'] ?? 0);
                 $stockDelta = $effectiveQuantity - $currentQuantity;
                 $this->validateInventoryIntent($data, $stockDelta);
                 if ($stockDelta > 0 && (($data['inventoryAction'] ?? '') === 'restock')) {
@@ -888,6 +959,7 @@ class ProductController {
                     return;
                 }
                 $currentQuantity = intval($currentProduct['quantity'] ?? 0);
+                $this->normalizeRestockQuantityField($data, $currentQuantity);
                 $effectiveQuantity = isset($data['quantity']) && is_numeric($data['quantity'])
                     ? intval($data['quantity'])
                     : $currentQuantity;

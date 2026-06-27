@@ -366,16 +366,22 @@ class OrderController {
             $billing = $this->billingGateway();
             $existingInvoice = $billing->findRideBySourceReference($orderId);
             if (is_array($existingInvoice)) {
+                $existingSriStatus = strtoupper(trim((string)($existingInvoice['sri_status'] ?? $existingInvoice['status'] ?? '')));
+                $billingStatus = in_array($existingSriStatus, ['AUTORIZADO', 'AUTHORIZED'], true)
+                    ? (trim((string)($existingInvoice['replaced_access_key'] ?? '')) !== '' ? 'reissued' : 'issued')
+                    : 'pending';
+
                 $this->syncBillingMetadata(
                     $orderId,
                     $existingInvoice,
-                    trim((string)($existingInvoice['replaced_access_key'] ?? '')) !== '' ? 'reissued' : 'issued'
+                    $billingStatus
                 );
 
                 error_log(sprintf(
-                    '[BILLING] Factura existente sincronizada para orden %s. Clave=%s',
+                    '[BILLING] Factura existente sincronizada para orden %s. Clave=%s Estado=%s',
                     $orderId,
-                    $existingInvoice['access_key'] ?? 'N/A'
+                    $existingInvoice['access_key'] ?? 'N/A',
+                    $existingSriStatus !== '' ? $existingSriStatus : 'N/A'
                 ));
                 return;
             }

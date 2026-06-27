@@ -38,6 +38,18 @@ class InvoiceRepository
         $statement->execute(['lock_key' => $this->sourceReferenceLockKey($clientContext, $sourceReference)]);
     }
 
+    public function acquireSequentialLock(int $branchId, string $environment): void
+    {
+        $statement = $this->connection->prepare('SELECT pg_advisory_lock(hashtext(:lock_key))');
+        $statement->execute(['lock_key' => $this->sequentialLockKey($branchId, $environment)]);
+    }
+
+    public function releaseSequentialLock(int $branchId, string $environment): void
+    {
+        $statement = $this->connection->prepare('SELECT pg_advisory_unlock(hashtext(:lock_key))');
+        $statement->execute(['lock_key' => $this->sequentialLockKey($branchId, $environment)]);
+    }
+
     private function sourceReferenceLockKey(array $clientContext, string $sourceReference): string
     {
         return sprintf(
@@ -46,6 +58,11 @@ class InvoiceRepository
             (int) ($clientContext['resolved_branch_id'] ?? $clientContext['branch_id'] ?? 0),
             trim($sourceReference)
         );
+    }
+
+    private function sequentialLockKey(int $branchId, string $environment): string
+    {
+        return sprintf('invoice-sequential:%d:%s', $branchId, trim($environment));
     }
 
     public function disableRetriesOutsideConfiguredWindow(): int
@@ -214,21 +231,115 @@ class InvoiceRepository
 
     public function nextSequentialForBranchAndEnvironment(int $branchId, string $environment): string
     {
+        $this->connection->beginTransaction();
+
+        try {
+            $ensureStatement = $this->connection->prepare(
+                'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
+                 VALUES (:branch_id, :ambiente, 0, NOW())
+                 ON CONFLICT (branch_id, ambiente) DO NOTHING'
+            );
+            $ensureStatement->execute([
+                'branch_id' => $branchId,
+                'ambiente' => $environment,
+            ]);
+
+            $lockStatement = $this->connection->prepare(
+                'SELECT current_value
+                   FROM branch_sequences
+                  WHERE branch_id = :branch_id
+                    AND ambiente = :ambiente
+                  FOR UPDATE'
+            );
+            $lockStatement->execute([
+                'branch_id' => $branchId,
+                'ambiente' => $environment,
+            ]);
+
+            $candidate = max(1, ((int) $lockStatement->fetchColumn()) + 1);
+            $usageStatement = $this->connection->prepare(
+                'SELECT access_key,
+                        source_reference,
+                        UPPER(COALESCE(sri_status, \'\')) AS sri_status
+                   FROM invoice_headers
+                  WHERE branch_id = :branch_id
+                    AND ambiente = :ambiente
+                    AND sequential = :sequential
+                    AND cancelled_at IS NULL
+                    AND replacement_access_key IS NULL
+                    AND (
+                        UPPER(COALESCE(sri_status, \'\')) IN (
+                            \'AUTORIZADO\',
+                            \'AUTHORIZED\',
+                            \'DEVUELTA\',
+                            \'EN PROCESAMIENTO\',
+                            \'NO AUTORIZADO\',
+                            \'RECIBIDA\',
+                            \'RECHAZADO\',
+                            \'REJECTED\',
+                            \'UNKNOWN\'
+                        )
+                        OR (
+                            UPPER(COALESCE(sri_status, \'\')) = \'PENDING\'
+                            AND raw_response IS NOT NULL
+                        )
+                    )
+                  ORDER BY CASE
+                        WHEN UPPER(COALESCE(sri_status, \'\')) IN (\'AUTORIZADO\', \'AUTHORIZED\') THEN 0
+                        ELSE 1
+                    END,
+                    created_at DESC,
+                    id DESC
+                  LIMIT 1'
+            );
+
+            while (true) {
+                $sequential = str_pad((string) $candidate, 9, '0', STR_PAD_LEFT);
+                $usageStatement->execute([
+                    'branch_id' => $branchId,
+                    'ambiente' => $environment,
+                    'sequential' => $sequential,
+                ]);
+                $usage = $usageStatement->fetch();
+
+                if (!is_array($usage)) {
+                    break;
+                }
+
+                $candidate++;
+            }
+
+            $this->connection->commit();
+
+            return str_pad((string) $candidate, 9, '0', STR_PAD_LEFT);
+        } catch (\Throwable $e) {
+            if ($this->connection->inTransaction()) {
+                $this->connection->rollBack();
+            }
+
+            throw $e;
+        }
+    }
+
+    public function markSequentialConsumed(int $branchId, string $environment, string $sequential): void
+    {
+        $consumedValue = (int) ltrim($sequential, '0');
+        if ($consumedValue < 1) {
+            return;
+        }
+
         $statement = $this->connection->prepare(
             'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
-             VALUES (:branch_id, :ambiente, 1, NOW())
+             VALUES (:branch_id, :ambiente, :current_value, NOW())
              ON CONFLICT (branch_id, ambiente)
-             DO UPDATE SET current_value = branch_sequences.current_value + 1, updated_at = NOW()
-             RETURNING current_value'
+             DO UPDATE SET current_value = GREATEST(branch_sequences.current_value, EXCLUDED.current_value),
+                           updated_at = NOW()'
         );
         $statement->execute([
             'branch_id' => $branchId,
             'ambiente' => $environment,
+            'current_value' => $consumedValue,
         ]);
-
-        $nextValue = (int) $statement->fetchColumn();
-
-        return str_pad((string) $nextValue, 9, '0', STR_PAD_LEFT);
     }
 
     public function createDraftInvoice(array $clientContext, Invoice $invoice, array $requestPayload, string $signedXmlPath): int
@@ -558,11 +669,22 @@ class InvoiceRepository
                   AND source_reference = :source_reference
                   AND cancelled_at IS NULL
                   AND replacement_access_key IS NULL
-                  AND UPPER(COALESCE(sri_status, \'\')) NOT IN (
-                      \'ANULADA_LOCAL\',
-                      \'CANCELADA_LOCAL\',
-                      \'CANCELLED\',
-                      \'CANCELED\'
+                  AND (
+                      UPPER(COALESCE(sri_status, \'\')) IN (
+                          \'AUTORIZADO\',
+                          \'AUTHORIZED\',
+                          \'DEVUELTA\',
+                          \'EN PROCESAMIENTO\',
+                          \'NO AUTORIZADO\',
+                          \'RECIBIDA\',
+                          \'RECHAZADO\',
+                          \'REJECTED\',
+                          \'UNKNOWN\'
+                      )
+                      OR (
+                          UPPER(COALESCE(sri_status, \'\')) = \'PENDING\'
+                          AND raw_response IS NOT NULL
+                      )
                   )';
 
         $parameters = [

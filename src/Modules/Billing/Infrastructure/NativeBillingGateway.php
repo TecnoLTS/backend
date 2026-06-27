@@ -738,6 +738,9 @@ final class NativeBillingGateway implements BillingGateway {
     private function apiKey(): string {
         $apiKey = $this->rawApiKey ?? trim(self::env('BILLING_API_KEY', ''));
         if ($apiKey === '') {
+            $apiKey = trim(self::env('FACTURADOR_API_KEY', ''));
+        }
+        if ($apiKey === '') {
             throw new \RuntimeException('BILLING_API_KEY no configurado para Billing nativo');
         }
 

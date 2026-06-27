@@ -95,6 +95,7 @@ class CheckInvoiceStatus
                     'authorized_xml_received' => $hasAuthorizedXml,
                     'reintento' => false,
                 ]);
+                $this->markSequentialConsumedFromInvoice($invoice);
             }
 
             return $this->localStatusResponse(
@@ -164,6 +165,7 @@ class CheckInvoiceStatus
                 'authorized_xml_received' => $authorizedXmlExists,
                 'reintento' => $this->shouldEnableRetry('AUTORIZADO', $authorizedXmlExists),
             ]);
+            $this->markSequentialConsumedFromInvoice($invoice);
 
             if ($localStatus !== 'AUTORIZADO' || !$hasLocalAuthorization) {
                 $this->dispatchDomainEvent(new InvoiceAuthorized(
@@ -184,6 +186,7 @@ class CheckInvoiceStatus
                 'authorized_xml_received' => $authorizedXmlExists,
                 'reintento' => $this->shouldEnableRetry($status, $authorizedXmlExists),
             ]);
+            $this->markSequentialConsumedFromInvoice($invoice);
 
             if ($status === 'NO AUTORIZADO' && $localStatus !== 'NO AUTORIZADO') {
                 $this->dispatchDomainEvent(new InvoiceRejected(
@@ -203,6 +206,19 @@ class CheckInvoiceStatus
                 ? sprintf('/api/v1/invoices/%s/xml', $accessKey)
                 : null,
         ];
+    }
+
+    private function markSequentialConsumedFromInvoice(array $invoice): void
+    {
+        $branchId = (int) ($invoice['branch_id'] ?? $this->clientContext['resolved_branch_id'] ?? 0);
+        $environment = trim((string) ($invoice['ambiente'] ?? $this->configuredEnvironment()));
+        $sequential = trim((string) ($invoice['sequential'] ?? ''));
+
+        if ($branchId <= 0 || $environment === '' || $sequential === '') {
+            return;
+        }
+
+        $this->invoiceRepository->markSequentialConsumed($branchId, $environment, $sequential);
     }
 
     private function hasLocalAuthorization(array $invoice): bool

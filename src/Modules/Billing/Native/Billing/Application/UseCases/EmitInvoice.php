@@ -68,6 +68,9 @@ class EmitInvoice
 
         $sourceReference = trim((string) ($request->additionalInfo['order_id'] ?? ''));
         $sourceReferenceLockAcquired = false;
+        $sequentialLockAcquired = false;
+        $branchId = 0;
+        $environmentKey = '';
 
         try {
         if ($allowExistingActiveInvoice && $sourceReference !== '') {
@@ -87,8 +90,12 @@ class EmitInvoice
 
         $issueDate = new DateTimeImmutable('now', new DateTimeZone($this->config['timezone'] ?? 'America/Guayaquil'));
         $environmentKey = $this->config['environment'] === 'pruebas' ? 'pruebas' : 'produccion';
+        $branchId = (int) $this->clientContext['resolved_branch_id'];
+        $this->invoiceRepository->acquireSequentialLock($branchId, $environmentKey);
+        $sequentialLockAcquired = true;
+
         $sequential = $this->invoiceRepository->nextSequentialForBranchAndEnvironment(
-            (int) $this->clientContext['resolved_branch_id'],
+            $branchId,
             $environmentKey
         );
         $invoiceNumber = $this->formatInvoiceNumber(
@@ -176,6 +183,7 @@ class EmitInvoice
                 false
             ),
         ]);
+        $this->invoiceRepository->markSequentialConsumed($branchId, $environmentKey, $sequential);
 
         // Actualizar estado del invoice según respuesta del SRI
         if (isset($sriResponse['estado']) && $sriResponse['estado'] === 'DEVUELTA') {
@@ -309,6 +317,9 @@ class EmitInvoice
 
         return InvoiceResponse::fromInvoice($invoice);
         } finally {
+            if ($sequentialLockAcquired) {
+                $this->invoiceRepository->releaseSequentialLock($branchId, $environmentKey);
+            }
             if ($sourceReferenceLockAcquired) {
                 $this->invoiceRepository->releaseSourceReferenceLock($this->clientContext, $sourceReference);
             }

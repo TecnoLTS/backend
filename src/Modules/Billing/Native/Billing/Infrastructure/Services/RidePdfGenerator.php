@@ -549,20 +549,56 @@ HTML;
 
     private function getLogoDataUri(): ?string
     {
-        if (!extension_loaded('gd')) {
+        $logoPath = $this->resolveLogoPath();
+        if ($logoPath === null) {
             return null;
         }
 
-        if (!is_file($this->logoPath) || !is_readable($this->logoPath)) {
-            return null;
-        }
-
-        $contents = file_get_contents($this->logoPath);
+        $contents = file_get_contents($logoPath);
         if ($contents === false) {
             return null;
         }
 
-        return 'data:image/png;base64,' . base64_encode($contents);
+        return sprintf('data:%s;base64,%s', $this->logoMimeType($logoPath), base64_encode($contents));
+    }
+
+    private function resolveLogoPath(): ?string
+    {
+        $configuredPath = trim($this->logoPath);
+        $candidates = [];
+
+        if ($configuredPath !== '') {
+            $candidates[] = $configuredPath;
+
+            if (str_starts_with($configuredPath, '/app/public/')) {
+                $relativePath = ltrim(substr($configuredPath, strlen('/app/public/')), '/');
+                if ($relativePath !== '') {
+                    $candidates[] = '/var/www/html/public/' . $relativePath;
+                    $candidates[] = '/var/www/html/public/images/brand/' . basename($relativePath);
+                }
+            }
+        }
+
+        $candidates[] = '/var/www/html/public/LogoVerde150.png';
+        $candidates[] = '/var/www/html/public/images/brand/LogoVerde150.png';
+
+        foreach (array_unique($candidates) as $candidate) {
+            if (is_file($candidate) && is_readable($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private function logoMimeType(string $path): string
+    {
+        return match (strtolower(pathinfo($path, PATHINFO_EXTENSION))) {
+            'svg' => 'image/svg+xml',
+            'jpg', 'jpeg' => 'image/jpeg',
+            'webp' => 'image/webp',
+            default => 'image/png',
+        };
     }
 
     private function buildBarcodeSvgDataUri(string $accessKey): string
