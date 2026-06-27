@@ -342,10 +342,12 @@ deploy_backend() {
   (
     cd "${APP_DIR}"
 
+    docker compose --env-file "${env_file}" build app
+
     APP_ENV="${mode}" \
       RUN_DB_SETUP="${run_db_setup}" \
       RUN_DB_BOOTSTRAP="${run_db_setup}" \
-      docker compose --env-file "${env_file}" up -d --build --force-recreate --remove-orphans app web billing-recovery-worker
+      docker compose --env-file "${env_file}" up -d --force-recreate --remove-orphans app web billing-recovery-worker
   )
   wait_for_container_state paramascotasec-backend-app
   wait_for_container_state paramascotasec-backend-web

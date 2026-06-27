@@ -94,7 +94,6 @@ services:
         aliases:
           - paramascotasec-backend-app
       db_internal:
-      services_internal:
       backend_egress:
 
   billing-recovery-worker:
@@ -165,7 +164,6 @@ services:
       - app
     networks:
       db_internal:
-      services_internal:
       backend_egress:
 
   web:
@@ -211,8 +209,5 @@ networks:
   db_internal:
     external: true
     name: paramascotasec-db-internal
-  services_internal:
-    external: true
-    name: paramascotasec-services-internal
   backend_egress:
     driver: bridge

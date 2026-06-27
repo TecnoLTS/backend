@@ -1,51 +1,67 @@
-# Backend de ParaMascotas (`paramascotasec-backend`) 🐕
+# Backend de ParaMascotas (`paramascotasec-backend`)
 
-Núcleo lógico en PHP y API para e-commerce.
+API principal en PHP del workspace.
 
-## 🏭 1. Entorno de Producción
-Actualiza el código base forzando migraciones pero desactiva outputs inseguros de testing.
+## Deploy del componente
+
+Desde el repo:
 
 ```bash
 cd /home/admincenter/contenedores/paramascotasec-backend
-./scripts/deploy-production.sh
+./scripts/deploy.sh development
+./scripts/deploy.sh production
 ```
 
----
-
-## 🛠️ 2. Entorno de Desarrollo
-Habilita la depuración para el equipo de codificación y expone de forma dócil la base.
+Desde la raiz del workspace:
 
 ```bash
-cd /home/admincenter/contenedores/paramascotas-DB
-./scripts/deploy-development.sh
-
-cd /home/admincenter/contenedores/paramascotasec-backend
-./scripts/deploy-development.sh
+cd /home/admincenter/contenedores
+./scripts/deploy.sh development backend
+./scripts/deploy.sh production backend
 ```
 
-*(Si la Base de Datos ha sido limpiada en tus desarrollos, recuerda forzar su bootstrapping):*
+Si necesitas bootstrap de esquema en development:
+
 ```bash
-RUN_DB_SETUP=1 ./scripts/deploy-development.sh
+RUN_DB_SETUP=1 ./scripts/deploy.sh development
 ```
 
----
+El backend no necesita un runtime hot separado.
+Los cambios se validan redeployando el componente con el modo correspondiente.
 
-## 📌 3. Datos Relevantes y Contexto a Tomar en Cuenta
+## Contexto importante
 
-*   **Configuracion Local:**
-    El backend usa solo `entorno/.env`. No hay fallback a `.env` o `.env.development` en la raiz del repo.
-    La plantilla versionada vive en `templates/entorno/.env.example`; si falta el archivo real, el deploy crea una copia y aborta para que completes valores reales.
+- El archivo real es `entorno/.env`.
+- La plantilla versionada vive en `templates/entorno/.env.example`.
+- Billing SRI vive dentro de este runtime bajo `platform-core/Billing`.
+- `Facturador` ya no es upstream del workspace orquestado.
+- Las bases logicas principales viven en el PostgreSQL compartido y se resuelven por `ConnectionRegistry`.
 
-*   **Archivos Más Importantes al Programar:**
-    *   Lógica Multi-empresa (Multi-Tenant): `config/tenants.php`
-    *   Reglas de Productos: `src/Controllers/ProductController.php`
-    *   Procesamiento de Compras: `src/Controllers/OrderController.php`
-*   **Peligro Crítico: Reseteo de Métricas (Ventas):**
-    Existe un script brutal que reestablece únicamente indicadores de rendimiento:
-    ```bash
-    ./scripts/reset_sales_data.sh development --yes
-    ```
-    *Cuidado extremo:* Este script **BORRA** `Order`, `OrderItem`, `PosShift`, `PosMovement`, y `DiscountAudit`. Además purga `AuthSecurityEvent`, recompone masivamente `Product.quantity` a su valor base nativo (`initial_quantity`) y fija tu contador (`Product.sold=0`). 
-    **Deja 100% INTACTO:** Clientes, Configuración y Catálogo. Un mal uso arruina inventarios enteros.
-*   **Utilitarios Retirados (Legacy):**
-    `create_tenant_dbs.sh` y `seed_tenant_baseline.sh` son códigos obsoletos del backend en repositorios unificados. No se enlazan en la rutina diaria de Paramascotas.
+## Operaciones de cuidado
+
+Reset de ventas:
+
+```bash
+./scripts/reset_sales_data.sh development --yes
+```
+
+Ese script borra ventas, movimientos y auditorias operativas; usarlo solo cuando haga falta de forma explicita.
+
+## Validacion
+
+```bash
+php scripts/check_modular_routes.php
+docker exec paramascotasec-backend-app php scripts/check_module_databases.php
+```
+
+## Post-prune total
+
+Si ejecutaste `docker system prune -a --volumes` y borraste tambien la data local de PostgreSQL del workspace, el orden limpio recomendado es:
+
+```bash
+cd /home/admincenter/contenedores
+./scripts/deploy.sh development db
+RUN_DB_SETUP=1 SEED_DEVELOPMENT_CATALOG=1 ./scripts/deploy.sh development backend
+```
+
+El deploy backend ahora reconstruye primero su imagen antes de levantar el worker fiscal, para evitar fallos por imagen local ausente despues de un wipe total.
