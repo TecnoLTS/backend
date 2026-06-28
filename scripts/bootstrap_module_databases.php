@@ -129,6 +129,20 @@ function moduleTargets(array $baseConfig): array {
     return $targets;
 }
 
+function adminConnectionConfig(array $runtimeConfig): array {
+    return normalizeConfig($runtimeConfig, [
+        'username' => envValue('DB_ADMIN_USERNAME', envValue('POSTGRES_USER', (string)$runtimeConfig['username'])),
+        'password' => envValue('DB_ADMIN_PASSWORD', envValue('POSTGRES_PASSWORD', (string)$runtimeConfig['password'])),
+    ]);
+}
+
+function connectionTargetConfig(array $targetConfig, array $adminConfig): array {
+    return normalizeConfig($targetConfig, [
+        'username' => (string)$adminConfig['username'],
+        'password' => (string)$adminConfig['password'],
+    ]);
+}
+
 function tableOwnerMap(): array {
     $owners = [];
     foreach (MODULE_TABLES as $moduleKey => $tables) {
@@ -414,7 +428,7 @@ function replaceNonOwnedTablesWithForeignTables(PDO $pdo, string $moduleKey, arr
 }
 
 function runModuleDatabaseBootstrap(): int {
-    $defaultConfig = [
+    $runtimeConfig = [
         'host' => envValue('DB_HOST', 'db'),
         'port' => envValue('DB_PORT', '5432'),
         'database' => envValue('DB_DATABASE', 'paramascotasec'),
@@ -422,8 +436,9 @@ function runModuleDatabaseBootstrap(): int {
         'password' => envValue('DB_PASSWORD', 'postgres'),
     ];
     $defaultTenant = envValue('DEFAULT_TENANT', 'paramascotasec') ?? 'paramascotasec';
-    $targets = moduleTargets($defaultConfig);
-    $primaryConfig = normalizeConfig($defaultConfig);
+    $targets = moduleTargets($runtimeConfig);
+    $primaryRuntimeConfig = normalizeConfig($runtimeConfig);
+    $adminConfig = adminConnectionConfig($runtimeConfig);
 
     if ($targets === []) {
         fwrite(STDOUT, "[module-db] no module targets configured\n");
@@ -432,7 +447,7 @@ function runModuleDatabaseBootstrap(): int {
 
     try {
         foreach ($targets as $moduleKey => $target) {
-            $pdo = connect($target);
+            $pdo = connect(connectionTargetConfig($target, $adminConfig));
             dropForeignLegacyTables($pdo);
             dropForeignOwnerTables($pdo, MODULE_TABLES[$moduleKey]);
             executeSchemaBootstrap($pdo, $defaultTenant, ['skip_constraints' => MODULE_SKIPPED_CONSTRAINTS]);
@@ -440,7 +455,7 @@ function runModuleDatabaseBootstrap(): int {
                 createMailerTables($pdo);
             }
             dropKnownCrossDomainConstraints($pdo);
-            createFdwServer($pdo, 'legacy_paramascotasec', $primaryConfig);
+            createFdwServer($pdo, 'legacy_paramascotasec', $primaryRuntimeConfig);
             dropRemoteSchema($pdo, 'legacy_source');
             importForeignTables($pdo, 'legacy_paramascotasec', 'legacy_source', LEGACY_TABLES);
             copyOwnedTablesFromLegacy($pdo, MODULE_TABLES[$moduleKey]);
@@ -449,7 +464,7 @@ function runModuleDatabaseBootstrap(): int {
         }
 
         foreach ($targets as $moduleKey => $target) {
-            $pdo = connect($target);
+            $pdo = connect(connectionTargetConfig($target, $adminConfig));
             replaceNonOwnedTablesWithForeignTables($pdo, $moduleKey, $targets);
             $pdo->exec('
                 CREATE TABLE IF NOT EXISTS module_database_metadata (

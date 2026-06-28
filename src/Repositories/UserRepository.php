@@ -8,6 +8,8 @@ use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
 
 class UserRepository {
+    private const PLATFORM_TENANT_ID = 'platform';
+
     private $db;
     private TenantAccessService $tenantAccessService;
 
@@ -100,19 +102,35 @@ class UserRepository {
     }
 
     public function getByEmail($email) {
-        $stmt = $this->db->prepare('SELECT id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, failed_login_attempts, login_locked_until FROM "User" WHERE email = :email AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, failed_login_attempts, login_locked_until
+            FROM "User"
+            WHERE email = :email
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
+        ');
         $stmt->execute([
             'email' => $email,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         return $stmt->fetch();
     }
 
     public function getByEmailWithOtp($email) {
-        $stmt = $this->db->prepare('SELECT id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, otp_code, otp_expires_at, otp_attempts, failed_login_attempts, login_locked_until FROM "User" WHERE email = :email AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, otp_code, otp_expires_at, otp_attempts, failed_login_attempts, login_locked_until
+            FROM "User"
+            WHERE email = :email
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
+        ');
         $stmt->execute([
             'email' => $email,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         return $stmt->fetch();
     }
@@ -121,6 +139,7 @@ class UserRepository {
         $stmt = $this->db->prepare('
             SELECT
                 id,
+                tenant_id,
                 name,
                 email,
                 role,
@@ -133,11 +152,15 @@ class UserRepository {
                 failed_login_attempts,
                 login_locked_until
             FROM "User"
-            WHERE id = :id AND tenant_id = :tenant_id
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
         ');
         $stmt->execute([
             'id' => $id,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         return $stmt->fetch();
     }
@@ -242,10 +265,18 @@ class UserRepository {
     }
 
     public function getAuthState($id) {
-        $stmt = $this->db->prepare('SELECT id, name, email, role, profile, active_token_id FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT id, tenant_id, name, email, role, profile, active_token_id
+            FROM "User"
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
+        ');
         $stmt->execute([
             'id' => $id,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         return $stmt->fetch();
     }
@@ -302,20 +333,34 @@ class UserRepository {
     }
 
     public function getPasswordHash($userId) {
-        $stmt = $this->db->prepare('SELECT password FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT password
+            FROM "User"
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
+        ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         $row = $stmt->fetch();
         return $row ? $row['password'] : null;
     }
 
     public function updatePassword($userId, $newPasswordHash, $newTokenId) {
-        $stmt = $this->db->prepare('UPDATE "User" SET password = :password, active_token_id = :token_id, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET password = :password, active_token_id = :token_id, updated_at = NOW()
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
@@ -332,40 +377,60 @@ class UserRepository {
                 otp_expires_at = NULL,
                 otp_attempts = 0,
                 updated_at = NOW()
-            WHERE id = :id AND tenant_id = :tenant_id
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
     }
 
     public function setOtpForEmail($email, $code, $expiresAt) {
-        $stmt = $this->db->prepare('UPDATE "User" SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW() WHERE email = :email AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW()
+            WHERE email = :email
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'email' => $email,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'code' => $code,
             'expires_at' => $expiresAt
         ]);
     }
 
     public function markEmailVerifiedByOtp($userId) {
-        $stmt = $this->db->prepare('UPDATE "User" SET email_verified = TRUE, verification_token = NULL, otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET email_verified = TRUE, verification_token = NULL, otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0, updated_at = NOW()
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         return $this->getById($userId);
     }
 
     public function incrementOtpAttempts($userId) {
-        $stmt = $this->db->prepare('UPDATE "User" SET otp_attempts = COALESCE(otp_attempts, 0) + 1 WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET otp_attempts = COALESCE(otp_attempts, 0) + 1
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
     }
 
@@ -375,11 +440,13 @@ class UserRepository {
             SET failed_login_attempts = :attempts,
                 login_locked_until = :locked_until,
                 updated_at = NOW()
-            WHERE id = :id AND tenant_id = :tenant_id
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'attempts' => max(0, $attempts),
             'locked_until' => $lockedUntil
         ]);
@@ -391,11 +458,13 @@ class UserRepository {
             SET failed_login_attempts = 0,
                 login_locked_until = NULL,
                 updated_at = NOW()
-            WHERE id = :id AND tenant_id = :tenant_id
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
         ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
     }
 
@@ -411,36 +480,58 @@ class UserRepository {
                 login_locked_until = NULL,
                 last_login_at = NOW(),
                 updated_at = NOW()
-            WHERE id = :id AND tenant_id = :tenant_id
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
         ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
     }
 
     public function setActiveTokenId($userId, $tokenId) {
-        $stmt = $this->db->prepare('UPDATE "User" SET active_token_id = :tokenId, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET active_token_id = :tokenId, updated_at = NOW()
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'tokenId' => $tokenId
         ]);
     }
 
     public function clearActiveTokenId($userId) {
-        $stmt = $this->db->prepare('UPDATE "User" SET active_token_id = NULL, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            UPDATE "User"
+            SET active_token_id = NULL, updated_at = NOW()
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+        ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
     }
 
     public function getActiveTokenId($userId) {
-        $stmt = $this->db->prepare('SELECT active_token_id FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('
+            SELECT active_token_id
+            FROM "User"
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+            LIMIT 1
+        ');
         $stmt->execute([
             'id' => $userId,
-            'tenant_id' => $this->getTenantId()
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         $row = $stmt->fetch();
         return $row ? $row['active_token_id'] : null;

@@ -27,7 +27,7 @@ $aliases = $csv($env('PRIMARY_SITE_ALIASES', "www.{$primaryDomain}"));
 $appUrl = rtrim($env('APP_URL', "https://{$primaryDomain}"), '/');
 $publicBaseUrl = rtrim($env('PUBLIC_BASE_URL', $appUrl), '/');
 $scheme = parse_url($publicBaseUrl, PHP_URL_SCHEME) ?: $env('PUBLIC_SCHEME', 'https');
-$dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,ecommerce,products,inventory,users,tenant-admin,invoicing,billing-sri'));
+$dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,users,ecommerce'));
 $dashboardPlatformAdminEmails = $csv($env('DASHBOARD_PLATFORM_ADMIN_EMAILS', ''));
 $dashboardPlatformAdminDomains = $csv($env('DASHBOARD_PLATFORM_ADMIN_DOMAINS', 'tecnolts.com'));
 

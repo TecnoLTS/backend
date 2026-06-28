@@ -191,6 +191,44 @@ class UserController {
         }
     }
 
+    public function ecommerceUsers() {
+        Auth::requireAdmin();
+        try {
+            Response::noStore();
+            $query = $_GET;
+            $search = strtolower(trim((string)($query['search'] ?? '')));
+            $role = strtolower(trim((string)($query['role'] ?? 'all')));
+            $users = array_values(array_filter(
+                $this->userRepository->getAll(),
+                fn (array $user): bool => in_array($this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []), ['customer', 'tenant_staff'], true)
+            ));
+            $users = array_map(fn (array $user): array => $this->ecommerceUser($user), $users);
+
+            if (in_array($role, ['customer', 'admin'], true)) {
+                $users = array_values(array_filter($users, static fn (array $user): bool => ($user['role'] ?? '') === $role));
+            }
+
+            if ($search !== '') {
+                $users = array_values(array_filter($users, static function (array $user) use ($search): bool {
+                    $haystack = strtolower(implode(' ', [
+                        $user['name'] ?? '',
+                        $user['email'] ?? '',
+                        $user['resolvedEmail'] ?? '',
+                        $user['resolvedPhone'] ?? '',
+                        $user['document_number'] ?? '',
+                        $user['business_name'] ?? '',
+                        $user['resolvedCompany'] ?? '',
+                    ]));
+                    return str_contains($haystack, $search);
+                }));
+            }
+
+            Response::json($users);
+        } catch (\Exception $e) {
+            Response::error($e->getMessage(), 500, 'ECOMMERCE_USERS_LIST_FAILED');
+        }
+    }
+
     public function show($id) {
         Auth::requireAdmin();
 
@@ -520,6 +558,45 @@ class UserController {
         ];
     }
 
+    private function ecommerceUser(array $user): array {
+        $profile = $this->decodeProfile($user['profile'] ?? null);
+        $identityType = $this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []);
+        $lastShippingAddress = $this->decodeStructuredValue($user['last_shipping_address'] ?? null);
+        $lastBillingAddress = $this->decodeStructuredValue($user['last_billing_address'] ?? null);
+        $addresses = $this->decodeStructuredValue($user['addresses'] ?? null);
+        $primaryAddress = $lastShippingAddress ?: $lastBillingAddress ?: $this->firstAddress($addresses);
+        $resolvedEmail = $this->normalizeText($user['email'] ?? null, 190)
+            ?? $this->normalizeText($primaryAddress['email'] ?? null, 190);
+        $resolvedPhone = $this->normalizeText($profile['phone'] ?? null, 60)
+            ?? $this->normalizeText($primaryAddress['phone'] ?? null, 60);
+        $resolvedCompany = $this->normalizeText($user['business_name'] ?? null, 180)
+            ?? $this->normalizeText($primaryAddress['company'] ?? ($primaryAddress['businessName'] ?? null), 180);
+
+        return [
+            'id' => (string)($user['id'] ?? ''),
+            'name' => (string)($user['name'] ?? 'Usuario ecommerce'),
+            'email' => (string)($user['email'] ?? ''),
+            'resolvedEmail' => $resolvedEmail,
+            'role' => $identityType === 'customer' ? 'customer' : 'admin',
+            'email_verified' => $this->isTruthyDbValue($user['email_verified'] ?? false),
+            'document_type' => $this->normalizeText($user['document_type'] ?? null, 40),
+            'document_number' => $this->normalizeText($user['document_number'] ?? null, 80),
+            'business_name' => $this->normalizeText($user['business_name'] ?? null, 180),
+            'resolvedCompany' => $resolvedCompany,
+            'resolvedPhone' => $resolvedPhone,
+            'resolvedAddressText' => $this->formatAddressText($primaryAddress),
+            'profile' => $profile,
+            'orders_total' => (int)($user['orders_total'] ?? 0),
+            'orders_completed' => (int)($user['orders_completed'] ?? 0),
+            'total_spent' => (string)($user['total_spent'] ?? '0.00'),
+            'last_order_at' => $this->formatDate($user['last_order_at'] ?? null),
+            'failed_login_attempts' => (int)($user['failed_login_attempts'] ?? 0),
+            'login_locked_until' => $this->formatDate($user['login_locked_until'] ?? null),
+            'security_block_event_type' => $this->normalizeText($user['security_block_event_type'] ?? null, 120),
+            'security_blocked_at' => $this->formatDate($user['security_blocked_at'] ?? null),
+        ];
+    }
+
     private function matchesDashboardScope(array $user, string $scope): bool {
         if (!$this->isManagedWorkspaceUserRecord($user)) {
             return false;
@@ -568,6 +645,49 @@ class UserController {
 
         $decoded = json_decode($profile, true);
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function decodeStructuredValue($value): array {
+        if (is_array($value)) {
+            return $value;
+        }
+
+        if (!is_string($value) || trim($value) === '') {
+            return [];
+        }
+
+        $decoded = json_decode($value, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function firstAddress(array $addresses): array {
+        if (array_is_list($addresses)) {
+            foreach ($addresses as $address) {
+                if (is_array($address)) {
+                    return $address;
+                }
+            }
+        }
+
+        foreach (['default', 'shipping', 'billing'] as $key) {
+            if (isset($addresses[$key]) && is_array($addresses[$key])) {
+                return $addresses[$key];
+            }
+        }
+
+        return [];
+    }
+
+    private function formatAddressText(array $address): ?string {
+        $parts = [];
+        foreach (['street', 'address', 'line1', 'city', 'province', 'country'] as $key) {
+            $value = $this->normalizeText($address[$key] ?? null, 160);
+            if ($value !== null) {
+                $parts[] = $value;
+            }
+        }
+
+        return $parts === [] ? null : implode(', ', array_values(array_unique($parts)));
     }
 
     private function normalizeRoleIds($value): array {

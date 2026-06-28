@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_ENV_MODE="${APP_DIR}/../scripts/env-mode.sh"
+# shellcheck disable=SC1090
+source "${WORKSPACE_ENV_MODE}"
 ENTORNO_DIR="${APP_DIR}/entorno"
 ENTORNO_ENV_FILE="${ENTORNO_DIR}/.env"
 TEMPLATE_ENTORNO_DIR="${APP_DIR}/templates/entorno"
@@ -52,12 +55,12 @@ ensure_docker_ready() {
     docker network create edge >/dev/null
   fi
 
-  if ! docker network inspect paramascotasec-web-internal >/dev/null 2>&1; then
-    docker network create --internal paramascotasec-web-internal >/dev/null
+  if ! docker network inspect webparamascotas-internal >/dev/null 2>&1; then
+    docker network create --internal webparamascotas-internal >/dev/null
   fi
 
-  if ! docker network inspect paramascotasec-db-internal >/dev/null 2>&1; then
-    docker network create --internal paramascotasec-db-internal >/dev/null
+  if ! docker network inspect basesdedatos-internal >/dev/null 2>&1; then
+    docker network create --internal basesdedatos-internal >/dev/null
   fi
 
 }
@@ -128,7 +131,7 @@ assert_no_legacy_runtime_paths() {
   local found=()
   local path
 
-  for suffix in "" ".development" ".production" ".local"; do
+  for suffix in "" ".production" ".local"; do
     path="${APP_DIR}/${env_name}${suffix}"
     if [[ -e "${path}" ]]; then
       found+=("${path#${APP_DIR}/}")
@@ -136,32 +139,73 @@ assert_no_legacy_runtime_paths() {
   done
 
   if (( ${#found[@]} > 0 )); then
-    printf 'Rutas legacy fuera de entorno/ detectadas en paramascotasec-backend: %s\n' "${found[*]}" >&2
-    printf 'Ejecuta scripts/migrate-entorno.sh o mueve esos archivos a un backup externo antes de desplegar.\n' >&2
+    printf 'Rutas legacy fuera de entorno/ detectadas en backend: %s\n' "${found[*]}" >&2
+    printf 'Mueve esos archivos a un backup externo antes de desplegar.\n' >&2
     exit 1
   fi
 }
 
 assert_entorno_mode() {
   local expected="$1"
-  local actual
+  local actual expected_canonical actual_canonical
 
   actual="$(read_env_value "${ENTORNO_ENV_FILE}" "ENTORNO_MODE" || true)"
   actual="$(normalize_env_value "${actual}")"
+  expected_canonical="$(canonical_env_mode "${expected}")"
+  actual_canonical="$(canonical_env_mode "${actual}" 2>/dev/null || true)"
 
-  if [[ "${actual}" != "${expected}" ]]; then
+  if [[ "${actual_canonical}" != "${expected_canonical}" ]]; then
     echo "ENTORNO_MODE=${actual:-<vacio>} en ${ENTORNO_ENV_FILE}; esperado ${expected}." >&2
     exit 1
   fi
 }
 
+validate_backend_env_for_mode() {
+  local mode="$1"
+  local env_file="$2"
+  local app_env sri_env driver
+
+  app_env="$(normalize_env_value "$(read_env_value "${env_file}" "APP_ENV" || true)")"
+  sri_env="$(normalize_env_value "$(read_env_value "${env_file}" "SRI_ENVIRONMENT" || true)")"
+  driver="$(normalize_env_value "$(read_env_value "${env_file}" "BILLING_GATEWAY_DRIVER" || true)")"
+  driver="${driver:-native}"
+
+  if [[ "${driver}" != "native" ]]; then
+    echo "BILLING_GATEWAY_DRIVER=${driver} no permitido; Billing SRI debe usar native." >&2
+    exit 1
+  fi
+
+  case "${mode}" in
+    qa)
+      if [[ "${app_env}" != "qa" ]]; then
+        echo "APP_ENV=${app_env:-<vacio>} no es valido para QA; usa qa." >&2
+        exit 1
+      fi
+      if [[ "${sri_env}" != "pruebas" ]]; then
+        echo "SRI_ENVIRONMENT=${sri_env:-<vacio>} no es valido para QA; usa pruebas." >&2
+        exit 1
+      fi
+      ;;
+    production)
+      if [[ ! "${app_env}" =~ ^(production|prod)$ ]]; then
+        echo "APP_ENV=${app_env:-<vacio>} no es valido para production; usa production." >&2
+        exit 1
+      fi
+      if [[ "${sri_env}" != "produccion" ]]; then
+        echo "SRI_ENVIRONMENT=${sri_env:-<vacio>} no es valido para production; usa produccion." >&2
+        exit 1
+      fi
+      ;;
+  esac
+}
+
 resolve_env_file() {
-  local mode="${1:-development}"
+  local mode="${1:-qa}"
   local env_file="${ENTORNO_ENV_FILE}"
   local primary_domain primary_aliases public_scheme tenant_slug public_base_url tenant_name gateway_env
 
-  if [[ "${mode}" != "development" && "${mode}" != "production" ]]; then
-    echo "Modo invalido: ${mode}. Usa development o production." >&2
+  if ! mode="$(canonical_env_mode "${mode}")"; then
+    echo "Modo invalido: ${mode}. Usa qa o production." >&2
     exit 1
   fi
 
@@ -169,7 +213,7 @@ resolve_env_file() {
   ensure_entorno_files
   assert_entorno_mode "${mode}"
 
-  gateway_env="${APP_DIR}/../Gateway/entorno/.env"
+  gateway_env="${APP_DIR}/../gatewayapisix/entorno/.env"
   tenant_slug="$(normalize_env_value "$(read_env_value "${env_file}" "PUBLIC_TENANT_SLUG" || true)")"
   tenant_slug="${tenant_slug:-$(normalize_env_value "$(read_env_value "${env_file}" "DEFAULT_TENANT" || true)")}"
   tenant_slug="${tenant_slug:-paramascotasec}"
@@ -215,7 +259,7 @@ resolve_env_file() {
   fi
   upsert_env_value "${env_file}" "DB_DATABASE_MAILER_SERVICE" "mailer_service"
 
-  if [[ "${mode}" == "development" ]]; then
+  if [[ "${mode}" == "qa" ]]; then
     local backend_bind_ip backend_port backend_public_scheme backend_public_host app_url
     backend_bind_ip="${BACKEND_BIND_IP:-$(read_env_value "${env_file}" "BACKEND_BIND_IP")}"
     backend_bind_ip="${backend_bind_ip:-0.0.0.0}"
@@ -224,20 +268,15 @@ resolve_env_file() {
     backend_public_scheme="${BACKEND_PUBLIC_SCHEME:-$(read_env_value "${env_file}" "BACKEND_PUBLIC_SCHEME")}"
     backend_public_scheme="${backend_public_scheme:-http}"
     backend_public_host="${BACKEND_PUBLIC_HOST:-$(read_env_value "${env_file}" "BACKEND_PUBLIC_HOST")}"
-    backend_public_host="${backend_public_host:-$(detect_development_public_host)}"
+    backend_public_host="${backend_public_host:-$(detect_qa_public_host)}"
     app_url="${public_base_url}"
 
-    upsert_env_value "${env_file}" "APP_ENV" "development"
     upsert_env_value "${env_file}" "BACKEND_BIND_IP" "${backend_bind_ip}"
     upsert_env_value "${env_file}" "BACKEND_PORT" "${backend_port}"
     upsert_env_value "${env_file}" "BACKEND_PUBLIC_SCHEME" "${backend_public_scheme}"
     upsert_env_value "${env_file}" "BACKEND_PUBLIC_HOST" "${backend_public_host}"
     upsert_env_value "${env_file}" "APP_URL" "${app_url}"
-    upsert_env_value "${env_file}" "ADMIN_IP_MODE" "private"
-    upsert_env_value "${env_file}" "ADMIN_IP_ALLOWLIST" ""
-    upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
-    upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "pruebas"
-    upsert_env_value "${env_file}" "BILLING_GATEWAY_DRIVER" "native"
+    validate_backend_env_for_mode "${mode}" "${env_file}"
 
     printf '%s\n' "${env_file}"
     return 0
@@ -249,16 +288,13 @@ resolve_env_file() {
     app_url="${public_base_url}"
   fi
 
-  upsert_env_value "${env_file}" "APP_ENV" "production"
   upsert_env_value "${env_file}" "APP_URL" "${app_url%/}"
-  upsert_env_value "${env_file}" "TRUST_PROXY_HEADERS" "false"
-  upsert_env_value "${env_file}" "SRI_ENVIRONMENT" "produccion"
-  upsert_env_value "${env_file}" "BILLING_GATEWAY_DRIVER" "native"
+  validate_backend_env_for_mode "${mode}" "${env_file}"
   printf '%s\n' "${env_file}"
   return 0
 }
 
-detect_development_public_host() {
+detect_qa_public_host() {
   local candidate
 
   if command -v ip >/dev/null 2>&1; then
@@ -276,6 +312,24 @@ detect_development_public_host() {
   printf '%s\n' "${candidate}"
 }
 
+prepare_billing_storage_permissions() {
+  local billing_storage_dir="${APP_DIR}/storage/billing"
+  local billing_runtime_gid="${BILLING_RUNTIME_GID:-82}"
+
+  mkdir -p \
+    "${billing_storage_dir}/cache" \
+    "${billing_storage_dir}/certs" \
+    "${billing_storage_dir}/logs" \
+    "${billing_storage_dir}/pdf/rides" \
+    "${billing_storage_dir}/xml/autorizados" \
+    "${billing_storage_dir}/xml/firmados" \
+    "${billing_storage_dir}/xml/generados"
+
+  chgrp -R "${billing_runtime_gid}" "${billing_storage_dir}"
+  find "${billing_storage_dir}" -type d -exec chmod 770 {} +
+  find "${billing_storage_dir}" -type f -exec chmod 660 {} +
+}
+
 compose_cmd() {
   local env_file="$1"
   shift
@@ -287,12 +341,13 @@ compose_cmd() {
 }
 
 assert_backend_mode() {
-  local mode="${1:-development}"
-  local container_env
+  local env_file="$1"
+  local container_env expected_env
 
-  container_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' paramascotasec-backend-app 2>/dev/null | awk -F= '/^APP_ENV=/{print $2; exit}')"
-  if [[ "${container_env}" != "${mode}" ]]; then
-    echo "El backend quedo levantado con APP_ENV=${container_env:-desconocido}, esperado ${mode}" >&2
+  container_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' backend-api 2>/dev/null | awk -F= '/^APP_ENV=/{print $2; exit}')"
+  expected_env="$(normalize_env_value "$(read_env_value "${env_file}" "APP_ENV" || true)")"
+  if [[ "${container_env}" != "${expected_env}" ]]; then
+    echo "El backend quedo levantado con APP_ENV=${container_env:-desconocido}, esperado ${expected_env:-<vacio>}" >&2
     exit 1
   fi
 }
@@ -324,35 +379,56 @@ wait_for_container_state() {
   exit 1
 }
 
+remove_legacy_backend_containers() {
+  local container
+
+  for container in backend-app backend-web backend-billing-worker; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "${container}"; then
+      docker rm -f "${container}" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 deploy_backend() {
-  local mode="${1:-development}"
+  local mode="${1:-qa}"
   local env_file
   local run_db_setup="${RUN_DB_SETUP:-${RUN_DB_BOOTSTRAP:-0}}"
+  local db_admin_username=""
+  local db_admin_password=""
+  local shared_db_env_file="${APP_DIR}/../basesdedatos/entorno/.env"
 
   ensure_docker_ready
   env_file="$(resolve_env_file "${mode}")"
+  prepare_billing_storage_permissions
 
-  echo "Levantando backend Paramascotasec en ${mode} usando ${env_file}..."
-  if [[ "${run_db_setup}" == "1" && -x "${APP_DIR}/../paramascotasec-DB/scripts/sync-module-databases.sh" ]]; then
+  echo "Levantando backend Paramascotasec (${mode}) usando ${env_file}..."
+  if [[ "${run_db_setup}" == "1" && -x "${APP_DIR}/../basesdedatos/scripts/sync-module-databases.sh" ]]; then
     (
-      cd "${APP_DIR}/../paramascotasec-DB"
-      ./scripts/sync-module-databases.sh "${mode}"
+      cd "${APP_DIR}/../basesdedatos"
+      ./scripts/sync-module-databases.sh
     )
+    if [[ -f "${shared_db_env_file}" ]]; then
+      db_admin_username="$(normalize_env_value "$(read_env_value "${shared_db_env_file}" "POSTGRES_USER" || true)")"
+      db_admin_password="$(normalize_env_value "$(read_env_value "${shared_db_env_file}" "POSTGRES_PASSWORD" || true)")"
+    fi
   fi
   (
     cd "${APP_DIR}"
 
-    docker compose --env-file "${env_file}" build app
+    remove_legacy_backend_containers
 
-    APP_ENV="${mode}" \
+    docker compose --env-file "${env_file}" build api
+
+    DB_ADMIN_USERNAME="${db_admin_username}" \
+      DB_ADMIN_PASSWORD="${db_admin_password}" \
       RUN_DB_SETUP="${run_db_setup}" \
       RUN_DB_BOOTSTRAP="${run_db_setup}" \
-      docker compose --env-file "${env_file}" up -d --force-recreate --remove-orphans app web billing-recovery-worker
+      docker compose --env-file "${env_file}" up -d --force-recreate --remove-orphans api http sri-worker
   )
-  wait_for_container_state paramascotasec-backend-app
-  wait_for_container_state paramascotasec-backend-web
-  wait_for_container_state paramascotasec-backend-billing-worker
-  assert_backend_mode "${mode}"
+  wait_for_container_state backend-api
+  wait_for_container_state backend-http
+  wait_for_container_state backend-sri-worker
+  assert_backend_mode "${env_file}"
   compose_cmd "${env_file}" ps
-  echo "Backend Paramascotasec ${mode} listo"
+  echo "Backend Paramascotasec (${mode}) listo"
 }

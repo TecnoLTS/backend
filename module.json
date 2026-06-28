@@ -3,7 +3,7 @@
   "key": "platform-core",
   "name": "Paramascotas Core API",
   "kind": "service",
-  "repoPath": "paramascotasec-backend",
+  "repoPath": "backend",
   "description": "API principal multi-tenant para ecommerce, administracion, RBAC, catalogo, pedidos, reportes y coordinacion operativa del tenant.",
   "lifecycle": {
     "status": "active",
@@ -23,7 +23,7 @@
         "Expone su API multi-tenant y resuelve tenant, autenticacion y permisos desde el propio runtime.",
         "Aplica reglas de negocio de ecommerce, administracion, RBAC y operaciones generales.",
         "Lee y escribe cada bounded context en su base logica dedicada mediante ConnectionRegistry.",
-        "Publica contratos HTTP para el sitio publico, el Dashboard y otros consumidores autorizados."
+        "Publica contratos HTTP para el sitio publico, el dashboard y otros consumidores autorizados."
       ],
       "sourceOfTruth": "owner-runtime",
       "writePolicy": "owner-api-only",
@@ -31,30 +31,30 @@
     },
     "orchestrated": {
       "supported": true,
-      "summary": "Sirve como backend operativo unico para Dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas dedicadas.",
+      "summary": "Sirve como backend operativo unico para dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas dedicadas.",
       "requires": [
-        "Dashboard como orquestador visual",
-        "Gateway/APISIX para contrato publico",
-        "module-registry.json del Dashboard"
+        "dashboard como orquestador visual",
+        "gatewayapisix/APISIX para contrato publico",
+        "module-registry.json del dashboard"
       ],
       "operationFlow": [
-        "El Dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
-        "La UI consume el Core API por proxy Dashboard o por el contrato publico del Gateway.",
+        "El dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
+        "La UI consume el Core API por proxy dashboard o por el contrato publico de gatewayapisix.",
         "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a su base logica dedicada.",
-        "El Dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
+        "El dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
       ],
       "sourceOfTruth": "owner-runtime",
       "writePolicy": "owner-api-only",
       "integrationStyle": "dashboard-proxy-http-contract",
       "orchestratorKey": "dashboard",
-      "registryFile": "Dashboard/public/module-registry.json"
+      "registryFile": "dashboard/public/module-registry.json"
     }
   },
   "http": {
     "enabled": true,
     "healthEndpoint": "/api/health",
     "manifestEndpoint": "/module.json",
-    "runtimeBaseUrlExample": "http://paramascotasec-backend-web:8080",
+    "runtimeBaseUrlExample": "http://backend-http:8080",
     "orchestratedEntryPoints": [
       {
         "key": "public-tenant-api",
@@ -64,7 +64,7 @@
       {
         "key": "dashboard-api-proxy",
         "path": "/dashboard/api",
-        "notes": "Consumo del Dashboard mediante su proxy interno hacia la API principal."
+        "notes": "Consumo del dashboard mediante su proxy interno hacia la API principal."
       },
       {
         "key": "public-billing-api",
@@ -203,36 +203,8 @@
       ],
       "moduleProfiles": [
         "pos-cashier",
-        "sales-operator"
-      ]
-    },
-    {
-      "moduleKey": "products",
-      "databaseKey": "catalog_inventory",
-      "ownsUsers": false,
-      "dependsOnIdentityPlatform": true,
-      "permissions": [
-        "products.read",
-        "products.create",
-        "products.update",
-        "products.delete"
-      ],
-      "moduleProfiles": [
-        "catalog-operator"
-      ]
-    },
-    {
-      "moduleKey": "inventory",
-      "databaseKey": "catalog_inventory",
-      "ownsUsers": false,
-      "dependsOnIdentityPlatform": true,
-      "permissions": [
-        "inventory.read",
-        "inventory.create",
-        "inventory.update",
-        "inventory.delete"
-      ],
-      "moduleProfiles": [
+        "sales-operator",
+        "catalog-operator",
         "inventory-operator"
       ]
     },
@@ -265,32 +237,13 @@
         "mailer-operator"
       ],
       "status": "active-internal"
-    },
-    {
-      "moduleKey": "monitoring",
-      "databaseKey": "reporting_finance",
-      "ownsUsers": false,
-      "dependsOnIdentityPlatform": true,
-      "permissions": [
-        "monitoring.read",
-        "monitoring.create",
-        "monitoring.update"
-      ],
-      "moduleProfiles": [
-        "monitoring-operator"
-      ]
     }
   ],
   "dashboardProjection": {
     "tenantModules": [
       "ecommerce",
       "users",
-      "invoicing",
       "billing-sri",
-      "products",
-      "inventory",
-      "monitoring",
-      "workspace",
       "tenant-admin"
     ],
     "routeSources": [
@@ -298,23 +251,19 @@
       "users",
       "business",
       "billing-services",
-      "products",
-      "inventory",
-      "monitoring",
-      "workspace",
       "tenant-admin"
     ],
     "notes": [
-      "Estas features viven en la UI del Dashboard, pero su ownership de datos y contratos runtime sigue en el Core API.",
+      "Estas features viven en la UI del dashboard, pero su ownership de datos y contratos runtime sigue en el Core API.",
       "Billing SRI ya entra por el Core API y su driver nativo usa billing_service sin runtime fiscal paralelo.",
       "IdentityPlatform, CatalogInventory, Commerce, ReportingFinance y Mailer ya resuelven bases logicas dedicadas dentro del PostgreSQL unico.",
       "Al extraer dominios desde el core a runtimes propios, esta proyeccion debe migrarse al nuevo modulo duenio sin cambiar la clave del modulo contratado."
     ]
   },
   "docs": {
-    "architecture": "Dashboard/docs/MODULAR-ORCHESTRATION.md",
-    "operatingModel": "Dashboard/docs/MODULE-OPERATING-MODEL.md",
+    "architecture": "dashboard/docs/MODULAR-ORCHESTRATION.md",
+    "operatingModel": "dashboard/docs/MODULE-OPERATING-MODEL.md",
     "operations": "AGENTS.md",
-    "aiContext": "paramascotasec/docs/AI_CONTEXT.md"
+    "aiContext": "webparamascotas/docs/AI_CONTEXT.md"
   }
 }

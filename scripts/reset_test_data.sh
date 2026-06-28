@@ -8,7 +8,7 @@ APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
 
-MODE="development"
+MODE="qa"
 CONFIRM=false
 FULL_WIPE=false
 KEEP_USERS=true
@@ -16,27 +16,27 @@ KEEP_USERS=true
 usage() {
   cat <<'EOF'
 Uso:
-  ./scripts/reset_test_data.sh [development|production] [--yes] [--full]
+  ./scripts/reset_test_data.sh [qa|production] [--yes] [--full]
 
 Comportamiento por defecto:
   - limpia productos, imagenes, variantes, lotes, compras, pedidos, descuentos y POS
   - conserva User, Setting y Tenant para no perder acceso ni configuracion
 
 Opciones:
-  development|production  Entorno cuyo .env se usara para conectar
+  qa|production           Entorno cuyo .env se usara para conectar
   --yes                   Ejecuta sin pedir confirmacion interactiva
   --full                  Limpia tambien la tabla User (muy destructivo)
 
 Ejemplos:
-  ./scripts/reset_test_data.sh development
-  ./scripts/reset_test_data.sh development --yes
+  ./scripts/reset_test_data.sh qa
+  ./scripts/reset_test_data.sh qa --yes
   ./scripts/reset_test_data.sh production --yes --full
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    development|production)
+    qa|production)
       MODE="$1"
       shift
       ;;
@@ -68,7 +68,7 @@ set -a
 source "${ENV_FILE}"
 set +a
 
-DB_CONTAINER="${DB_CONTAINER:-next-test-db}"
+DB_CONTAINER="${DB_CONTAINER:-basesdedatos}"
 DB_USER="${DB_USERNAME:-${POSTGRES_USER:-postgres}}"
 DB_NAME="${DB_DATABASE:-${POSTGRES_DB:-paramascotasec}}"
 

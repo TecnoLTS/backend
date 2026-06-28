@@ -165,7 +165,7 @@ class QuotationController {
         $logoUrl = rtrim($frontendBase, '/') . '/images/brand/LogoVerde150.png';
         $logoCandidates = [
             __DIR__ . '/../../public/images/brand/LogoVerde150.png',
-            dirname(__DIR__, 4) . '/paramascotasec/app/public/images/brand/LogoVerde150.png',
+            dirname(__DIR__, 4) . '/webparamascotas/app/public/images/brand/LogoVerde150.png',
         ];
         foreach ($logoCandidates as $logoPath) {
             if (is_string($logoPath) && is_readable($logoPath)) {
@@ -295,7 +295,7 @@ class QuotationController {
                             <div class="row"><span class="label">Estado comercial:</span><span class="value">' . $this->e($statusLabel) . '</span></div>
                             <div class="row"><span class="label">Fecha de emision:</span><span class="value">' . $this->e($createdAt) . '</span></div>
                             <div class="row"><span class="label">Valida hasta:</span><span class="value">' . $this->e($validUntil) . '</span></div>
-                            <div class="row"><span class="label">Ambiente:</span><span class="value">Dashboard comercial</span></div>
+                            <div class="row"><span class="label">Ambiente:</span><span class="value">dashboard comercial</span></div>
                             <span class="status">' . $this->e($statusLabel) . '</span>
                             <div class="notice" style="margin-top:8px;">Documento comercial sin validez tributaria SRI. No reemplaza factura electronica ni RIDE.</div>
                             </div>

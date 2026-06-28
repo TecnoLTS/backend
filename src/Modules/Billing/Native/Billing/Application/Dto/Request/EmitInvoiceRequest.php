@@ -19,17 +19,33 @@ class EmitInvoiceRequest
 
     public static function fromArray(array $data): self
     {
+        $customer = is_array($data['customer'] ?? null) ? $data['customer'] : [];
+        $additionalInfo = is_array($data['additional_info'] ?? null) ? $data['additional_info'] : [];
+        $sourceReference = self::extractOptionalString($data, 'source_reference');
+
+        if ($sourceReference !== null && !array_key_exists('order_id', $additionalInfo)) {
+            $additionalInfo['order_id'] = $sourceReference;
+        }
+
         return new self(
-            customerIdentification: $data['customer_identification'] ?? '',
-            customerName: $data['customer_name'] ?? '',
-            customerAddress: $data['customer_address'] ?? 'N/A',
-            customerEmail: $data['customer_email'] ?? '',
+            customerIdentification: self::extractOptionalString($data, 'customer_identification')
+                ?? self::extractOptionalString($customer, 'identification')
+                ?? '',
+            customerName: self::extractOptionalString($data, 'customer_name')
+                ?? self::extractOptionalString($customer, 'name')
+                ?? '',
+            customerAddress: self::extractOptionalString($data, 'customer_address')
+                ?? self::extractOptionalString($customer, 'address')
+                ?? 'N/A',
+            customerEmail: self::extractOptionalString($data, 'customer_email')
+                ?? self::extractOptionalString($customer, 'email')
+                ?? '',
             items: $data['items'] ?? [],
             paymentMethod: self::extractOptionalString($data, 'payment_method')
-                ?? self::extractOptionalString($data['additional_info'] ?? [], 'payment_method'),
+                ?? self::extractOptionalString($additionalInfo, 'payment_method'),
             paymentMethodCode: self::extractOptionalString($data, 'payment_method_code')
-                ?? self::extractOptionalString($data['additional_info'] ?? [], 'payment_method_code'),
-            additionalInfo: $data['additional_info'] ?? []
+                ?? self::extractOptionalString($additionalInfo, 'payment_method_code'),
+            additionalInfo: $additionalInfo
         );
     }
 

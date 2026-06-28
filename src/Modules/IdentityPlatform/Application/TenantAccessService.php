@@ -16,16 +16,8 @@ class TenantAccessService {
         'dashboard' => ['read'],
         'ecommerce' => ['read', 'create', 'update', 'delete'],
         'users' => ['read', 'create', 'update', 'delete'],
-        'invoicing' => ['read', 'create', 'update', 'delete'],
         'billing-sri' => ['read', 'create', 'update'],
-        'products' => ['read', 'create', 'update', 'delete'],
-        'inventory' => ['read', 'create', 'update', 'delete'],
-        'monitoring' => ['read', 'create', 'update'],
-        'workspace' => ['read', 'create', 'update'],
-        'ui-kit' => ['read'],
         'tenant-admin' => ['read', 'update'],
-        'email-service' => ['read', 'create', 'update'],
-        'medical-office' => ['read', 'create', 'update', 'delete'],
     ];
 
     private const PLATFORM_ADMIN_CONTEXT_MODULES = [
@@ -42,12 +34,7 @@ class TenantAccessService {
     private const DEFAULT_ENABLED_MODULES = [
         'dashboard',
         'ecommerce',
-        'products',
-        'inventory',
         'users',
-        'tenant-admin',
-        'invoicing',
-        'billing-sri',
     ];
 
     private SettingsRepository $settingsRepository;
@@ -135,14 +122,15 @@ class TenantAccessService {
 
     public function tenantAdminPermissions(array $enabledModules): array {
         $permissions = [];
+        $normalizedModules = $this->normalizeKnownModuleList($enabledModules);
 
-        foreach ($this->normalizeKnownModuleList($enabledModules) as $moduleKey) {
+        foreach ($normalizedModules as $moduleKey) {
             foreach (self::MODULE_PERMISSION_ACTIONS[$moduleKey] ?? [] as $action) {
                 $permissions[] = "{$moduleKey}.{$action}";
             }
         }
 
-        if (in_array('users', $enabledModules, true)) {
+        if (in_array('users', $normalizedModules, true)) {
             foreach (['read', 'create', 'update', 'delete'] as $action) {
                 $permissions[] = "roles.{$action}";
             }
@@ -460,16 +448,16 @@ class TenantAccessService {
         if ($this->isProductAdminRoute($capability, $uri)) {
             return [
                 'requiresPermission' => true,
-                'permission' => $this->permissionForMethod('products', $method),
-                'module' => 'products',
+                'permission' => $this->permissionForMethod('ecommerce', $method),
+                'module' => 'ecommerce',
             ];
         }
 
         if ($this->isInventoryAdminRoute($capability, $uri)) {
             return [
                 'requiresPermission' => true,
-                'permission' => $this->permissionForMethod('inventory', $method),
-                'module' => 'inventory',
+                'permission' => $this->permissionForMethod('ecommerce', $method),
+                'module' => 'ecommerce',
             ];
         }
 
@@ -490,10 +478,18 @@ class TenantAccessService {
         }
 
         if ($capability === 'admin.settings') {
+            if (str_starts_with($uri, '/api/admin/settings/session')) {
+                return [
+                    'requiresPermission' => true,
+                    'permission' => $this->permissionForMethod('users', $method),
+                    'module' => 'users',
+                ];
+            }
+
             return [
                 'requiresPermission' => true,
-                'permission' => 'tenant-admin.update',
-                'module' => 'tenant-admin',
+                'permission' => $this->permissionForMethod('ecommerce', $method),
+                'module' => 'ecommerce',
             ];
         }
 
@@ -544,8 +540,10 @@ class TenantAccessService {
             }
         }
 
-        if (!in_array('dashboard', $normalized, true)) {
-            array_unshift($normalized, 'dashboard');
+        foreach (['users', 'dashboard'] as $baseModule) {
+            if (!in_array($baseModule, $normalized, true)) {
+                array_unshift($normalized, $baseModule);
+            }
         }
 
         return array_values(array_unique($normalized));
@@ -588,10 +586,11 @@ class TenantAccessService {
     }
 
     private function isCommerceAdminRoute(string $capability, string $uri): bool {
-        return in_array($capability, ['admin.pos', 'admin.quotes', 'admin.discounts', 'admin.operations'], true)
+        return in_array($capability, ['admin.pos', 'admin.quotes', 'admin.discounts', 'admin.operations', 'admin.ecommerce-users'], true)
             || str_starts_with($uri, '/api/admin/pos')
             || str_starts_with($uri, '/api/admin/quotes')
             || str_starts_with($uri, '/api/admin/discounts')
+            || str_starts_with($uri, '/api/admin/ecommerce-users')
             || str_starts_with($uri, '/api/admin/historical-sales')
             || str_starts_with($uri, '/api/shipments');
     }

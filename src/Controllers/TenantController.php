@@ -43,7 +43,7 @@ class TenantController {
                 'roles' => [$this->platformAdminRole()],
                 'currentUser' => [
                     'id' => 'service',
-                    'name' => (string)($payload['name'] ?? 'Dashboard Internal Proxy'),
+                    'name' => (string)($payload['name'] ?? 'dashboard internal proxy'),
                     'email' => (string)($payload['email'] ?? 'dashboard-internal@service.local'),
                     'roleIds' => ['platform_admin'],
                     'permissions' => ['platform-admin'],

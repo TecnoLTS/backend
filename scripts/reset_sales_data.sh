@@ -7,13 +7,13 @@ APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
 
-MODE="development"
+MODE="qa"
 CONFIRM=false
 
 usage() {
   cat <<'EOF'
 Uso:
-  ./scripts/reset_sales_data.sh [development|production] [--yes]
+  ./scripts/reset_sales_data.sh [qa|production] [--yes]
 
 Acciones:
   - elimina pedidos y sus items
@@ -31,14 +31,14 @@ Conserva:
   - usuarios, settings y tenants
 
 Ejemplos:
-  ./scripts/reset_sales_data.sh development
-  ./scripts/reset_sales_data.sh development --yes
+  ./scripts/reset_sales_data.sh qa
+  ./scripts/reset_sales_data.sh qa --yes
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    development|production)
+    qa|production)
       MODE="$1"
       shift
       ;;
@@ -65,7 +65,7 @@ set -a
 source "${ENV_FILE}"
 set +a
 
-DB_CONTAINER="${DB_CONTAINER:-next-test-db}"
+DB_CONTAINER="${DB_CONTAINER:-basesdedatos}"
 DB_USER="${DB_USERNAME:-${POSTGRES_USER:-postgres}}"
 DB_NAME="${DB_DATABASE:-${POSTGRES_DB:-paramascotasec}}"
 

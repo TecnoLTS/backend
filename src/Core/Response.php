@@ -57,9 +57,9 @@ class Response {
         return in_array($code, $allowed, true);
     }
 
-    private static function isDevelopment(): bool {
+    private static function isQa(): bool {
         $env = strtolower((string)($_ENV['APP_ENV'] ?? 'production'));
-        if ($env === 'development' || $env === 'dev' || $env === 'local') {
+        if ($env === 'qa') {
             return true;
         }
         $debug = strtolower((string)($_ENV['APP_DEBUG'] ?? 'false'));
@@ -94,7 +94,7 @@ class Response {
     }
 
     public static function error(string $message, int $status = 400, ?string $code = null, $details = null): void {
-        $isDev = self::isDevelopment();
+        $isDev = self::isQa();
         if ($status >= 500 && !$isDev && !self::shouldExposeServerMessage($code)) {
             error_log(sprintf(
                 '[API_ERROR] status=%d code=%s message=%s details=%s',

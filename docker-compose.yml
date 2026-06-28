@@ -5,11 +5,12 @@ x-default-logging: &default-logging
     max-file: "3"
 
 services:
-  app:
+  api:
+    image: backend-api
     build:
       context: .
       dockerfile: docker/Dockerfile
-    container_name: paramascotasec-backend-app
+    container_name: backend-api
     restart: unless-stopped
     logging: *default-logging
     user: "82:82"
@@ -43,6 +44,8 @@ services:
       DB_DATABASE: ${DB_DATABASE:-paramascotasec}
       DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
       DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_ADMIN_USERNAME: ${DB_ADMIN_USERNAME:-}
+      DB_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:-}
       RUN_DB_BOOTSTRAP: ${RUN_DB_BOOTSTRAP:-0}
       JWT_SECRET: ${JWT_SECRET}
       JWT_SECRET_PREVIOUS: ${JWT_SECRET_PREVIOUS:-}
@@ -92,13 +95,13 @@ services:
     networks:
       backend_internal:
         aliases:
-          - paramascotasec-backend-app
+          - backend-api
       db_internal:
       backend_egress:
 
-  billing-recovery-worker:
-    image: paramascotasec-backend-app
-    container_name: paramascotasec-backend-billing-worker
+  sri-worker:
+    image: backend-api
+    container_name: backend-sri-worker
     restart: unless-stopped
     logging: *default-logging
     user: "82:82"
@@ -161,14 +164,14 @@ services:
       BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS: ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}
       BILLING_API_KEY: ${BILLING_API_KEY:-}
     depends_on:
-      - app
+      - api
     networks:
       db_internal:
       backend_egress:
 
-  web:
+  http:
     image: nginxinc/nginx-unprivileged:1.31-alpine
-    container_name: paramascotasec-backend-web
+    container_name: backend-http
     restart: unless-stopped
     logging: *default-logging
     user: "101:101"
@@ -197,17 +200,17 @@ services:
     networks:
       web_internal:
         aliases:
-          - paramascotasec-backend-web
+          - backend-http
       backend_internal:
 
 networks:
   web_internal:
     external: true
-    name: paramascotasec-web-internal
+    name: webparamascotas-internal
   backend_internal:
     internal: true
   db_internal:
     external: true
-    name: paramascotasec-db-internal
+    name: basesdedatos-internal
   backend_egress:
     driver: bridge

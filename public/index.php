@@ -165,7 +165,7 @@ if ($providedInternalProxyToken !== '') {
 $GLOBALS['trusted_internal_proxy_token'] = $hasTrustedInternalProxyToken;
 $appEnv = strtolower((string)($_ENV['APP_ENV'] ?? 'production'));
 $proxyHeaderFlagEnabled = in_array(strtolower((string)($_ENV['TRUST_PROXY_HEADERS'] ?? 'false')), ['1', 'true', 'yes', 'on'], true);
-$isNonProduction = in_array($appEnv, ['development', 'dev', 'local'], true);
+$isNonProduction = $appEnv === 'qa';
 $trustProxyHeaders = $hasTrustedInternalProxyToken || ($proxyHeaderFlagEnabled && $isNonProduction);
 if ($proxyHeaderFlagEnabled && !$trustProxyHeaders) {
     error_log('[PROXY_HEADER_WARNING] TRUST_PROXY_HEADERS is ignored in production without a valid internal proxy token.');
@@ -195,8 +195,8 @@ if ($host && strpos($host, ',') !== false) {
 $normalizedResolvedHost = $host ? preg_replace('/:\d+$/', '', strtolower($host)) : null;
 $serviceAuthLocalHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
 $isInternalServiceHost = is_string($normalizedResolvedHost) && (
-    $normalizedResolvedHost === 'backend-web'
-    || str_ends_with($normalizedResolvedHost, '-backend-web')
+    $normalizedResolvedHost === 'backend-http'
+    || str_ends_with($normalizedResolvedHost, '-backend-http')
     || str_ends_with($normalizedResolvedHost, '.localhost')
     || str_ends_with($normalizedResolvedHost, '.local')
 );
@@ -212,8 +212,8 @@ if (!$tenant) {
     $normalizedHost = $host ? preg_replace('/:\\d+$/', '', strtolower($host)) : null;
     $fallbackSlug = $_ENV['DEFAULT_TENANT'] ?? 'paramascotasec';
     $isInternalHost = is_string($normalizedHost) && (
-        $normalizedHost === 'backend-web'
-        || str_ends_with($normalizedHost, '-backend-web')
+        $normalizedHost === 'backend-http'
+        || str_ends_with($normalizedHost, '-backend-http')
     );
     if ($normalizedHost && (in_array($normalizedHost, $localHosts, true) || filter_var($normalizedHost, FILTER_VALIDATE_IP) || $isInternalHost)) {
         $tenant = $tenants[$fallbackSlug] ?? null;

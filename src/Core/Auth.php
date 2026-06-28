@@ -19,7 +19,7 @@ class Auth {
             'iat' => time(),
             'sub' => 'service',
             'email' => 'dashboard-internal@' . (TenantContext::slug() ?: 'tenant') . '.local',
-            'name' => 'Dashboard Internal Proxy',
+            'name' => 'dashboard internal proxy',
             'role' => 'admin',
             'tenant_id' => TenantContext::id(),
             'service_auth' => true,

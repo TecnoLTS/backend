@@ -315,6 +315,11 @@ class EmitInvoice
             total: $invoice->total()->amount()
         ));
 
+        $storedInvoice = $this->invoiceRepository->findInvoiceForClient($accessKey->value(), $this->clientContext);
+        if (is_array($storedInvoice)) {
+            return InvoiceResponse::fromStoredInvoice($storedInvoice);
+        }
+
         return InvoiceResponse::fromInvoice($invoice);
         } finally {
             if ($sequentialLockAcquired) {

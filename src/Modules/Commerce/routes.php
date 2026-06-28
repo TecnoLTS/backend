@@ -47,6 +47,11 @@ return [
     ['method' => 'GET', 'path' => '/api/admin/quotes/{id}/pdf', 'handler' => 'App\\Modules\\Commerce\\Controllers\\QuotationController@pdf', 'capability' => 'admin.quotes'],
     ['method' => 'POST', 'path' => '/api/admin/quotes/{id}/close', 'handler' => 'App\\Modules\\Commerce\\Controllers\\QuotationController@close', 'capability' => 'admin.quotes'],
     ['method' => 'POST', 'path' => '/api/admin/quotes/{id}/convert', 'handler' => 'App\\Modules\\Commerce\\Controllers\\QuotationController@convert', 'capability' => 'admin.quotes'],
+    ['method' => 'GET', 'path' => '/api/admin/ecommerce-users', 'handler' => 'App\\Modules\\Commerce\\Controllers\\CustomerController@ecommerceUsers', 'capability' => 'admin.ecommerce-users'],
+    ['method' => 'POST', 'path' => '/api/admin/ecommerce-users', 'handler' => 'App\\Modules\\Commerce\\Controllers\\CustomerController@store', 'capability' => 'admin.ecommerce-users'],
+    ['method' => 'POST', 'path' => '/api/admin/ecommerce-users/{id}/unlock', 'handler' => 'App\\Modules\\Commerce\\Controllers\\CustomerController@unlock', 'capability' => 'admin.ecommerce-users'],
+    ['method' => 'PUT', 'path' => '/api/admin/ecommerce-users/{id}', 'handler' => 'App\\Modules\\Commerce\\Controllers\\CustomerController@update', 'capability' => 'admin.ecommerce-users'],
+    ['method' => 'PATCH', 'path' => '/api/admin/ecommerce-users/{id}', 'handler' => 'App\\Modules\\Commerce\\Controllers\\CustomerController@patch', 'capability' => 'admin.ecommerce-users'],
     ['method' => 'GET', 'path' => '/api/shipments', 'handler' => 'App\\Modules\\Commerce\\Controllers\\ShippingController@index', 'capability' => 'admin.operations'],
     ['method' => 'POST', 'path' => '/api/contact', 'handler' => 'App\\Modules\\Commerce\\Controllers\\ContactController@store', 'capability' => 'content.contact'],
 ];

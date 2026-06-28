@@ -26,9 +26,9 @@ class AuthController {
         $this->passwordResetTokenRepository = new PasswordResetTokenRepository();
     }
 
-    private function isDevelopment(): bool {
+    private function isQa(): bool {
         $env = strtolower((string)($_ENV['APP_ENV'] ?? 'production'));
-        if ($env === 'development' || $env === 'dev' || $env === 'local') {
+        if ($env === 'qa') {
             return true;
         }
         $debug = strtolower((string)($_ENV['APP_DEBUG'] ?? 'false'));
@@ -576,7 +576,7 @@ class AuthController {
                 'user' => [
                     'id' => 'service',
                     'email' => (string)($payload['email'] ?? 'dashboard-internal@service.local'),
-                    'name' => (string)($payload['name'] ?? 'Dashboard Internal Proxy'),
+                    'name' => (string)($payload['name'] ?? 'dashboard internal proxy'),
                     'role' => 'admin',
                 ],
             ]);
@@ -698,7 +698,7 @@ class AuthController {
                         'id' => $result['id'],
                         'email_verified' => false
                     ];
-                    if ($this->isDevelopment()) {
+                    if ($this->isQa()) {
                         $payload['debug_token'] = $result['token'];
                     }
                     Response::json($payload, 201, null, 'Cuenta creada. No se pudo enviar el correo de verificación; solicita un nuevo código antes de iniciar sesión.');
@@ -706,7 +706,7 @@ class AuthController {
                 }
             }
             $payload = ['id' => $result['id']];
-            if ($this->isDevelopment()) {
+            if ($this->isQa()) {
                 $payload['debug_token'] = $result['token'];
             }
             Response::json($payload, 201, null, 'Usuario registrado exitosamente. Por favor, revisa tu correo para confirmar tu cuenta.');

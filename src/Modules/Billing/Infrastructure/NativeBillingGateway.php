@@ -506,7 +506,10 @@ final class NativeBillingGateway implements BillingGateway {
         $resolvedEnvironment = $invoiceEnvironment !== ''
             ? ($invoiceEnvironment === 'produccion' ? 'produccion' : 'pruebas')
             : $environment;
-        $resolvedConfig = $this->resolvedConfig($clientContext, $resolvedEnvironment);
+        $resolvedConfig = $this->resolvedConfig(
+            $clientContext,
+            $this->localDocumentConfigEnvironment($resolvedEnvironment)
+        );
         $dataFactory = new RidePdfInvoiceDataFactory();
         $invoiceData = $details === [] && !$this->rawRequestHasItems($invoice) && $localXmlPath !== null
             ? $dataFactory->fromXmlFile($localXmlPath)
@@ -585,6 +588,23 @@ final class NativeBillingGateway implements BillingGateway {
 
     private function canGenerateRidePdf(array $invoice): bool {
         return strtoupper(trim((string)($invoice['sri_status'] ?? ''))) === 'AUTORIZADO';
+    }
+
+    private function localDocumentConfigEnvironment(?string $environment): ?string {
+        $normalized = self::normalizeEnvironment($environment ?? '');
+        if ($normalized !== 'produccion') {
+            return $normalized;
+        }
+
+        $appEnv = strtolower(trim(self::env('APP_ENV', 'production')));
+        if ($appEnv !== 'qa') {
+            return 'produccion';
+        }
+
+        // In QA we must not talk to SRI production, but local RIDE generation only needs
+        // tenant branding/mail metadata. Reuse the safe config profile while the invoice payload
+        // itself preserves its original production environment markers.
+        return 'pruebas';
     }
 
     private function isCancelledRideInvoice(array $invoice): bool {
@@ -730,8 +750,8 @@ final class NativeBillingGateway implements BillingGateway {
         }
 
         throw new \RuntimeException(sprintf(
-            'Uso de Billing SRI producción bloqueado en APP_ENV=%s. En desarrollo/QA use ambiente pruebas.',
-            $appEnv !== '' ? $appEnv : 'development'
+            'Uso de Billing SRI producción bloqueado en APP_ENV=%s. En QA use ambiente pruebas.',
+            $appEnv !== '' ? $appEnv : 'qa'
         ));
     }
 
@@ -752,7 +772,7 @@ final class NativeBillingGateway implements BillingGateway {
         if (in_array($normalized, ['produccion', 'production', 'prod'], true)) {
             return 'produccion';
         }
-        if (in_array($normalized, ['pruebas', 'test', 'testing', 'development', 'dev', 'local'], true)) {
+        if (in_array($normalized, ['pruebas', 'test', 'testing', 'qa'], true)) {
             return 'pruebas';
         }
 
@@ -761,7 +781,7 @@ final class NativeBillingGateway implements BillingGateway {
 
     private static function defaultEnvironmentFromAppEnv(): string {
         $appEnv = strtolower(trim(self::env('APP_ENV', 'production')));
-        return in_array($appEnv, ['development', 'dev', 'local'], true) ? 'pruebas' : 'produccion';
+        return $appEnv === 'qa' ? 'pruebas' : 'produccion';
     }
 
     private static function env(string $key, string $default = ''): string {

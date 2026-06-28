@@ -19,7 +19,7 @@ foreach ($argv as $arg) {
 }
 
 $tenantId = $tenantArg ?: ($_ENV['DEFAULT_TENANT'] ?? 'paramascotasec');
-$defaultPublicDir = realpath(__DIR__ . '/../../paramascotasec/app/public') ?: (__DIR__ . '/../../paramascotasec/app/public');
+$defaultPublicDir = realpath(__DIR__ . '/../../webparamascotas/app/public') ?: (__DIR__ . '/../../webparamascotas/app/public');
 $publicDir = rtrim((string)($_ENV['UPLOADS_PUBLIC_DIR'] ?? $defaultPublicDir), '/');
 
 $dsn = sprintf(

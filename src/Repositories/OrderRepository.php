@@ -1310,7 +1310,7 @@ class OrderRepository {
         return "COALESCE({$alias}.vat_amount, ({$totalMinusShipping} - ({$netExpr})))";
     }
 
-    // Stats methods for Dashboard
+    // Stats methods for dashboard
     public function getTotalSales() {
         $netExpr = $this->netSalesSql('o');
         $realizedStatus = $this->realizedSalesCondition('o');

@@ -5,7 +5,7 @@ set -euo pipefail
 # No forma parte del flujo diario de Paramascotasec y solo sirve para
 # clonar una linea base entre bases aisladas cuando hace falta.
 
-DB_CONTAINER="${DB_CONTAINER:-next-test-db}"
+DB_CONTAINER="${DB_CONTAINER:-basesdedatos}"
 DB_USER="${DB_USER:-postgres}"
 SOURCE_DB="${1:-paramascotasec}"
 TARGET_DB="${2:-paramascotasec}"

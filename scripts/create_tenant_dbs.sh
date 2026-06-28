@@ -11,12 +11,11 @@ por modulo o servicio, no una base por tenant.
 - El aislamiento entre modulos se hace por base de datos y contratos API.
 - Para sincronizar bases/roles del clúster compartido usa:
 
-  cd /home/admincenter/contenedores/paramascotasec-DB
-  ./scripts/sync-module-databases.sh development
-  ./scripts/sync-module-databases.sh production
+  cd /home/admincenter/contenedores/basesdedatos
+  ./scripts/sync-module-databases.sh
 
 Si necesitas crear un modulo nuevo, registralo primero en:
-  paramascotasec-DB/config/module-databases.json
+  basesdedatos/config/module-databases.json
 EOF
 
 exit 1

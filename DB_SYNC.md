@@ -11,7 +11,7 @@ El hook `.githooks/pre-commit` bloquea commits que intenten incluir `db/backup.s
 Si usas Docker:
 
 ```bash
-export DB_DOCKER_CONTAINER=next-test-db
+export DB_DOCKER_CONTAINER=basesdedatos
 export DB_DATABASE=paramascotasec
 export DB_USERNAME=postgres
 ```
@@ -31,11 +31,11 @@ Usa la misma clave definida en `paramascotas-DB/.env`. Si mantienes `POSTGRES_BI
 ## 3) Dump manual
 
 ```bash
-OUT_FILE=/home/admincenter/secure-backups/paramascotasec-backend/db-$(date +%Y%m%d-%H%M%S).sql ./scripts/db_dump.sh
+OUT_FILE=/home/admincenter/secure-backups/backend/db-$(date +%Y%m%d-%H%M%S).sql ./scripts/db_dump.sh
 ```
 
 ## 4) Restaurar en otro entorno
 
 ```bash
-IN_FILE=/home/admincenter/secure-backups/paramascotasec-backend/db-YYYYMMDD-HHMMSS.sql ./scripts/db_restore.sh
+IN_FILE=/home/admincenter/secure-backups/backend/db-YYYYMMDD-HHMMSS.sql ./scripts/db_restore.sh
 ```
