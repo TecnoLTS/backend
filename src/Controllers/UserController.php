@@ -2,6 +2,7 @@
 
 namespace App\Controllers;
 
+use App\Repositories\CustomerRepository;
 use App\Repositories\UserRepository;
 use App\Core\Response;
 use App\Core\Auth;
@@ -9,12 +10,31 @@ use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
 
 class UserController {
-    private $userRepository;
-    private TenantAccessService $tenantAccessService;
+    protected $userRepository;
+    protected $customerRepository;
+    protected TenantAccessService $tenantAccessService;
+    protected bool $manageEcommerceCustomers = false;
 
     public function __construct() {
         $this->userRepository = new UserRepository();
+        $this->customerRepository = new CustomerRepository();
         $this->tenantAccessService = new TenantAccessService();
+    }
+
+    private function managementRepository(): UserRepository {
+        return $this->manageEcommerceCustomers ? $this->customerRepository : $this->userRepository;
+    }
+
+    private function managedUserResponse(array $user): array {
+        return $this->manageEcommerceCustomers
+            ? $this->ecommerceUser($user)
+            : $this->dashboardUser($user);
+    }
+
+    private function isAllowedManagedRecord(array $user): bool {
+        return $this->manageEcommerceCustomers
+            ? $this->isEcommerceCustomerRecord($user)
+            : $this->isManagedWorkspaceUserRecord($user);
     }
 
     private function authenticate() {
@@ -73,6 +93,13 @@ class UserController {
             unset($profile['description']);
         }
 
+        if ($this->manageEcommerceCustomers) {
+            $profile['identityType'] = 'customer';
+            $profile['roleIds'] = ['customer'];
+            unset($profile['department'], $profile['position'], $profile['description']);
+            return $profile;
+        }
+
         $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
         if ($roleIds !== []) {
             $profile['roleIds'] = $roleIds;
@@ -102,7 +129,9 @@ class UserController {
         }
 
         $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
-        $role = $roleIds !== [] ? $this->databaseRoleFromRoleIds($roleIds) : $this->normalizeRole($data['role'] ?? 'customer');
+        $role = $this->manageEcommerceCustomers
+            ? 'customer'
+            : ($roleIds !== [] ? $this->databaseRoleFromRoleIds($roleIds) : $this->normalizeRole($data['role'] ?? 'customer'));
         $password = trim((string)($data['password'] ?? ''));
         if ($isCreate && $password === '') {
             $password = bin2hex(random_bytes(24));
@@ -199,8 +228,8 @@ class UserController {
             $search = strtolower(trim((string)($query['search'] ?? '')));
             $role = strtolower(trim((string)($query['role'] ?? 'all')));
             $users = array_values(array_filter(
-                $this->userRepository->getAll(),
-                fn (array $user): bool => in_array($this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []), ['customer', 'tenant_staff'], true)
+                $this->customerRepository->getAll(),
+                fn (array $user): bool => $this->isEcommerceCustomerRecord($user)
             ));
             $users = array_map(fn (array $user): array => $this->ecommerceUser($user), $users);
 
@@ -232,14 +261,15 @@ class UserController {
     public function show($id) {
         Auth::requireAdmin();
 
-        $user = $this->userRepository->getAdminUserById($id);
-        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+        $repository = $this->managementRepository();
+        $user = $repository->getAdminUserById($id);
+        if (!$user || !$this->isAllowedManagedRecord($user)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
 
         Response::noStore();
-        Response::json($this->dashboardUser($user));
+        Response::json($this->managedUserResponse($user));
     }
 
     public function store() {
@@ -253,14 +283,15 @@ class UserController {
 
         $payload = $this->validateManagedPayload($data, true);
 
-        if ($this->userRepository->emailExists($payload['email'])) {
+        $repository = $this->managementRepository();
+        if ($repository->emailExists($payload['email'])) {
             Response::error('Ya existe un usuario con ese correo', 409, 'USER_EMAIL_EXISTS');
             return;
         }
 
         try {
-            $created = $this->userRepository->createManaged($payload);
-            Response::json($this->dashboardUser($created), 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
+            $created = $repository->createManaged($payload);
+            Response::json($this->managedUserResponse($created), 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_CREATE_FAILED');
         }
@@ -275,27 +306,28 @@ class UserController {
             return;
         }
 
-        $existingUser = $this->userRepository->getAdminUserById($id);
-        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
+        $repository = $this->managementRepository();
+        $existingUser = $repository->getAdminUserById($id);
+        if (!$existingUser || !$this->isAllowedManagedRecord($existingUser)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
 
         $payload = $this->validateManagedPayload($data, false, $existingUser);
 
-        if (($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
+        if (!$this->manageEcommerceCustomers && ($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
             Response::error('No puedes quitarte tu propio rol de administrador desde aquí', 400, 'USER_SELF_ROLE_CHANGE_FORBIDDEN');
             return;
         }
 
-        if ($this->userRepository->emailExists($payload['email'], $id)) {
+        if ($repository->emailExists($payload['email'], $id)) {
             Response::error('Ya existe otro usuario con ese correo', 409, 'USER_EMAIL_EXISTS');
             return;
         }
 
         try {
-            $updated = $this->userRepository->updateManaged($id, $payload);
-            Response::json($this->dashboardUser($updated), 200, null, 'Usuario actualizado correctamente.');
+            $updated = $repository->updateManaged($id, $payload);
+            Response::json($this->managedUserResponse($updated), 200, null, 'Usuario actualizado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UPDATE_FAILED');
         }
@@ -310,8 +342,9 @@ class UserController {
             return;
         }
 
-        $existingUser = $this->userRepository->getAdminUserById($id);
-        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
+        $repository = $this->managementRepository();
+        $existingUser = $repository->getAdminUserById($id);
+        if (!$existingUser || !$this->isAllowedManagedRecord($existingUser)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
@@ -339,22 +372,22 @@ class UserController {
 
         $payload = $this->validateManagedPayload($merged, false, $existingUser);
 
-        if (($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
+        if (!$this->manageEcommerceCustomers && ($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
             Response::error('No puedes quitarte tu propio rol de administrador desde aquí', 400, 'USER_SELF_ROLE_CHANGE_FORBIDDEN');
             return;
         }
 
-        if ($this->userRepository->emailExists($payload['email'], $id)) {
+        if ($repository->emailExists($payload['email'], $id)) {
             Response::error('Ya existe otro usuario con ese correo', 409, 'USER_EMAIL_EXISTS');
             return;
         }
 
         try {
-            $updated = $this->userRepository->updateManaged($id, $payload);
+            $updated = $repository->updateManaged($id, $payload);
             if (isset($data['status'])) {
-                $updated = $this->userRepository->setManagedStatus($id, (string)$data['status']);
+                $updated = $repository->setManagedStatus($id, (string)$data['status']);
             }
-            Response::json($this->dashboardUser($updated), 200, null, 'Usuario actualizado correctamente.');
+            Response::json($this->managedUserResponse($updated), 200, null, 'Usuario actualizado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UPDATE_FAILED');
         }
@@ -363,15 +396,16 @@ class UserController {
     public function unlock($id) {
         Auth::requireAdmin();
 
-        $existingUser = $this->userRepository->getAdminUserById($id);
-        if (!$existingUser || !$this->isManagedWorkspaceUserRecord($existingUser)) {
+        $repository = $this->managementRepository();
+        $existingUser = $repository->getAdminUserById($id);
+        if (!$existingUser || !$this->isAllowedManagedRecord($existingUser)) {
             Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
             return;
         }
 
         try {
-            $updated = $this->userRepository->unlockManagedUser($id);
-            Response::json($this->dashboardUser($updated), 200, null, 'Usuario desbloqueado correctamente.');
+            $updated = $repository->unlockManagedUser($id);
+            Response::json($this->managedUserResponse($updated), 200, null, 'Usuario desbloqueado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UNLOCK_FAILED');
         }
@@ -380,7 +414,7 @@ class UserController {
     public function getAddresses() {
         $user = $this->authenticate();
         try {
-            $addresses = $this->userRepository->getAddresses($user['sub']);
+            $addresses = $this->accountRepositoryForPayload($user)->getAddresses($user['sub']);
             Response::json(['addresses' => $addresses ? json_decode($addresses, true) : []]);
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_ADDRESSES_FETCH_FAILED');
@@ -397,7 +431,7 @@ class UserController {
         }
 
         try {
-            $addresses = $this->userRepository->updateAddresses($user['sub'], $data['addresses']);
+            $addresses = $this->accountRepositoryForPayload($user)->updateAddresses($user['sub'], $data['addresses']);
             Response::json(['addresses' => $addresses ? json_decode($addresses, true) : []]);
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_ADDRESSES_UPDATE_FAILED');
@@ -407,7 +441,7 @@ class UserController {
     public function getProfile() {
         $user = $this->authenticate();
         try {
-            $profileData = $this->userRepository->getProfile($user['sub']);
+            $profileData = $this->accountRepositoryForPayload($user)->getProfile($user['sub']);
             $profile = [];
             $name = null;
             $email = null;
@@ -459,7 +493,7 @@ class UserController {
         }
 
         try {
-            $updated = $this->userRepository->updateProfile($user['sub'], $name, $data['profile']);
+            $updated = $this->accountRepositoryForPayload($user)->updateProfile($user['sub'], $name, $data['profile']);
             $profile = [];
             $savedName = null;
             if ($updated) {
@@ -506,14 +540,15 @@ class UserController {
         }
 
         try {
-            $passwordHash = $this->userRepository->getPasswordHash($user['sub']);
+            $repository = $this->accountRepositoryForPayload($user);
+            $passwordHash = $repository->getPasswordHash($user['sub']);
             if (!$passwordHash || !password_verify($currentPassword, $passwordHash)) {
                 Response::error('La contraseña actual es incorrecta', 400, 'USER_PASSWORD_INVALID_CURRENT');
                 return;
             }
 
             $newTokenId = bin2hex(random_bytes(16));
-            $this->userRepository->updatePassword(
+            $repository->updatePassword(
                 $user['sub'],
                 password_hash($newPassword, PASSWORD_DEFAULT),
                 $newTokenId
@@ -619,6 +654,15 @@ class UserController {
             ['platform', 'tenant_staff'],
             true
         );
+    }
+
+    private function isEcommerceCustomerRecord(array $user): bool {
+        return $this->tenantAccessService->identityTypeForUser($user, TenantContext::get() ?? []) === 'customer';
+    }
+
+    private function accountRepositoryForPayload(array $payload): UserRepository {
+        $surface = strtolower(trim((string)($payload['auth_surface'] ?? $payload['aud'] ?? '')));
+        return $surface === 'dashboard' ? $this->userRepository : $this->customerRepository;
     }
 
     private function isPlatformWorkspaceUserRecord(array $user): bool {

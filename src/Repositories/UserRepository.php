@@ -6,20 +6,47 @@ use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
+use PDOStatement;
 
 class UserRepository {
     private const PLATFORM_TENANT_ID = 'platform';
 
-    private $db;
+    protected $db;
     private TenantAccessService $tenantAccessService;
+    private string $userTable;
+    private string $securityTable;
+    private bool $syncMemberships;
 
-    public function __construct() {
-        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
+    public function __construct(
+        string $moduleKey = IdentityPlatformDomain::KEY,
+        string $userTable = '"User"',
+        string $securityTable = '"AuthSecurityEvent"',
+        bool $syncMemberships = true
+    ) {
+        $this->db = Database::getModuleInstance($moduleKey);
         $this->tenantAccessService = new TenantAccessService();
+        $this->userTable = $userTable;
+        $this->securityTable = $securityTable;
+        $this->syncMemberships = $syncMemberships;
+    }
+
+    protected function prepare(string $sql): PDOStatement {
+        return $this->db->prepare($this->rewriteSql($sql));
+    }
+
+    protected function rewriteSql(string $sql): string {
+        if ($this->userTable !== '"User"') {
+            $sql = str_replace('"User"', $this->userTable, $sql);
+        }
+        if ($this->securityTable !== '"AuthSecurityEvent"') {
+            $sql = str_replace('"AuthSecurityEvent"', $this->securityTable, $sql);
+        }
+
+        return $sql;
     }
 
     public function getAll() {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT
                 u.id,
                 u.name,
@@ -102,7 +129,7 @@ class UserRepository {
     }
 
     public function getByEmail($email) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, failed_login_attempts, login_locked_until
             FROM "User"
             WHERE email = :email
@@ -119,7 +146,7 @@ class UserRepository {
     }
 
     public function getByEmailWithOtp($email) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, otp_code, otp_expires_at, otp_attempts, failed_login_attempts, login_locked_until
             FROM "User"
             WHERE email = :email
@@ -136,7 +163,7 @@ class UserRepository {
     }
 
     public function getById($id) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT
                 id,
                 tenant_id,
@@ -166,7 +193,7 @@ class UserRepository {
     }
 
     public function getAdminUserById($id) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT
                 "User".id,
                 "User".name,
@@ -218,7 +245,7 @@ class UserRepository {
             return null;
         }
 
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT
                 id,
                 name,
@@ -259,13 +286,13 @@ class UserRepository {
         }
 
         $sql .= ' LIMIT 1';
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->prepare($sql);
         $stmt->execute($params);
         return (bool)$stmt->fetchColumn();
     }
 
     public function getAuthState($id) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT id, tenant_id, name, email, role, profile, active_token_id
             FROM "User"
             WHERE id = :id
@@ -282,7 +309,7 @@ class UserRepository {
     }
 
     public function getAddresses($userId) {
-        $stmt = $this->db->prepare('SELECT addresses FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('SELECT addresses FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId()
@@ -297,7 +324,7 @@ class UserRepository {
 
     public function updateAddresses($userId, $addresses) {
         $normalizedAddresses = $this->normalizeAddressesPayload($addresses);
-        $stmt = $this->db->prepare('UPDATE "User" SET addresses = :addresses, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('UPDATE "User" SET addresses = :addresses, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
@@ -307,7 +334,7 @@ class UserRepository {
     }
 
     public function getProfile($userId) {
-        $stmt = $this->db->prepare('SELECT name, email, profile, document_type, document_number, business_name FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('SELECT name, email, profile, document_type, document_number, business_name FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId()
@@ -319,7 +346,7 @@ class UserRepository {
         $docType = $profile['documentType'] ?? ($profile['document_type'] ?? null);
         $docNumber = $profile['documentNumber'] ?? ($profile['document_number'] ?? null);
         $businessName = $profile['businessName'] ?? ($profile['business_name'] ?? ($profile['company'] ?? null));
-        $stmt = $this->db->prepare('UPDATE "User" SET name = :name, profile = :profile, document_type = :document_type, document_number = :document_number, business_name = :business_name, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('UPDATE "User" SET name = :name, profile = :profile, document_type = :document_type, document_number = :document_number, business_name = :business_name, updated_at = NOW() WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
@@ -333,7 +360,7 @@ class UserRepository {
     }
 
     public function getPasswordHash($userId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT password
             FROM "User"
             WHERE id = :id
@@ -351,7 +378,7 @@ class UserRepository {
     }
 
     public function updatePassword($userId, $newPasswordHash, $newTokenId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET password = :password, active_token_id = :token_id, updated_at = NOW()
             WHERE id = :id
@@ -367,7 +394,7 @@ class UserRepository {
     }
 
     public function resetPasswordAfterRecovery(string $userId, string $newPasswordHash, string $newTokenId): void {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET password = :password,
                 active_token_id = :token_id,
@@ -390,7 +417,7 @@ class UserRepository {
     }
 
     public function setOtpForEmail($email, $code, $expiresAt) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW()
             WHERE email = :email
@@ -406,7 +433,7 @@ class UserRepository {
     }
 
     public function markEmailVerifiedByOtp($userId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET email_verified = TRUE, verification_token = NULL, otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0, updated_at = NOW()
             WHERE id = :id
@@ -421,7 +448,7 @@ class UserRepository {
     }
 
     public function incrementOtpAttempts($userId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET otp_attempts = COALESCE(otp_attempts, 0) + 1
             WHERE id = :id
@@ -435,7 +462,7 @@ class UserRepository {
     }
 
     public function setLoginFailureState(string $userId, int $attempts, ?string $lockedUntil): void {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET failed_login_attempts = :attempts,
                 login_locked_until = :locked_until,
@@ -453,7 +480,7 @@ class UserRepository {
     }
 
     public function clearLoginFailures(string $userId): void {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET failed_login_attempts = 0,
                 login_locked_until = NULL,
@@ -474,7 +501,7 @@ class UserRepository {
     }
 
     public function markSuccessfulLogin(string $userId): void {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET failed_login_attempts = 0,
                 login_locked_until = NULL,
@@ -491,7 +518,7 @@ class UserRepository {
     }
 
     public function setActiveTokenId($userId, $tokenId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET active_token_id = :tokenId, updated_at = NOW()
             WHERE id = :id
@@ -506,7 +533,7 @@ class UserRepository {
     }
 
     public function clearActiveTokenId($userId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET active_token_id = NULL, updated_at = NOW()
             WHERE id = :id
@@ -520,7 +547,7 @@ class UserRepository {
     }
 
     public function getActiveTokenId($userId) {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT active_token_id
             FROM "User"
             WHERE id = :id
@@ -542,7 +569,7 @@ class UserRepository {
         $profile = $this->buildRegistrationProfile($data);
         $addresses = $this->normalizeAddressesPayload($data['addresses'] ?? null);
         $sql = 'INSERT INTO "User" (id, tenant_id, name, email, password, role, email_verified, updated_at, verification_token, document_type, document_number, business_name, profile, addresses) VALUES (:id, :tenant_id, :name, :email, :password, :role, :email_verified, NOW(), :token, :document_type, :document_number, :business_name, :profile, :addresses)';
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->prepare($sql);
         $id = bin2hex(random_bytes(10));
         $token = $skipToken ? null : bin2hex(random_bytes(32));
         $stmt->execute([
@@ -581,7 +608,7 @@ class UserRepository {
         $addresses = $this->normalizeAddressesPayload($data['addresses'] ?? null, $existingAddresses);
         $token = $skipToken ? null : bin2hex(random_bytes(32));
 
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET
                 name = :name,
@@ -631,7 +658,7 @@ class UserRepository {
     }
 
     public function deleteById(string $id): void {
-        $stmt = $this->db->prepare('DELETE FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('DELETE FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId()
@@ -640,7 +667,7 @@ class UserRepository {
 
     public function createManaged(array $data) {
         $id = bin2hex(random_bytes(10));
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             INSERT INTO "User" (
                 id,
                 tenant_id,
@@ -737,7 +764,7 @@ class UserRepository {
                 $emailToPersist = $this->buildSyntheticLocalPosEmail($documentNumber);
             }
 
-            $stmt = $this->db->prepare('
+            $stmt = $this->prepare('
                 UPDATE "User"
                 SET
                     name = :name,
@@ -837,7 +864,7 @@ class UserRepository {
             'UPDATE "User" SET %s WHERE id = :id AND tenant_id = :tenant_id',
             implode(', ', $fields)
         );
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->prepare($sql);
         $stmt->execute($params);
 
         $updated = $this->getAdminUserById($id);
@@ -855,7 +882,7 @@ class UserRepository {
         }
 
         if ($normalized === 'blocked') {
-            $stmt = $this->db->prepare('
+            $stmt = $this->prepare('
                 UPDATE "User"
                 SET failed_login_attempts = GREATEST(COALESCE(failed_login_attempts, 0), 999),
                     login_locked_until = :locked_until,
@@ -876,7 +903,7 @@ class UserRepository {
             return $updated;
         }
 
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "User"
             SET email_verified = :email_verified,
                 failed_login_attempts = 0,
@@ -899,7 +926,7 @@ class UserRepository {
     }
 
     public function verifyToken($token) {
-        $stmt = $this->db->prepare('UPDATE "User" SET email_verified = TRUE, verification_token = NULL WHERE verification_token = :token AND tenant_id = :tenant_id RETURNING id');
+        $stmt = $this->prepare('UPDATE "User" SET email_verified = TRUE, verification_token = NULL WHERE verification_token = :token AND tenant_id = :tenant_id RETURNING id');
         $stmt->execute([
             'token' => $token,
             'tenant_id' => $this->getTenantId()
@@ -908,7 +935,7 @@ class UserRepository {
     }
 
     public function markEmailVerifiedById($id) {
-        $stmt = $this->db->prepare('UPDATE "User" SET email_verified = TRUE, verification_token = NULL WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->prepare('UPDATE "User" SET email_verified = TRUE, verification_token = NULL WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId()
@@ -917,17 +944,17 @@ class UserRepository {
     }
 
     public function getNewUsersCount() {
-        $stmt = $this->db->prepare('SELECT COUNT(*) as count FROM "User" WHERE tenant_id = :tenant_id AND created_at >= NOW() - INTERVAL \'7 days\'');
+        $stmt = $this->prepare('SELECT COUNT(*) as count FROM "User" WHERE tenant_id = :tenant_id AND created_at >= NOW() - INTERVAL \'7 days\'');
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $result = $stmt->fetch();
         return $result['count'] ?? 0;
     }
 
     public function getClientsProgress() {
-        $stmtThis = $this->db->prepare('SELECT COUNT(*) FROM "User" WHERE tenant_id = :tenant_id AND created_at >= DATE_TRUNC(\'week\', NOW())');
+        $stmtThis = $this->prepare('SELECT COUNT(*) FROM "User" WHERE tenant_id = :tenant_id AND created_at >= DATE_TRUNC(\'week\', NOW())');
         $stmtThis->execute(['tenant_id' => $this->getTenantId()]);
         $thisWeek = $stmtThis->fetchColumn() ?: 0;
-        $stmtLast = $this->db->prepare('SELECT COUNT(*) FROM "User" WHERE tenant_id = :tenant_id AND created_at >= DATE_TRUNC(\'week\', NOW() - INTERVAL \'1 week\') AND created_at < DATE_TRUNC(\'week\', NOW())');
+        $stmtLast = $this->prepare('SELECT COUNT(*) FROM "User" WHERE tenant_id = :tenant_id AND created_at >= DATE_TRUNC(\'week\', NOW() - INTERVAL \'1 week\') AND created_at < DATE_TRUNC(\'week\', NOW())');
         $stmtLast->execute(['tenant_id' => $this->getTenantId()]);
         $lastWeek = $stmtLast->fetchColumn() ?: 0;
         
@@ -946,6 +973,10 @@ class UserRepository {
     }
 
     private function syncIdentityMembership(array $user, string $status = 'active'): void {
+        if (!$this->syncMemberships) {
+            return;
+        }
+
         try {
             $this->tenantAccessService->syncUserMembership($user, TenantContext::get() ?? [], $status);
         } catch (\Throwable $e) {

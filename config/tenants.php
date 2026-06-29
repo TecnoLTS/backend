@@ -43,7 +43,7 @@ return [
         'slug' => $tenantSlug,
         'name' => $env('TENANT_DISPLAY_NAME', 'Para Mascotas EC'),
         'db' => [
-            'database' => $env('DB_DATABASE', 'paramascotasec')
+            'database' => $env('DB_DATABASE', 'ecommerce')
         ],
         'domains' => $domains,
         'allowed_origins' => $allowedOrigins,

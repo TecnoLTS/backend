@@ -5,21 +5,44 @@ namespace App\Repositories;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
+use PDOStatement;
 
 class PasswordResetTokenRepository {
     private $db;
-    private static bool $schemaEnsured = false;
+    private string $tableName;
+    private static array $schemaEnsured = [];
 
-    public function __construct() {
-        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
+    public function __construct(
+        string $moduleKey = IdentityPlatformDomain::KEY,
+        string $tableName = '"PasswordResetToken"'
+    ) {
+        $this->db = Database::getModuleInstance($moduleKey);
+        $this->tableName = $tableName;
+    }
+
+    protected function rewriteSql(string $sql): string {
+        if ($this->tableName !== '"PasswordResetToken"') {
+            $sql = str_replace('"PasswordResetToken"', $this->tableName, $sql);
+            $sql = str_replace('PasswordResetToken_', trim($this->tableName, '"') . '_', $sql);
+        }
+
+        return $sql;
+    }
+
+    protected function prepare(string $sql): PDOStatement {
+        return $this->db->prepare($this->rewriteSql($sql));
+    }
+
+    protected function exec(string $sql): int|false {
+        return $this->db->exec($this->rewriteSql($sql));
     }
 
     private function ensureSchema(): void {
-        if (self::$schemaEnsured) {
+        if (self::$schemaEnsured[$this->tableName] ?? false) {
             return;
         }
 
-        $this->db->exec('
+        $this->exec('
             CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
                 id text PRIMARY KEY,
                 tenant_id text NOT NULL,
@@ -35,11 +58,11 @@ class PasswordResetTokenRepository {
                 updated_at timestamp without time zone DEFAULT NOW() NOT NULL
             )
         ');
-        $this->db->exec('CREATE UNIQUE INDEX IF NOT EXISTS "PasswordResetToken_tenant_hash_uidx" ON "PasswordResetToken" (tenant_id, token_hash)');
-        $this->db->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_user_idx" ON "PasswordResetToken" (tenant_id, user_id, created_at DESC)');
-        $this->db->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_expires_idx" ON "PasswordResetToken" (tenant_id, expires_at)');
+        $this->exec('CREATE UNIQUE INDEX IF NOT EXISTS "PasswordResetToken_tenant_hash_uidx" ON "PasswordResetToken" (tenant_id, token_hash)');
+        $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_user_idx" ON "PasswordResetToken" (tenant_id, user_id, created_at DESC)');
+        $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_expires_idx" ON "PasswordResetToken" (tenant_id, expires_at)');
 
-        self::$schemaEnsured = true;
+        self::$schemaEnsured[$this->tableName] = true;
     }
 
     public function create(
@@ -50,7 +73,7 @@ class PasswordResetTokenRepository {
         ?string $requestUserAgent
     ): void {
         $this->ensureSchema();
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             INSERT INTO "PasswordResetToken" (
                 id,
                 tenant_id,
@@ -87,7 +110,7 @@ class PasswordResetTokenRepository {
 
     public function consumeValidToken(string $tokenHash, ?string $usedIp, ?string $usedUserAgent): ?array {
         $this->ensureSchema();
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "PasswordResetToken"
             SET used_at = NOW(),
                 used_ip = :used_ip,
@@ -113,7 +136,7 @@ class PasswordResetTokenRepository {
 
     public function getValidToken(string $tokenHash): ?array {
         $this->ensureSchema();
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT id, user_id, expires_at
             FROM "PasswordResetToken"
             WHERE token_hash = :token_hash
@@ -134,7 +157,7 @@ class PasswordResetTokenRepository {
 
     public function markUsed(string $id, ?string $usedIp, ?string $usedUserAgent): void {
         $this->ensureSchema();
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             UPDATE "PasswordResetToken"
             SET used_at = COALESCE(used_at, NOW()),
                 used_ip = COALESCE(used_ip, :used_ip),
@@ -154,7 +177,7 @@ class PasswordResetTokenRepository {
 
     public function deleteExpired(): void {
         $this->ensureSchema();
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             DELETE FROM "PasswordResetToken"
             WHERE tenant_id = :tenant_id
               AND expires_at < NOW() - INTERVAL \'7 days\'

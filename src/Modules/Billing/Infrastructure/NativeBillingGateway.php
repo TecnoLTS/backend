@@ -68,7 +68,7 @@ final class NativeBillingGateway implements BillingGateway {
         );
         $row = $statement ? $statement->fetch() : null;
         if (!is_array($row) || empty($row['invoice_headers']) || empty($row['api_keys'])) {
-            throw new \RuntimeException('DB fiscal billing_service no inicializada para driver nativo.');
+            throw new \RuntimeException('DB fiscal facturacion no inicializada para driver nativo.');
         }
     }
 
@@ -87,7 +87,7 @@ final class NativeBillingGateway implements BillingGateway {
             'service' => 'Billing',
             'status' => 'healthy',
             'driver' => 'native',
-            'database' => 'billing_service',
+            'database' => 'facturacion',
             'timestamp' => date('Y-m-d H:i:s'),
         ];
     }

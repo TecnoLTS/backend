@@ -79,7 +79,7 @@ class ProductReviewRepository {
             LEFT JOIN "Product" p
               ON p.id = r.product_id
              AND p.tenant_id = r.tenant_id
-            LEFT JOIN "User" u
+            LEFT JOIN "Customer" u
               ON u.id = r.user_id
              AND u.tenant_id = r.tenant_id
             WHERE ' . implode(' AND ', $where) . '
@@ -131,10 +131,10 @@ class ProductReviewRepository {
         $id = uniqid('review_');
         $stmt = $this->db->prepare('
             INSERT INTO "ProductReview" (
-                id, tenant_id, product_id, order_id, order_item_id, user_id,
+                id, tenant_id, product_id, order_id, order_item_id, user_id, customer_id,
                 rating, title, body, author_name, status, created_at, updated_at
             ) VALUES (
-                :id, :tenant_id, :product_id, :order_id, :order_item_id, :user_id,
+                :id, :tenant_id, :product_id, :order_id, :order_item_id, :user_id, :customer_id,
                 :rating, :title, :body, :author_name, \'pending\', NOW(), NOW()
             )
         ');
@@ -147,6 +147,7 @@ class ProductReviewRepository {
                 'order_id' => $eligibleItem['order_id'],
                 'order_item_id' => $eligibleItem['order_item_id'],
                 'user_id' => $userId,
+                'customer_id' => $userId,
                 'rating' => $rating,
                 'title' => $title !== '' ? $title : null,
                 'body' => $body,

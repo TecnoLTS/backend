@@ -41,7 +41,7 @@ services:
       TENANT_DISPLAY_NAME: ${TENANT_DISPLAY_NAME:-Para Mascotas EC}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
-      DB_DATABASE: ${DB_DATABASE:-paramascotasec}
+      DB_DATABASE: ${DB_DATABASE:-ecommerce}
       DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_ADMIN_USERNAME: ${DB_ADMIN_USERNAME:-}
@@ -82,7 +82,7 @@ services:
       SRI_WS_AUTORIZACION_PRODUCCION: ${SRI_WS_AUTORIZACION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
       DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
       DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
-      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-billing_service}
+      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-facturacion}
       DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
       DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
       BILLING_GATEWAY_DRIVER: ${BILLING_GATEWAY_DRIVER:-native}
@@ -134,12 +134,12 @@ services:
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
-      DB_DATABASE: ${DB_DATABASE:-paramascotasec}
+      DB_DATABASE: ${DB_DATABASE:-ecommerce}
       DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
       DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
-      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-billing_service}
+      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-facturacion}
       DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
       DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
       APP_ENV: ${APP_ENV:-production}

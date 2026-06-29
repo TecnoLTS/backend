@@ -3,6 +3,7 @@
 namespace App\Core;
 
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Repositories\CustomerRepository;
 use App\Repositories\UserRepository;
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
@@ -22,12 +23,15 @@ class Auth {
             'name' => 'dashboard internal proxy',
             'role' => 'admin',
             'tenant_id' => TenantContext::id(),
+            'aud' => AuthSurface::DASHBOARD,
+            'auth_surface' => AuthSurface::DASHBOARD,
             'service_auth' => true,
         ];
     }
 
-    private static function authCookieName(): string {
-        return trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
+    private static function authCookieNames(): array {
+        $baseName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
+        return AuthSurface::authCookieCandidates($baseName);
     }
 
     private static function isWeakJwtSecret(string $secretKey): bool {
@@ -126,6 +130,7 @@ class Auth {
                     $decoded = JWT::decode($jwt, new Key($secretKey, 'HS256'));
                     $payload = (array)$decoded;
                     self::validateTenantOrThrow($payload);
+                    self::validateSurfaceOrThrow($payload);
                     self::validateActiveTokenOrThrow($payload);
                     self::$payload = $payload;
                     return $payload;
@@ -163,9 +168,11 @@ class Auth {
             }
         }
 
-        $cookieToken = trim((string)($_COOKIE[self::authCookieName()] ?? ''));
-        if ($cookieToken !== '' && !in_array($cookieToken, $candidates, true)) {
-            $candidates[] = $cookieToken;
+        foreach (self::authCookieNames() as $cookieName) {
+            $cookieToken = trim((string)($_COOKIE[$cookieName] ?? ''));
+            if ($cookieToken !== '' && !in_array($cookieToken, $candidates, true)) {
+                $candidates[] = $cookieToken;
+            }
         }
 
         return $candidates;
@@ -196,6 +203,25 @@ class Auth {
         }
     }
 
+    private static function validateSurfaceOrThrow(array $payload): void {
+        if (!empty($payload['service_auth'])) {
+            return;
+        }
+
+        $payloadSurface = strtolower(trim((string)($payload['auth_surface'] ?? $payload['aud'] ?? '')));
+        if ($payloadSurface === '') {
+            return;
+        }
+
+        if (!in_array($payloadSurface, [AuthSurface::DASHBOARD, AuthSurface::ECOMMERCE], true)) {
+            throw new \RuntimeException('AUTH_SURFACE_INVALID');
+        }
+
+        if ($payloadSurface !== AuthSurface::current()) {
+            throw new \RuntimeException('AUTH_SURFACE_MISMATCH');
+        }
+    }
+
     private static function assertActiveToken(array &$payload): void {
         try {
             self::validateActiveTokenOrThrow($payload);
@@ -221,7 +247,10 @@ class Auth {
             throw new \RuntimeException('AUTH_TOKEN_INVALID');
         }
 
-        $repo = new UserRepository();
+        $surface = AuthSurface::fromPayload($payload);
+        $repo = $surface === AuthSurface::ECOMMERCE
+            ? new CustomerRepository()
+            : new UserRepository();
         $state = $repo->getAuthState($sub);
         if (!$state) {
             throw new \RuntimeException('AUTH_TOKEN_REVOKED');

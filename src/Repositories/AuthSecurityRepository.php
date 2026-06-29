@@ -5,12 +5,26 @@ namespace App\Repositories;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
+use PDOStatement;
 
 class AuthSecurityRepository {
     private $db;
+    private string $tableName;
 
-    public function __construct() {
-        $this->db = Database::getModuleInstance(IdentityPlatformDomain::KEY);
+    public function __construct(
+        string $moduleKey = IdentityPlatformDomain::KEY,
+        string $tableName = '"AuthSecurityEvent"'
+    ) {
+        $this->db = Database::getModuleInstance($moduleKey);
+        $this->tableName = $tableName;
+    }
+
+    protected function prepare(string $sql): PDOStatement {
+        if ($this->tableName !== '"AuthSecurityEvent"') {
+            $sql = str_replace('"AuthSecurityEvent"', $this->tableName, $sql);
+        }
+
+        return $this->db->prepare($sql);
     }
 
     public function recordEvent(
@@ -22,7 +36,7 @@ class AuthSecurityRepository {
         ?string $userAgent = null,
         array $metadata = []
     ): void {
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             INSERT INTO "AuthSecurityEvent" (
                 id,
                 tenant_id,
@@ -81,7 +95,7 @@ class AuthSecurityRepository {
         }
 
         $intervalSql = $this->intervalSql($interval);
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT COUNT(*)
             FROM "AuthSecurityEvent"
             WHERE tenant_id = :tenant_id
@@ -105,7 +119,7 @@ class AuthSecurityRepository {
         }
 
         $intervalSql = $this->intervalSql($interval);
-        $stmt = $this->db->prepare('
+        $stmt = $this->prepare('
             SELECT COUNT(*)
             FROM "AuthSecurityEvent"
             WHERE tenant_id = :tenant_id

@@ -18,7 +18,7 @@ final class PostgresConnection
 
         $host = $_ENV['DB_HOST'] ?? 'db';
         $port = $_ENV['DB_PORT'] ?? '5432';
-        $name = $_ENV['DB_NAME'] ?? 'billing_service';
+        $name = $_ENV['DB_NAME'] ?? 'facturacion';
         $user = $_ENV['DB_USER'] ?? 'billing_user';
         $password = $_ENV['DB_PASSWORD'] ?? '';
 

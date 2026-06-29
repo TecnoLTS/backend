@@ -60,6 +60,30 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             verification_token text,
             role text DEFAULT \'customer\' NOT NULL
         )',
+        'CREATE TABLE IF NOT EXISTS "Customer" (
+            id text PRIMARY KEY,
+            tenant_id text,
+            email text NOT NULL,
+            name text,
+            password text NOT NULL,
+            created_at timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            updated_at timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            email_verified boolean DEFAULT false NOT NULL,
+            verification_token text,
+            role text DEFAULT \'customer\' NOT NULL,
+            addresses jsonb,
+            profile jsonb,
+            document_type text,
+            document_number text,
+            business_name text,
+            otp_code text,
+            otp_expires_at timestamp,
+            otp_attempts integer,
+            failed_login_attempts integer,
+            login_locked_until timestamp,
+            last_login_at timestamp,
+            active_token_id text
+        )',
         'CREATE TABLE IF NOT EXISTS tenant_module_entitlements (
             tenant_id text NOT NULL,
             module_key text NOT NULL,
@@ -142,6 +166,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             id text PRIMARY KEY,
             tenant_id text,
             user_id text,
+            customer_id text,
             status text DEFAULT \'pending\' NOT NULL,
             total numeric(10,2) NOT NULL,
             created_at timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -299,6 +324,18 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             metadata jsonb DEFAULT \'{}\'::jsonb,
             created_at timestamp without time zone DEFAULT NOW() NOT NULL
         )',
+        'CREATE TABLE IF NOT EXISTS "CustomerAuthSecurityEvent" (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            user_id text,
+            email text,
+            event_type text NOT NULL,
+            status text DEFAULT \'info\' NOT NULL,
+            ip_address text,
+            user_agent text,
+            metadata jsonb DEFAULT \'{}\'::jsonb,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL
+        )',
         'CREATE TABLE IF NOT EXISTS "ContactMessage" (
             id text PRIMARY KEY,
             tenant_id text NOT NULL,
@@ -329,6 +366,20 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
             updated_at timestamp without time zone DEFAULT NOW() NOT NULL
         )',
+        'CREATE TABLE IF NOT EXISTS "CustomerPasswordResetToken" (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            user_id text NOT NULL,
+            token_hash text NOT NULL,
+            expires_at timestamp without time zone NOT NULL,
+            used_at timestamp without time zone,
+            request_ip text,
+            request_user_agent text,
+            used_ip text,
+            used_user_agent text,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+        )',
         'CREATE TABLE IF NOT EXISTS "ProductReview" (
             id text PRIMARY KEY,
             tenant_id text NOT NULL,
@@ -336,6 +387,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             order_id text NOT NULL,
             order_item_id text NOT NULL,
             user_id text NOT NULL,
+            customer_id text,
             rating integer NOT NULL,
             title text,
             body text NOT NULL,
@@ -473,6 +525,19 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS last_login_at timestamp',
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS active_token_id text',
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS tenant_id text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS addresses jsonb',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS profile jsonb',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS document_type text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS document_number text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS business_name text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS otp_code text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS otp_expires_at timestamp',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS otp_attempts integer',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS failed_login_attempts integer',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS login_locked_until timestamp',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS last_login_at timestamp',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS active_token_id text',
+        'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS product_type text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS attributes jsonb',
@@ -483,6 +548,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS alt_text text',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS display_order integer',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS tenant_id text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_id text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS invoice_number text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS invoice_html text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS invoice_created_at timestamp(3) without time zone',
@@ -531,6 +597,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "OrderItem" ALTER COLUMN tax_rate TYPE numeric(6,2) USING COALESCE(tax_rate, 0)::numeric(6,2)',
         'ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS tax_amount numeric(12,4)',
         'ALTER TABLE "OrderItem" ALTER COLUMN tax_amount TYPE numeric(12,4) USING COALESCE(tax_amount, 0)::numeric(12,4)',
+        'ALTER TABLE "ProductReview" ADD COLUMN IF NOT EXISTS customer_id text',
         'ALTER TABLE "InventoryLot" ADD COLUMN IF NOT EXISTS purchase_invoice_id text',
         'ALTER TABLE "InventoryLot" ADD COLUMN IF NOT EXISTS purchase_invoice_item_id text',
         'ALTER TABLE "Setting" ADD COLUMN IF NOT EXISTS tenant_id text',
@@ -634,24 +701,33 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS "User_tenant_id_idx" ON "User" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "User_tenant_email_idx" ON "User" (tenant_id, email)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "User_tenant_email_uidx" ON "User" (tenant_id, email)',
+        'CREATE INDEX IF NOT EXISTS "Customer_tenant_id_idx" ON "Customer" (tenant_id)',
+        'CREATE INDEX IF NOT EXISTS "Customer_tenant_email_idx" ON "Customer" (tenant_id, email)',
+        'CREATE UNIQUE INDEX IF NOT EXISTS "Customer_tenant_email_uidx" ON "Customer" (tenant_id, email)',
+        'CREATE INDEX IF NOT EXISTS "Customer_tenant_document_idx" ON "Customer" (tenant_id, document_number)',
         'CREATE INDEX IF NOT EXISTS tenant_module_entitlements_status_idx ON tenant_module_entitlements (tenant_id, status, module_key)',
         'CREATE INDEX IF NOT EXISTS tenant_memberships_identity_idx ON tenant_memberships (tenant_id, identity_type, status)',
         'CREATE INDEX IF NOT EXISTS tenant_roles_system_idx ON tenant_roles (tenant_id, system_role)',
         'CREATE INDEX IF NOT EXISTS tenant_user_roles_role_idx ON tenant_user_roles (tenant_id, role_id)',
         'INSERT INTO tenant_memberships (tenant_id, user_id, identity_type, status, created_at, updated_at)
             SELECT
-                COALESCE(tenant_id, \'' . str_replace("'", "''", $defaultTenant) . '\'),
-                id,
+                COALESCE(u.tenant_id, \'' . str_replace("'", "''", $defaultTenant) . '\'),
+                u.id,
                 CASE
-                    WHEN LOWER(COALESCE(role, \'\')) = \'admin\' THEN \'tenant_staff\'
+                    WHEN LOWER(COALESCE(u.role, \'\')) = \'admin\' THEN \'tenant_staff\'
                     ELSE \'customer\'
                 END,
-                CASE WHEN COALESCE(email_verified, false) THEN \'active\' ELSE \'inactive\' END,
-                COALESCE(created_at, NOW()),
-                COALESCE(updated_at, NOW())
-            FROM "User"
-            WHERE tenant_id IS NOT NULL
-            ON CONFLICT (tenant_id, user_id) DO NOTHING',
+                CASE WHEN COALESCE(u.email_verified, false) THEN \'active\' ELSE \'inactive\' END,
+                COALESCE(u.created_at, NOW()),
+                COALESCE(u.updated_at, NOW())
+            FROM "User" u
+            WHERE u.tenant_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM tenant_memberships tm
+                  WHERE tm.tenant_id = COALESCE(u.tenant_id, \'' . str_replace("'", "''", $defaultTenant) . '\')
+                    AND tm.user_id = u.id
+              )',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_id_idx" ON "Product" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_published_idx" ON "Product" (tenant_id, is_published)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_slug_idx" ON "Product" (tenant_id, slug)',
@@ -665,6 +741,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS "Order_tenant_created_idx" ON "Order" (tenant_id, created_at)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_status_created_idx" ON "Order" (tenant_id, lower(COALESCE(status, \'pending\')), created_at)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_user_idx" ON "Order" (tenant_id, user_id)',
+        'CREATE INDEX IF NOT EXISTS "Order_tenant_customer_idx" ON "Order" (tenant_id, customer_id)',
         'CREATE INDEX IF NOT EXISTS "Quotation_tenant_created_idx" ON "Quotation" (tenant_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Quotation_tenant_status_idx" ON "Quotation" (tenant_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Quotation_tenant_converted_order_idx" ON "Quotation" (tenant_id, converted_order_id)',
@@ -686,6 +763,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_product_status_idx" ON "ProductReview" (tenant_id, product_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_status_created_idx" ON "ProductReview" (tenant_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_user_idx" ON "ProductReview" (tenant_id, user_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_customer_idx" ON "ProductReview" (tenant_id, customer_id, created_at DESC)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "ProductReview_tenant_order_item_uidx" ON "ProductReview" (tenant_id, order_item_id)',
         'CREATE INDEX IF NOT EXISTS idx_financial_period_tenant_dates ON "FinancialPeriod"(tenant_id, start_date DESC, status)',
         'CREATE INDEX IF NOT EXISTS idx_financial_adjustment_tenant_period ON "FinancialAdjustment"(tenant_id, period_key, created_at DESC)',
@@ -711,11 +789,18 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS "AuthSecurityEvent_tenant_event_idx" ON "AuthSecurityEvent" (tenant_id, event_type, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "AuthSecurityEvent_tenant_user_idx" ON "AuthSecurityEvent" (tenant_id, user_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "AuthSecurityEvent_tenant_email_idx" ON "AuthSecurityEvent" (tenant_id, email, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "CustomerAuthSecurityEvent_tenant_created_idx" ON "CustomerAuthSecurityEvent" (tenant_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "CustomerAuthSecurityEvent_tenant_event_idx" ON "CustomerAuthSecurityEvent" (tenant_id, event_type, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "CustomerAuthSecurityEvent_tenant_user_idx" ON "CustomerAuthSecurityEvent" (tenant_id, user_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "CustomerAuthSecurityEvent_tenant_email_idx" ON "CustomerAuthSecurityEvent" (tenant_id, email, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ContactMessage_tenant_created_idx" ON "ContactMessage" (tenant_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ContactMessage_tenant_status_idx" ON "ContactMessage" (tenant_id, status)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "PasswordResetToken_tenant_hash_uidx" ON "PasswordResetToken" (tenant_id, token_hash)',
         'CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_user_idx" ON "PasswordResetToken" (tenant_id, user_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_expires_idx" ON "PasswordResetToken" (tenant_id, expires_at)',
+        'CREATE UNIQUE INDEX IF NOT EXISTS "CustomerPasswordResetToken_tenant_hash_uidx" ON "CustomerPasswordResetToken" (tenant_id, token_hash)',
+        'CREATE INDEX IF NOT EXISTS "CustomerPasswordResetToken_tenant_user_idx" ON "CustomerPasswordResetToken" (tenant_id, user_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "CustomerPasswordResetToken_tenant_expires_idx" ON "CustomerPasswordResetToken" (tenant_id, expires_at)',
         'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'InventoryLot_product_id_fkey\') THEN ALTER TABLE "InventoryLot" ADD CONSTRAINT "InventoryLot_product_id_fkey" FOREIGN KEY (product_id) REFERENCES "Product"(id) ON UPDATE CASCADE ON DELETE RESTRICT; END IF; END $$',
         'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'InventoryLot_purchase_invoice_id_fkey\') THEN ALTER TABLE "InventoryLot" ADD CONSTRAINT "InventoryLot_purchase_invoice_id_fkey" FOREIGN KEY (purchase_invoice_id) REFERENCES "PurchaseInvoice"(id) ON UPDATE CASCADE ON DELETE SET NULL; END IF; END $$',
         'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'InventoryLot_purchase_invoice_item_id_fkey\') THEN ALTER TABLE "InventoryLot" ADD CONSTRAINT "InventoryLot_purchase_invoice_item_id_fkey" FOREIGN KEY (purchase_invoice_item_id) REFERENCES "PurchaseInvoiceItem"(id) ON UPDATE CASCADE ON DELETE SET NULL; END IF; END $$',
@@ -750,6 +835,9 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
 
     $stmtUser = $pdo->prepare('UPDATE "User" SET tenant_id = COALESCE(tenant_id, :tenant)');
     $stmtUser->execute(['tenant' => $defaultTenant]);
+
+    $stmtCustomer = $pdo->prepare('UPDATE "Customer" SET tenant_id = COALESCE(tenant_id, :tenant)');
+    $stmtCustomer->execute(['tenant' => $defaultTenant]);
 
     $stmtProduct = $pdo->prepare('UPDATE "Product" SET tenant_id = COALESCE(tenant_id, :tenant)');
     $stmtProduct->execute(['tenant' => $defaultTenant]);
@@ -795,6 +883,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
 
     $stmtOrder = $pdo->prepare('UPDATE "Order" SET tenant_id = COALESCE(tenant_id, :tenant)');
     $stmtOrder->execute(['tenant' => $defaultTenant]);
+    $pdo->exec('UPDATE "Order" SET customer_id = COALESCE(customer_id, user_id) WHERE customer_id IS NULL AND user_id IS NOT NULL');
+    $pdo->exec('UPDATE "ProductReview" SET customer_id = COALESCE(customer_id, user_id) WHERE customer_id IS NULL AND user_id IS NOT NULL');
 
     $stmtQuotation = $pdo->prepare('UPDATE "Quotation" SET tenant_id = COALESCE(tenant_id, :tenant)');
     $stmtQuotation->execute(['tenant' => $defaultTenant]);
@@ -929,7 +1019,7 @@ function runSchemaBootstrap(): int {
 $defaultConfig = [
     'host' => envValue('DB_HOST', 'db'),
     'port' => envValue('DB_PORT', '5432'),
-    'database' => envValue('DB_DATABASE', 'paramascotasec'),
+    'database' => envValue('DB_DATABASE', 'ecommerce'),
     'username' => envValue('DB_USERNAME', 'postgres'),
     'password' => envValue('DB_PASSWORD', 'postgres'),
 ];
@@ -979,9 +1069,19 @@ try {
     foreach ($targets as $target) {
         $pdo = connect($target);
         executeSchemaBootstrap($pdo, $defaultTenant);
-        $insertTenant = $pdo->prepare('INSERT INTO "Tenant" (id, name) VALUES (:id, :name) ON CONFLICT (id) DO NOTHING');
+        $insertTenant = $pdo->prepare('
+            INSERT INTO "Tenant" (id, name)
+            SELECT :id, :name
+            WHERE NOT EXISTS (
+                SELECT 1 FROM "Tenant" WHERE id = :id_exists
+            )
+        ');
         foreach ($tenantInsertRows as $row) {
-            $insertTenant->execute($row);
+            $insertTenant->execute([
+                'id' => $row['id'],
+                'name' => $row['name'],
+                'id_exists' => $row['id'],
+            ]);
         }
         fwrite(STDOUT, sprintf(
             "[schema] ok host=%s db=%s user=%s\n",

@@ -28,6 +28,9 @@ const MODULE_TABLES = [
         'ProductReview',
     ],
     'commerce' => [
+        'Customer',
+        'CustomerAuthSecurityEvent',
+        'CustomerPasswordResetToken',
         'Order',
         'OrderItem',
         'Quotation',
@@ -71,6 +74,9 @@ const LEGACY_TABLES = [
     'ProductReview',
     'Order',
     'OrderItem',
+    'Customer',
+    'CustomerAuthSecurityEvent',
+    'CustomerPasswordResetToken',
     'Quotation',
     'DiscountCode',
     'DiscountAudit',
@@ -87,6 +93,12 @@ const LEGACY_TABLES = [
 const MODULE_SKIPPED_CONSTRAINTS = [
     // Cross-domain link: Inventory keeps order_item_id as a stable Commerce ID, not a physical FK.
     'InventoryLotAllocation_order_item_id_fkey',
+];
+
+const LOCAL_AUTH_ONLY_TABLES = [
+    'User',
+    'AuthSecurityEvent',
+    'PasswordResetToken',
 ];
 
 function quoteIdent(string $identifier): string {
@@ -152,6 +164,30 @@ function tableOwnerMap(): array {
     }
 
     return $owners;
+}
+
+function moduleTargetGroups(array $targets): array {
+    $groups = [];
+    foreach ($targets as $moduleKey => $target) {
+        $database = (string)($target['database'] ?? '');
+        if ($database === '') {
+            continue;
+        }
+        if (!isset($groups[$database])) {
+            $groups[$database] = [
+                'target' => $target,
+                'modules' => [],
+                'tables' => [],
+            ];
+        }
+        $groups[$database]['modules'][] = $moduleKey;
+        $groups[$database]['tables'] = array_values(array_unique(array_merge(
+            $groups[$database]['tables'],
+            MODULE_TABLES[$moduleKey] ?? []
+        )));
+    }
+
+    return $groups;
 }
 
 function createMailerTables(PDO $pdo): void {
@@ -403,17 +439,25 @@ function dropLocalTableOrForeignTable(PDO $pdo, string $table): void {
     $pdo->exec('DROP TABLE IF EXISTS ' . $qualified . ' CASCADE');
 }
 
-function replaceNonOwnedTablesWithForeignTables(PDO $pdo, string $moduleKey, array $targets): void {
+function replaceNonOwnedTablesWithForeignTables(PDO $pdo, array $localModules, array $targets): void {
     $owners = tableOwnerMap();
-    $localTables = MODULE_TABLES[$moduleKey] ?? [];
+    $localTables = [];
+    foreach ($localModules as $moduleKey) {
+        $localTables = array_merge($localTables, MODULE_TABLES[$moduleKey] ?? []);
+    }
+    $localTables = array_values(array_unique($localTables));
     $remoteByModule = [];
 
     foreach (LEGACY_TABLES as $table) {
         if (in_array($table, $localTables, true)) {
             continue;
         }
+        if (in_array($table, LOCAL_AUTH_ONLY_TABLES, true)) {
+            dropLocalTableOrForeignTable($pdo, $table);
+            continue;
+        }
         $owner = $owners[$table] ?? null;
-        if (!is_string($owner) || $owner === $moduleKey || !isset($targets[$owner])) {
+        if (!is_string($owner) || in_array($owner, $localModules, true) || !isset($targets[$owner])) {
             continue;
         }
         $remoteByModule[$owner][] = $table;
@@ -431,41 +475,53 @@ function runModuleDatabaseBootstrap(): int {
     $runtimeConfig = [
         'host' => envValue('DB_HOST', 'db'),
         'port' => envValue('DB_PORT', '5432'),
-        'database' => envValue('DB_DATABASE', 'paramascotasec'),
+        'database' => envValue('DB_DATABASE', 'ecommerce'),
         'username' => envValue('DB_USERNAME', 'postgres'),
         'password' => envValue('DB_PASSWORD', 'postgres'),
     ];
     $defaultTenant = envValue('DEFAULT_TENANT', 'paramascotasec') ?? 'paramascotasec';
     $targets = moduleTargets($runtimeConfig);
+    $targetGroups = moduleTargetGroups($targets);
     $primaryRuntimeConfig = normalizeConfig($runtimeConfig);
     $adminConfig = adminConnectionConfig($runtimeConfig);
 
-    if ($targets === []) {
+    if ($targetGroups === []) {
         fwrite(STDOUT, "[module-db] no module targets configured\n");
         return 0;
     }
 
     try {
-        foreach ($targets as $moduleKey => $target) {
+        foreach ($targetGroups as $databaseName => $group) {
+            $target = $group['target'];
+            $modules = $group['modules'];
+            $tables = $group['tables'];
             $pdo = connect(connectionTargetConfig($target, $adminConfig));
             dropForeignLegacyTables($pdo);
-            dropForeignOwnerTables($pdo, MODULE_TABLES[$moduleKey]);
+            dropForeignOwnerTables($pdo, $tables);
             executeSchemaBootstrap($pdo, $defaultTenant, ['skip_constraints' => MODULE_SKIPPED_CONSTRAINTS]);
-            if ($moduleKey === 'mailer-service') {
+            if (in_array('mailer-service', $modules, true)) {
                 createMailerTables($pdo);
             }
             dropKnownCrossDomainConstraints($pdo);
-            createFdwServer($pdo, 'legacy_paramascotasec', $primaryRuntimeConfig);
-            dropRemoteSchema($pdo, 'legacy_source');
-            importForeignTables($pdo, 'legacy_paramascotasec', 'legacy_source', LEGACY_TABLES);
-            copyOwnedTablesFromLegacy($pdo, MODULE_TABLES[$moduleKey]);
-            $pdo->exec('DROP SCHEMA IF EXISTS legacy_source CASCADE');
-            fwrite(STDOUT, sprintf("[module-db] copied owner tables module=%s db=%s\n", $moduleKey, $target['database']));
+            if ((string)$target['database'] !== (string)$primaryRuntimeConfig['database']) {
+                createFdwServer($pdo, 'origen_ecommerce', $primaryRuntimeConfig);
+                dropRemoteSchema($pdo, 'legacy_source');
+                importForeignTables($pdo, 'origen_ecommerce', 'legacy_source', LEGACY_TABLES);
+                copyOwnedTablesFromLegacy($pdo, $tables);
+                $pdo->exec('DROP SCHEMA IF EXISTS legacy_source CASCADE');
+            }
+            fwrite(STDOUT, sprintf(
+                "[module-db] prepared owner tables modules=%s db=%s\n",
+                implode(',', $modules),
+                $databaseName
+            ));
         }
 
-        foreach ($targets as $moduleKey => $target) {
+        foreach ($targetGroups as $databaseName => $group) {
+            $target = $group['target'];
+            $modules = $group['modules'];
             $pdo = connect(connectionTargetConfig($target, $adminConfig));
-            replaceNonOwnedTablesWithForeignTables($pdo, $moduleKey, $targets);
+            replaceNonOwnedTablesWithForeignTables($pdo, $modules, $targets);
             $pdo->exec('
                 CREATE TABLE IF NOT EXISTS module_database_metadata (
                     module_key text PRIMARY KEY,
@@ -482,12 +538,18 @@ function runModuleDatabaseBootstrap(): int {
                               ownership_mode = EXCLUDED.ownership_mode,
                               updated_at = NOW()
             ');
-            $stmt->execute([
-                'module_key' => $moduleKey,
-                'database_name' => (string)$target['database'],
-                'ownership_mode' => 'local-owner-with-fdw-compat',
-            ]);
-            fwrite(STDOUT, sprintf("[module-db] linked compatibility tables module=%s db=%s\n", $moduleKey, $target['database']));
+            foreach ($modules as $moduleKey) {
+                $stmt->execute([
+                    'module_key' => $moduleKey,
+                    'database_name' => (string)$target['database'],
+                    'ownership_mode' => 'service-db-with-fdw-compat',
+                ]);
+            }
+            fwrite(STDOUT, sprintf(
+                "[module-db] linked compatibility tables modules=%s db=%s\n",
+                implode(',', $modules),
+                $databaseName
+            ));
         }
     } catch (Throwable $e) {
         fwrite(STDERR, '[module-db] error: ' . $e->getMessage() . PHP_EOL);

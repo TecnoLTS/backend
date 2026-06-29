@@ -31,6 +31,9 @@ const MODULE_OWNER_TABLES = [
         'ProductReview',
     ],
     'commerce' => [
+        'Customer',
+        'CustomerAuthSecurityEvent',
+        'CustomerPasswordResetToken',
         'Order',
         'OrderItem',
         'Quotation',
@@ -45,6 +48,7 @@ const MODULE_OWNER_TABLES = [
         'branch_sequences',
         'invoice_headers',
         'invoice_details',
+        'billing_customers',
         'invoice_retry_settings',
         'api_keys',
         'billing_domain_events',
@@ -64,26 +68,23 @@ const MODULE_OWNER_TABLES = [
 ];
 
 const MODULE_CONNECTIONS = [
-    'identity-platform' => ['database' => 'identity_platform', 'owner' => 'identity-platform'],
-    'catalog-inventory' => ['database' => 'catalog_inventory', 'owner' => 'catalog-inventory'],
-    'commerce' => ['database' => 'commerce_orders', 'owner' => 'commerce'],
-    'commerce-orders' => ['database' => 'commerce_orders', 'owner' => 'commerce'],
-    'billing' => ['database' => 'billing_service', 'owner' => 'billing'],
-    'billing-sri' => ['database' => 'billing_service', 'owner' => 'billing'],
-    'reporting-finance' => ['database' => 'reporting_finance', 'owner' => 'reporting-finance'],
-    'mailer-service' => ['database' => 'mailer_service', 'owner' => 'mailer-service'],
-    'email-service' => ['database' => 'mailer_service', 'owner' => 'mailer-service'],
+    'identity-platform' => ['database' => 'dashboard', 'owner' => 'identity-platform'],
+    'catalog-inventory' => ['database' => 'ecommerce', 'owner' => 'catalog-inventory'],
+    'commerce' => ['database' => 'ecommerce', 'owner' => 'commerce'],
+    'commerce-orders' => ['database' => 'ecommerce', 'owner' => 'commerce'],
+    'billing' => ['database' => 'facturacion', 'owner' => 'billing'],
+    'billing-sri' => ['database' => 'facturacion', 'owner' => 'billing'],
+    'reporting-finance' => ['database' => 'ecommerce', 'owner' => 'reporting-finance'],
+    'mailer-service' => ['database' => 'dashboard', 'owner' => 'mailer-service'],
+    'email-service' => ['database' => 'dashboard', 'owner' => 'mailer-service'],
 ];
 
 const FDW_COMPATIBILITY_TABLES = [
     'Tenant',
-    'User',
     'tenant_module_entitlements',
     'tenant_memberships',
     'tenant_roles',
     'tenant_user_roles',
-    'AuthSecurityEvent',
-    'PasswordResetToken',
     'Setting',
     'Product',
     'Image',
@@ -110,6 +111,7 @@ const FDW_COMPATIBILITY_TABLES = [
 ];
 
 const LOCAL_RELKINDS = ['r', 'p'];
+const LOCAL_AUTH_ONLY_TABLES = ['User', 'AuthSecurityEvent', 'PasswordResetToken'];
 
 function fail(string $message): void
 {
@@ -151,8 +153,8 @@ function assertConnection(string $moduleKey, string $expectedDatabase): void
     if (($config['database'] ?? null) !== $expectedDatabase) {
         fail("{$moduleKey} config resolves database=" . ($config['database'] ?? 'null') . ", expected {$expectedDatabase}");
     }
-    if (($config['mode'] ?? null) !== 'dedicated') {
-        fail("{$moduleKey} config mode=" . ($config['mode'] ?? 'null') . ', expected dedicated');
+    if (($config['mode'] ?? null) !== 'service-group') {
+        fail("{$moduleKey} config mode=" . ($config['mode'] ?? 'null') . ', expected service-group');
     }
 
     $pdo = Database::getModuleInstance($moduleKey);
@@ -172,15 +174,31 @@ function assertOwnerTables(PDO $pdo, string $moduleKey, array $tables): void
     }
 }
 
-function assertCompatibilityTables(PDO $pdo, string $moduleKey, array $ownerMap): void
+function ownerDatabaseMap(): array
+{
+    $map = [];
+    foreach (MODULE_CONNECTIONS as $expectation) {
+        $owner = (string)$expectation['owner'];
+        $map[$owner] ??= (string)$expectation['database'];
+    }
+
+    return $map;
+}
+
+function assertCompatibilityTables(PDO $pdo, string $moduleKey, array $ownerMap, array $ownerDatabaseMap): void
 {
     if ($moduleKey === 'billing') {
         return;
     }
 
+    $currentDatabase = $ownerDatabaseMap[$moduleKey] ?? '';
+
     foreach (FDW_COMPATIBILITY_TABLES as $table) {
         $owner = $ownerMap[$table] ?? null;
         if ($owner === null || $owner === $moduleKey) {
+            continue;
+        }
+        if (($ownerDatabaseMap[$owner] ?? null) === $currentDatabase) {
             continue;
         }
 
@@ -225,15 +243,34 @@ function assertForeignServerAccess(PDO $pdo, string $moduleKey): void
     }
 }
 
-function assertCompatibilityTablesReadable(PDO $pdo, string $moduleKey, array $ownerMap): void
+function assertNoLeakedAuthTables(PDO $pdo, string $moduleKey, array $ownerDatabaseMap): void
+{
+    if (($ownerDatabaseMap[$moduleKey] ?? null) === 'dashboard') {
+        return;
+    }
+
+    foreach (LOCAL_AUTH_ONLY_TABLES as $table) {
+        $kind = relationKind($pdo, $table);
+        if ($kind !== null) {
+            fail("{$moduleKey} contains auth table {$table} relkind={$kind}; auth tables belong only to dashboard");
+        }
+    }
+}
+
+function assertCompatibilityTablesReadable(PDO $pdo, string $moduleKey, array $ownerMap, array $ownerDatabaseMap): void
 {
     if ($moduleKey === 'billing') {
         return;
     }
 
+    $currentDatabase = $ownerDatabaseMap[$moduleKey] ?? '';
+
     foreach (FDW_COMPATIBILITY_TABLES as $table) {
         $owner = $ownerMap[$table] ?? null;
         if ($owner === null || $owner === $moduleKey) {
+            continue;
+        }
+        if (($ownerDatabaseMap[$owner] ?? null) === $currentDatabase) {
             continue;
         }
 
@@ -250,7 +287,7 @@ function quoteIdentifier(string $identifier): string
     return '"' . str_replace('"', '""', $identifier) . '"';
 }
 
-function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $ownerMap): void
+function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $ownerMap, array $ownerDatabaseMap): void
 {
     $stmt = $pdo->query(
         "SELECT
@@ -278,6 +315,9 @@ function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $owne
             continue;
         }
         if ($targetOwner !== $moduleKey) {
+            if ($targetOwner !== null && ($ownerDatabaseMap[$sourceOwner] ?? null) === ($ownerDatabaseMap[$targetOwner] ?? null)) {
+                continue;
+            }
             fail(sprintf(
                 '%s FK %s links owner table %s to %s owned by %s',
                 $moduleKey,
@@ -291,6 +331,7 @@ function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $owne
 }
 
 $ownerMap = tableOwnerMap();
+$ownerDatabaseMap = ownerDatabaseMap();
 $checkedOwners = [];
 
 foreach (MODULE_CONNECTIONS as $moduleKey => $expectation) {
@@ -303,10 +344,11 @@ foreach (MODULE_CONNECTIONS as $moduleKey => $expectation) {
 
     $pdo = Database::getModuleInstance($moduleKey);
     assertOwnerTables($pdo, $ownerModule, MODULE_OWNER_TABLES[$ownerModule]);
-    assertCompatibilityTables($pdo, $ownerModule, $ownerMap);
+    assertNoLeakedAuthTables($pdo, $ownerModule, $ownerDatabaseMap);
+    assertCompatibilityTables($pdo, $ownerModule, $ownerMap, $ownerDatabaseMap);
     assertForeignServerAccess($pdo, $ownerModule);
-    assertCompatibilityTablesReadable($pdo, $ownerModule, $ownerMap);
-    assertNoCrossDomainForeignKeys($pdo, $ownerModule, $ownerMap);
+    assertCompatibilityTablesReadable($pdo, $ownerModule, $ownerMap, $ownerDatabaseMap);
+    assertNoCrossDomainForeignKeys($pdo, $ownerModule, $ownerMap, $ownerDatabaseMap);
     $checkedOwners[$ownerModule] = true;
 }
 

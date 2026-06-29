@@ -581,7 +581,7 @@ class PosRepository {
                 COALESCE(NULLIF(o.billing_address->>\'documentType\', \'\'), o.shipping_address->>\'documentType\', \'\') AS document_type,
                 COALESCE(NULLIF(o.billing_address->>\'documentNumber\', \'\'), o.shipping_address->>\'documentNumber\', \'\') AS document_number
             FROM "Order" o
-            LEFT JOIN "User" u ON u.id = o.user_id AND u.tenant_id = o.tenant_id
+            LEFT JOIN "Customer" u ON u.id = o.user_id AND u.tenant_id = o.tenant_id
             WHERE o.tenant_id = :tenant_id
               AND (
                 regexp_replace(upper(COALESCE(o.billing_address->>\'documentNumber\', \'\')), \'[^A-Z0-9]\', \'\', \'g\') = :document_key
@@ -660,7 +660,7 @@ class PosRepository {
 
         $stmtUser = $this->db->prepare('
             SELECT id, name, email, profile, addresses, document_type, document_number
-            FROM "User"
+            FROM "Customer"
             WHERE tenant_id = :tenant_id
               AND regexp_replace(upper(COALESCE(document_number, \'\')), \'[^A-Z0-9]\', \'\', \'g\') = :document_key
             ORDER BY created_at DESC

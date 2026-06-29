@@ -31,8 +31,11 @@ final class ProductVariantMetadata
         'archivedname',
         'archivedproductid',
         'catalogdisplayaxis',
+        'catalogdisplayaxislabel',
         'catalogdisplaymode',
         'description',
+        'displayaxis',
+        'displayaxislabel',
         'expirationalertdays',
         'expirationdate',
         'image',
@@ -44,6 +47,7 @@ final class ProductVariantMetadata
         'price',
         'producttype',
         'publicvariantaxis',
+        'publicvariantaxislabel',
         'quantity',
         'seodescription',
         'seoimagealt',
@@ -97,7 +101,6 @@ final class ProductVariantMetadata
         $attributes = self::normalizeCommercialAttributeAliases($attributes, $normalizedType);
         if ($normalizedType === 'cuidado') {
             $attributes = self::normalizeLegacyCareAttributes($attributes);
-            unset($attributes['size']);
             $variantAxis = trim((string)($attributes['variantAxis'] ?? $attributes['variantDefinitionField'] ?? ''));
             if ($variantAxis !== '' && !in_array($variantAxis, self::CARE_VARIANT_FIELDS, true)) {
                 $normalizedAxis = self::normalizeVariantDefinitionField($variantAxis);
@@ -113,11 +116,17 @@ final class ProductVariantMetadata
             $attributes = self::normalizeFoodMeasurementAttributes($attributes);
         }
 
+        $publicDisplayAxis = self::resolveRequestedDisplayAxis($attributes, $normalizedType, false);
+        if ($publicDisplayAxis !== '') {
+            $attributes['displayAxis'] = $publicDisplayAxis;
+        } else {
+            unset($attributes['displayAxis'], $attributes['displayAxisLabel']);
+        }
+
         if (!self::hasExplicitVariantContext($product, $attributes)) {
             unset(
                 $attributes['variantAxis'],
                 $attributes['variantDefinitionField'],
-                $attributes['displayAxis'],
                 $attributes['variantLabel'],
                 $attributes['variantBaseName'],
                 $attributes['variantGroupKey'],
@@ -195,7 +204,7 @@ final class ProductVariantMetadata
             }
         }
 
-        foreach (['variantDefinitionField', 'variantAxis', 'displayAxis', '__sourceVariantLabel', '__variantDefinitionField'] as $key) {
+        foreach (['variantDefinitionField', 'variantAxis', '__sourceVariantLabel', '__variantDefinitionField'] as $key) {
             if (trim((string)($attributes[$key] ?? '')) !== '') {
                 return true;
             }
@@ -357,8 +366,6 @@ final class ProductVariantMetadata
             }
         }
 
-        unset($attributes['size']);
-
         return $attributes;
     }
 
@@ -397,8 +404,6 @@ final class ProductVariantMetadata
                 if ($selectedVariantField !== 'size') {
                     unset($attributes['size']);
                 }
-            } elseif ($selectedVariantField !== 'size') {
-                unset($attributes['size']);
             }
         }
 
@@ -623,13 +628,8 @@ final class ProductVariantMetadata
         return '';
     }
 
-    private static function resolveRequestedDisplayAxis(array $attributes, string $normalizedType): string
+    private static function resolveRequestedDisplayAxis(array $attributes, string $normalizedType, bool $allowVariantFallback = true): string
     {
-        $variantField = self::resolveVariantDefinitionFieldByType($normalizedType, $attributes);
-        if ($variantField !== '') {
-            return self::displayAxisForVariantDefinitionField($variantField, $normalizedType);
-        }
-
         $rawAxis = '';
         foreach (['displayAxis', 'publicVariantAxis', 'catalogDisplayAxis'] as $key) {
             $candidate = trim((string)($attributes[$key] ?? ''));
@@ -642,20 +642,39 @@ final class ProductVariantMetadata
         $rawAxis = self::normalizeVariantDefinitionField($rawAxis);
         $axis = self::isAllowedVariantDefinitionField($rawAxis) ? $rawAxis : '';
         if ($axis === '') {
-            return '';
+            if (!$allowVariantFallback) {
+                return '';
+            }
+            $variantField = self::resolveVariantDefinitionFieldByType($normalizedType, $attributes);
+            return $variantField !== ''
+                ? self::displayAxisForVariantDefinitionField($variantField, $normalizedType)
+                : '';
         }
 
         $hasValue = static fn(string $key): bool => trim((string)($attributes[$key] ?? '')) !== '';
 
-        return match ($axis) {
+        $requestedAxis = match ($axis) {
             'color' => $hasValue('color') ? 'color' : '',
-            'size' => $hasValue('size') && !in_array($normalizedType, ['cuidado', 'alimento'], true) ? 'size' : '',
+            'size' => $hasValue('size') ? 'size' : '',
             'presentation' => ($hasValue('weight') || $hasValue('presentation')) ? 'presentation' : '',
+            'weight' => $hasValue('weight') ? 'weight' : '',
             'flavor' => $hasValue('flavor') ? 'flavor' : '',
             'target' => $hasValue('target') ? 'target' : '',
             'material' => $hasValue('material') ? 'material' : '',
             default => $hasValue($axis) ? $axis : '',
         };
+        if ($requestedAxis !== '') {
+            return $requestedAxis;
+        }
+
+        if (!$allowVariantFallback) {
+            return '';
+        }
+
+        $variantField = self::resolveVariantDefinitionFieldByType($normalizedType, $attributes);
+        return $variantField !== ''
+            ? self::displayAxisForVariantDefinitionField($variantField, $normalizedType)
+            : '';
     }
 
     private static function shouldPreserveDetailedExplicitLabel(string $explicit, string $size, string $color): bool

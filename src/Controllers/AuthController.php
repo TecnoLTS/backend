@@ -3,6 +3,9 @@
 namespace App\Controllers;
 
 use App\Repositories\AuthSecurityRepository;
+use App\Repositories\CustomerAuthSecurityRepository;
+use App\Repositories\CustomerPasswordResetTokenRepository;
+use App\Repositories\CustomerRepository;
 use App\Repositories\PasswordResetTokenRepository;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
@@ -10,6 +13,7 @@ use App\Services\MailService;
 use App\Services\SessionSettingsService;
 use Firebase\JWT\JWT;
 use App\Core\Auth;
+use App\Core\AuthSurface;
 use App\Core\Response;
 use App\Core\TenantContext;
 
@@ -18,12 +22,20 @@ class AuthController {
     private $settingsRepository;
     private $authSecurityRepository;
     private $passwordResetTokenRepository;
+    private string $authSurface;
 
     public function __construct() {
-        $this->userRepository = new UserRepository();
+        $this->authSurface = AuthSurface::current();
+        if ($this->authSurface === AuthSurface::DASHBOARD) {
+            $this->userRepository = new UserRepository();
+            $this->authSecurityRepository = new AuthSecurityRepository();
+            $this->passwordResetTokenRepository = new PasswordResetTokenRepository();
+        } else {
+            $this->userRepository = new CustomerRepository();
+            $this->authSecurityRepository = new CustomerAuthSecurityRepository();
+            $this->passwordResetTokenRepository = new CustomerPasswordResetTokenRepository();
+        }
         $this->settingsRepository = new SettingsRepository();
-        $this->authSecurityRepository = new AuthSecurityRepository();
-        $this->passwordResetTokenRepository = new PasswordResetTokenRepository();
     }
 
     private function isQa(): bool {
@@ -371,6 +383,7 @@ class AuthController {
             'email' => $user['email'],
             'name' => $user['name'],
             'role' => $user['role'] ?? 'customer',
+            'authSurface' => $this->authSurface,
         ];
     }
 
@@ -390,6 +403,8 @@ class AuthController {
             'name' => $user['name'],
             'role' => $user['role'] ?? 'customer',
             'tenant_id' => TenantContext::id(),
+            'aud' => $this->authSurface,
+            'auth_surface' => $this->authSurface,
             'jti' => $tokenId,
         ];
 
@@ -426,6 +441,8 @@ class AuthController {
             'name' => $user['name'],
             'role' => $role,
             'tenant_id' => $payload['tenant_id'] ?? TenantContext::id(),
+            'aud' => $payload['aud'] ?? $payload['auth_surface'] ?? $this->authSurface,
+            'auth_surface' => $payload['auth_surface'] ?? $payload['aud'] ?? $this->authSurface,
             'jti' => $tokenId,
         ];
 
@@ -609,6 +626,11 @@ class AuthController {
     }
 
     public function register() {
+        if ($this->authSurface === AuthSurface::DASHBOARD) {
+            Response::error('El registro público no está habilitado para el dashboard', 403, 'AUTH_REGISTER_SURFACE_FORBIDDEN');
+            return;
+        }
+
         $data = json_decode(file_get_contents('php://input'), true);
 
         if (!isset($data['email']) || !isset($data['password']) || !isset($data['name'])) {

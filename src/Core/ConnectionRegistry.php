@@ -60,11 +60,11 @@ final class ConnectionRegistry {
         return [
             'host' => $tenantDb['host'] ?? self::env('DB_HOST', 'localhost'),
             'port' => (int)($tenantDb['port'] ?? self::env('DB_PORT', '5432')),
-            'database' => $tenantDb['database'] ?? self::env('DB_DATABASE', 'paramascotasec'),
+            'database' => $tenantDb['database'] ?? self::env('DB_DATABASE', 'ecommerce'),
             'username' => $tenantDb['username'] ?? self::env('DB_USERNAME', 'postgres'),
             'password' => $tenantDb['password'] ?? self::env('DB_PASSWORD', ''),
             'module' => 'primary',
-            'target_database' => $tenantDb['database'] ?? self::env('DB_DATABASE', 'paramascotasec'),
+            'target_database' => $tenantDb['database'] ?? self::env('DB_DATABASE', 'ecommerce'),
             'mode' => 'primary',
         ];
     }

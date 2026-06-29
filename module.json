@@ -13,16 +13,16 @@
   "modes": {
     "standalone": {
       "supported": true,
-      "summary": "Puede operar por su cuenta como runtime PHP/Nginx con tenant resolution, auth, APIs admin y dominios internos sobre bases logicas dedicadas.",
+      "summary": "Puede operar por su cuenta como runtime PHP/Nginx con tenant resolution, auth, APIs admin y dominios internos sobre bases logicas agrupadas por servicio.",
       "requires": [
-        "PostgreSQL unico con bases logicas por dominio",
+        "PostgreSQL unico con bases logicas de servicio",
         "Configuracion de tenants",
         "Variables de JWT, CSRF y proxy interno"
       ],
       "operationFlow": [
         "Expone su API multi-tenant y resuelve tenant, autenticacion y permisos desde el propio runtime.",
         "Aplica reglas de negocio de ecommerce, administracion, RBAC y operaciones generales.",
-        "Lee y escribe cada bounded context en su base logica dedicada mediante ConnectionRegistry.",
+        "Lee y escribe cada bounded context en dashboard, ecommerce o facturacion mediante ConnectionRegistry.",
         "Publica contratos HTTP para el sitio publico, el dashboard y otros consumidores autorizados."
       ],
       "sourceOfTruth": "owner-runtime",
@@ -31,7 +31,7 @@
     },
     "orchestrated": {
       "supported": true,
-      "summary": "Sirve como backend operativo unico para dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas dedicadas.",
+      "summary": "Sirve como backend operativo unico para dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas agrupadas por servicio.",
       "requires": [
         "dashboard como orquestador visual",
         "gatewayapisix/APISIX para contrato publico",
@@ -40,7 +40,7 @@
       "operationFlow": [
         "El dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
         "La UI consume el Core API por proxy dashboard o por el contrato publico de gatewayapisix.",
-        "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a su base logica dedicada.",
+        "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a dashboard, ecommerce o facturacion.",
         "El dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
       ],
       "sourceOfTruth": "owner-runtime",
@@ -76,52 +76,50 @@
   "dataOwnership": {
     "mode": "owns-database",
     "storesBusinessData": true,
-    "databaseKey": "identity_platform",
+    "databaseKey": "dashboard",
     "additionalDatabaseKeys": [
-      "catalog_inventory",
-      "commerce_orders",
-      "billing_service",
-      "reporting_finance",
-      "mailer_service"
+      "ecommerce",
+      "facturacion"
     ],
     "boundedContexts": [
       {
         "key": "identity-platform",
         "summary": "Tenants, usuarios, roles, permisos, sesiones, APIs y rutas de recuperacion superadmin.",
-        "extractionStatus": "dedicated-logical-db"
+        "extractionStatus": "service-group-db"
       },
       {
         "key": "catalog-inventory",
         "summary": "Catalogo, referencias, compras, stock, inteligencia y reglas de inventario.",
-        "extractionStatus": "dedicated-logical-db"
+        "extractionStatus": "service-group-db"
       },
       {
         "key": "commerce-orders",
         "summary": "Checkout, cotizaciones, pedidos, envios, descuentos, precios y ventas.",
-        "extractionStatus": "dedicated-logical-db"
+        "extractionStatus": "service-group-db"
       },
       {
         "key": "billing-sri",
         "summary": "Frontera Billing dentro del Core API para emitir, consultar y recuperar XML/RIDE.",
-        "extractionStatus": "dedicated-logical-db"
+        "extractionStatus": "service-group-db"
       },
       {
         "key": "reporting-finance",
         "summary": "Reportes, balances, gastos y analitica financiera/operativa por tenant.",
-        "extractionStatus": "dedicated-logical-db"
+        "extractionStatus": "service-group-db"
       },
       {
         "key": "mailer-service",
         "summary": "Mensajes de contacto, outbox y auditoria de entregas de correo del backend.",
-        "extractionStatus": "dedicated-logical-db-internal"
+        "extractionStatus": "service-group-db-internal"
       }
     ],
     "rules": [
-      "No crear foreign keys entre bases de datos de modulos distintos.",
+      "No crear foreign keys entre bases de datos distintas.",
+      "Los bounded contexts pueden compartir base cuando pertenecen al mismo grupo de servicio.",
       "Usar IDs estables, snapshots o contratos API para relaciones entre modulos.",
       "Las tablas foraneas FDW son una capa de compatibilidad para consultas existentes, no ownership funcional.",
-      "Billing SRI corre dentro del Core API y usa la base logica billing_service como store fiscal.",
-      "Mailer corre dentro del Core API y usa la base logica mailer_service para mensajes, outbox y logs."
+      "Billing SRI corre dentro del Core API y usa la base logica facturacion como store fiscal.",
+      "Mailer corre dentro del Core API y usa la base logica dashboard para mensajes, outbox y logs."
     ],
     "identityAccessModel": {
       "owner": "identity-platform",
@@ -151,11 +149,11 @@
     "consumesApis": [],
     "emitsEvents": [],
     "migrationBoundaries": [
-      "Mantener compatibilidad de contratos API aunque los dominios ya escriban en bases logicas dedicadas.",
+      "Mantener compatibilidad de contratos API aunque los dominios escriban en bases logicas agrupadas por servicio.",
       "No crear runtimes nuevos hasta que el dominio tenga module.json, health, migraciones y backup/restore propios.",
       "Retirar gradualmente las tablas FDW de compatibilidad cuando las consultas cross-domain migren a contratos API o snapshots.",
       "Billing puede extraerse luego como runtime propio, pero hoy no existe dependencia HTTP fiscal paralela en modo orquestado.",
-      "Mailer puede crecer como runtime propio de correo; hasta entonces vive como modulo tecnico interno del Core API con base mailer_service."
+      "Mailer puede crecer como runtime propio de correo; hasta entonces vive como modulo tecnico interno del Core API con base dashboard."
     ]
   },
   "contracts": {
@@ -170,7 +168,7 @@
   "backendModules": [
     {
       "moduleKey": "identity-platform",
-      "databaseKey": "identity_platform",
+      "databaseKey": "dashboard",
       "ownsUsers": true,
       "dependsOnIdentityPlatform": false,
       "permissions": [
@@ -185,14 +183,14 @@
         "platform-admin"
       ],
       "standaloneRequires": [
-        "PostgreSQL logico identity_platform",
+        "PostgreSQL logico dashboard",
         "JWT/CSRF config",
         "tenant registry"
       ]
     },
     {
       "moduleKey": "ecommerce",
-      "databaseKey": "commerce_orders",
+      "databaseKey": "ecommerce",
       "ownsUsers": false,
       "dependsOnIdentityPlatform": true,
       "permissions": [
@@ -210,7 +208,7 @@
     },
     {
       "moduleKey": "billing-sri",
-      "databaseKey": "billing_service",
+      "databaseKey": "facturacion",
       "ownsUsers": false,
       "dependsOnIdentityPlatform": true,
       "permissions": [
@@ -225,7 +223,7 @@
     },
     {
       "moduleKey": "mailer-service",
-      "databaseKey": "mailer_service",
+      "databaseKey": "dashboard",
       "ownsUsers": false,
       "dependsOnIdentityPlatform": true,
       "permissions": [
@@ -255,8 +253,8 @@
     ],
     "notes": [
       "Estas features viven en la UI del dashboard, pero su ownership de datos y contratos runtime sigue en el Core API.",
-      "Billing SRI ya entra por el Core API y su driver nativo usa billing_service sin runtime fiscal paralelo.",
-      "IdentityPlatform, CatalogInventory, Commerce, ReportingFinance y Mailer ya resuelven bases logicas dedicadas dentro del PostgreSQL unico.",
+      "Billing SRI ya entra por el Core API y su driver nativo usa facturacion sin runtime fiscal paralelo.",
+      "IdentityPlatform y Mailer resuelven en dashboard; CatalogInventory, Commerce y ReportingFinance resuelven en ecommerce; Billing resuelve en facturacion.",
       "Al extraer dominios desde el core a runtimes propios, esta proyeccion debe migrarse al nuevo modulo duenio sin cambiar la clave del modulo contratado."
     ]
   },

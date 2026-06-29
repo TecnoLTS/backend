@@ -248,16 +248,16 @@ resolve_env_file() {
   upsert_env_value "${env_file}" "PRIMARY_SITE_ALIASES" "${primary_aliases}"
   upsert_env_value "${env_file}" "PUBLIC_BASE_URL" "${public_base_url}"
   upsert_env_value "${env_file}" "TENANT_DISPLAY_NAME" "${tenant_name}"
-  upsert_env_value "${env_file}" "DB_DATABASE_IDENTITY_PLATFORM" "identity_platform"
-  upsert_env_value "${env_file}" "DB_DATABASE_CATALOG_INVENTORY" "catalog_inventory"
-  upsert_env_value "${env_file}" "DB_DATABASE_COMMERCE" "commerce_orders"
-  upsert_env_value "${env_file}" "DB_DATABASE_REPORTING_FINANCE" "reporting_finance"
-  upsert_env_value "${env_file}" "DB_DATABASE_BILLING" "billing_service"
+  upsert_env_value "${env_file}" "DB_DATABASE_IDENTITY_PLATFORM" "dashboard"
+  upsert_env_value "${env_file}" "DB_DATABASE_CATALOG_INVENTORY" "ecommerce"
+  upsert_env_value "${env_file}" "DB_DATABASE_COMMERCE" "ecommerce"
+  upsert_env_value "${env_file}" "DB_DATABASE_REPORTING_FINANCE" "ecommerce"
+  upsert_env_value "${env_file}" "DB_DATABASE_BILLING" "facturacion"
   upsert_env_value "${env_file}" "DB_USERNAME_BILLING" "${db_username}"
   if [[ -n "${db_password}" ]]; then
     upsert_env_value "${env_file}" "DB_PASSWORD_BILLING" "${db_password}"
   fi
-  upsert_env_value "${env_file}" "DB_DATABASE_MAILER_SERVICE" "mailer_service"
+  upsert_env_value "${env_file}" "DB_DATABASE_MAILER_SERVICE" "dashboard"
 
   if [[ "${mode}" == "qa" ]]; then
     local backend_bind_ip backend_port backend_public_scheme backend_public_host app_url

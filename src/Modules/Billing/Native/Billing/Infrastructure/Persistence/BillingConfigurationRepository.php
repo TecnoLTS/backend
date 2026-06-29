@@ -32,6 +32,7 @@ class BillingConfigurationRepository
         $credentials = is_array($payload['credentials'] ?? null) ? $payload['credentials'] : [];
         $environments = is_array($payload['environments'] ?? null) ? $payload['environments'] : [];
         $retries = is_array($payload['retries'] ?? null) ? $payload['retries'] : [];
+        $sequences = is_array($payload['sequences'] ?? null) ? $payload['sequences'] : [];
 
         $clientId = (int) $current['client_id'];
         $branchId = (int) $current['branch_id'];
@@ -84,6 +85,8 @@ class BillingConfigurationRepository
             ]);
             $this->upsertRetrySetting('pruebas', $testRetry);
             $this->upsertRetrySetting('produccion', $productionRetry);
+            $this->applySequencePayload($branchId, 'pruebas', $sequences['test'] ?? null);
+            $this->applySequencePayload($branchId, 'produccion', $sequences['production'] ?? null);
             $this->connection->commit();
         } catch (\Throwable $exception) {
             if ($this->connection->inTransaction()) {
@@ -399,6 +402,7 @@ class BillingConfigurationRepository
                     ...$this->retryPayload($productionRetry),
                 ],
             ],
+            'sequences' => $this->sequencesPayload((int) $row['branch_id']),
             'certificate' => $this->certificateMetadata($row['certificate_path'] ?? null, $row['certificate_password'] ?? null),
             'updated_at' => $row['updated_at'] ?? null,
         ];
@@ -658,6 +662,94 @@ class BillingConfigurationRepository
             'delay_seconds' => (int) $setting['delay_seconds'],
             'is_active' => (bool) $setting['is_active'] ? 1 : 0,
         ]);
+    }
+
+    private function sequencesPayload(int $branchId): array
+    {
+        return [
+            'test' => $this->sequencePayload($branchId, 'pruebas'),
+            'production' => $this->sequencePayload($branchId, 'produccion'),
+        ];
+    }
+
+    private function sequencePayload(int $branchId, string $ambiente): array
+    {
+        $statement = $this->connection->prepare(
+            'SELECT current_value, updated_at
+             FROM branch_sequences
+             WHERE branch_id = :branch_id
+               AND ambiente = :ambiente
+             LIMIT 1'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'ambiente' => $ambiente,
+        ]);
+        $row = $statement->fetch();
+        $currentValue = is_array($row) ? max(0, (int) ($row['current_value'] ?? 0)) : 0;
+        $maxUsed = $this->maxUsedSequential($branchId, $ambiente);
+        $nextValue = $currentValue + 1;
+
+        return [
+            'ambiente' => $ambiente,
+            'current_value' => $currentValue,
+            'max_used_value' => $maxUsed,
+            'next_value' => $nextValue,
+            'next_sequential' => str_pad((string) $nextValue, 9, '0', STR_PAD_LEFT),
+            'updated_at' => is_array($row) ? ($row['updated_at'] ?? null) : null,
+        ];
+    }
+
+    private function applySequencePayload(int $branchId, string $ambiente, mixed $payload): void
+    {
+        if (!is_array($payload)) {
+            return;
+        }
+
+        $rawNext = $payload['next_sequential'] ?? $payload['next_value'] ?? $payload['next'] ?? null;
+        if ($rawNext === null || trim((string) $rawNext) === '') {
+            return;
+        }
+
+        $digits = preg_replace('/\D+/', '', (string) $rawNext) ?? '';
+        if ($digits === '') {
+            throw new InvalidArgumentException('El proximo secuencial debe contener solo numeros.');
+        }
+
+        $nextValue = (int) ltrim($digits, '0');
+        if ($nextValue < 1 || $nextValue > 999999999) {
+            throw new InvalidArgumentException('El proximo secuencial debe estar entre 1 y 999999999.');
+        }
+
+        $currentValue = $nextValue - 1;
+        $statement = $this->connection->prepare(
+            'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
+             VALUES (:branch_id, :ambiente, :current_value, NOW())
+             ON CONFLICT (branch_id, ambiente)
+             DO UPDATE SET current_value = EXCLUDED.current_value,
+                           updated_at = NOW()'
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'ambiente' => $ambiente,
+            'current_value' => $currentValue,
+        ]);
+    }
+
+    private function maxUsedSequential(int $branchId, string $ambiente): int
+    {
+        $statement = $this->connection->prepare(
+            "SELECT COALESCE(MAX(NULLIF(regexp_replace(sequential, '\\D', '', 'g'), '')::BIGINT), 0)
+             FROM invoice_headers
+             WHERE branch_id = :branch_id
+               AND ambiente = :ambiente"
+        );
+        $statement->execute([
+            'branch_id' => $branchId,
+            'ambiente' => $ambiente,
+        ]);
+
+        return max(0, (int) $statement->fetchColumn());
     }
 
     private function updateClient(int $clientId, array $values): void

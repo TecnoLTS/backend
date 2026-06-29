@@ -418,7 +418,7 @@ class ProductRepository {
             JOIN \"Order\" o
               ON o.id = oi.order_id
              AND o.tenant_id = :tenant_id
-            LEFT JOIN \"User\" u
+            LEFT JOIN \"Customer\" u
               ON u.id = o.user_id
              AND u.tenant_id = o.tenant_id
             WHERE oi.product_id = :product_id

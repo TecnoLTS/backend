@@ -4,7 +4,13 @@ namespace App\Core;
 
 class Response {
     private static function authCookieName(): string {
-        return trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
+        $baseName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
+        return AuthSurface::authCookieName($baseName);
+    }
+
+    private static function authCookieNames(): array {
+        $baseName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
+        return AuthSurface::authCookieCandidates($baseName);
     }
 
     private static function csrfCookieName(): string {
@@ -159,13 +165,16 @@ class Response {
     }
 
     public static function clearAuthCookie(): void {
-        setcookie(self::authCookieName(), '', [
-            'expires' => time() - 3600,
-            'path' => '/',
-            'secure' => self::isSecureRequest(),
-            'httponly' => true,
-            'samesite' => 'Lax',
-        ]);
+        foreach (self::authCookieNames() as $cookieName) {
+            setcookie($cookieName, '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => self::isSecureRequest(),
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ]);
+            unset($_COOKIE[$cookieName]);
+        }
     }
 
     public static function clearCsrfCookie(): void {

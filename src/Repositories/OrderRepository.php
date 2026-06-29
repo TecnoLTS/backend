@@ -50,7 +50,7 @@ class OrderRepository {
                 u.email as user_email,
                 COUNT(oi.id) AS items_count
             FROM "Order" o 
-            LEFT JOIN "User" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN "Customer" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             LEFT JOIN "OrderItem" oi ON oi.order_id = o.id
             WHERE o.tenant_id = :tenant_id
             GROUP BY
@@ -80,7 +80,7 @@ class OrderRepository {
         $stmt = $this->db->prepare('
             SELECT o.*, u.name as user_name, u.email as user_email
             FROM "Order" o
-            LEFT JOIN "User" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN "Customer" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             WHERE o.user_id = :user_id AND o.tenant_id = :tenant_id
             ORDER BY o.created_at DESC
         ');
@@ -126,7 +126,7 @@ class OrderRepository {
         $stmt = $this->db->prepare('
             SELECT o.*, u.name as user_name, u.email as user_email
             FROM "Order" o
-            LEFT JOIN "User" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN "Customer" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             WHERE o.id = :id AND o.tenant_id = :tenant_id
         ');
         $stmt->execute([
@@ -347,7 +347,7 @@ class OrderRepository {
             $customerName = $order['user_name'] ?? null;
         }
         if (!$customerName) {
-            $stmtUser = $this->db->prepare('SELECT name FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+            $stmtUser = $this->db->prepare('SELECT name FROM "Customer" WHERE id = :id AND tenant_id = :tenant_id');
             $stmtUser->execute([
                 'id' => $order['user_id'] ?? null,
                 'tenant_id' => $this->getTenantId()
@@ -1088,12 +1088,13 @@ class OrderRepository {
             }
             $orderStatus = strtolower(trim((string)($data['status'] ?? 'pending')));
             
-            $stmt = $this->db->prepare('INSERT INTO "Order" ("id", "tenant_id", "user_id", "total", "status", "created_at", "shipping_address", "billing_address", "payment_method", "delivery_method", "payment_details", "items_subtotal", "vat_subtotal", "vat_rate", "vat_amount", "shipping", "shipping_base", "shipping_tax_rate", "shipping_tax_amount", "discount_code", "discount_total", "discount_snapshot", "order_notes") VALUES (:id, :tenant_id, :user_id, :total, :status, ' . $createdAtExpression . ', :shipping_address, :billing_address, :payment_method, :delivery_method, :payment_details, :items_subtotal, :vat_subtotal, :vat_rate, :vat_amount, :shipping, :shipping_base, :shipping_tax_rate, :shipping_tax_amount, :discount_code, :discount_total, :discount_snapshot, :order_notes)');
+            $stmt = $this->db->prepare('INSERT INTO "Order" ("id", "tenant_id", "user_id", "customer_id", "total", "status", "created_at", "shipping_address", "billing_address", "payment_method", "delivery_method", "payment_details", "items_subtotal", "vat_subtotal", "vat_rate", "vat_amount", "shipping", "shipping_base", "shipping_tax_rate", "shipping_tax_amount", "discount_code", "discount_total", "discount_snapshot", "order_notes") VALUES (:id, :tenant_id, :user_id, :customer_id, :total, :status, ' . $createdAtExpression . ', :shipping_address, :billing_address, :payment_method, :delivery_method, :payment_details, :items_subtotal, :vat_subtotal, :vat_rate, :vat_amount, :shipping, :shipping_base, :shipping_tax_rate, :shipping_tax_amount, :discount_code, :discount_total, :discount_snapshot, :order_notes)');
             
             $orderParams = [
                 'id' => $data['id'],
                 'tenant_id' => $this->getTenantId(),
                 'user_id' => $data['user_id'],
+                'customer_id' => $data['customer_id'] ?? $data['user_id'],
                 'total' => $quote['total'],
                 'status' => $orderStatus,
                 'shipping_address' => json_encode($data['shipping_address'] ?? null),
@@ -1802,7 +1803,7 @@ class OrderRepository {
                 $vatExpr as vat,
                 COALESCE(o.shipping, 0) as shipping
             FROM \"Order\" o
-            LEFT JOIN \"User\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN \"Customer\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             WHERE o.tenant_id = :tenant_id AND $realizedStatus
             ORDER BY o.created_at DESC
             LIMIT $safeOrderLimit
@@ -2119,7 +2120,7 @@ class OrderRepository {
                 $vatExpr AS vat,
                 COALESCE(o.shipping, 0) AS shipping
             FROM \"Order\" o
-            LEFT JOIN \"User\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN \"Customer\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             LEFT JOIN LATERAL (
                 SELECT
                     COUNT(*) AS item_lines_count,
@@ -3083,7 +3084,7 @@ class OrderRepository {
 
     private function getUserDefaultBilling($userId) {
         if (!$userId) return null;
-        $stmt = $this->db->prepare('SELECT addresses FROM "User" WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt = $this->db->prepare('SELECT addresses FROM "Customer" WHERE id = :id AND tenant_id = :tenant_id');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId()
@@ -3469,7 +3470,7 @@ class OrderRepository {
                    o.status,
                    o.created_at
             FROM \"Order\" o
-            LEFT JOIN \"User\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN \"Customer\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             WHERE o.tenant_id = :tenant_id
               AND $realizedStatus
             ORDER BY o.created_at DESC
@@ -3489,7 +3490,7 @@ class OrderRepository {
                    u.name as user_name,
                    u.email as user_email
             FROM \"Order\" o
-            LEFT JOIN \"User\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
+            LEFT JOIN \"Customer\" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
             WHERE o.tenant_id = :tenant_id
               AND LOWER(COALESCE(o.status, '')) IN ('pickup', 'ready_for_pickup', 'ready')
             ORDER BY o.created_at DESC

@@ -18,12 +18,12 @@ final class MailerController
             Response::json([
                 'status' => 'healthy',
                 'module' => 'mailer-service',
-                'database' => 'mailer_service',
+                'database' => 'dashboard',
                 'stats' => $repository->stats(),
             ]);
         } catch (\Throwable $exception) {
             Response::error(
-                'El módulo de correo no puede acceder a mailer_service.',
+                'El módulo de correo no puede acceder a dashboard.',
                 503,
                 'MAILER_SERVICE_UNAVAILABLE',
                 ['reason' => $exception->getMessage()]

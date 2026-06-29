@@ -12,7 +12,7 @@ Si usas Docker:
 
 ```bash
 export DB_DOCKER_CONTAINER=basesdedatos
-export DB_DATABASE=paramascotasec
+export DB_DATABASE=ecommerce
 export DB_USERNAME=postgres
 ```
 
@@ -21,7 +21,7 @@ Si usas cliente local:
 ```bash
 export DB_HOST=localhost
 export DB_PORT=5432
-export DB_DATABASE=paramascotasec
+export DB_DATABASE=ecommerce
 export DB_USERNAME=postgres
 export DB_PASSWORD=change-this-to-a-strong-password
 ```

@@ -12,6 +12,8 @@ use App\Support\ProductSeoMetadata;
 use App\Support\ProductVariantMetadata;
 
 class ProductController {
+    private const MIN_PUBLIC_DESCRIPTION_LENGTH = 20;
+
     private $productRepository;
 
     public function __construct() {
@@ -502,7 +504,7 @@ class ProductController {
         if ($requestedPublish) {
             $missing = $this->publicationSeoGaps($data, $currentProduct, $effectivePrice);
             if ($missing !== []) {
-                Response::error('No se puede publicar: faltan mínimos SEO del producto.', 400, 'PRODUCT_SEO_PUBLICATION_REQUIRED', ['fields' => $missing]);
+                Response::error('No se puede publicar: faltan requisitos mínimos del producto.', 400, 'PRODUCT_PUBLICATION_REQUIRED', ['fields' => $missing]);
                 exit;
             }
         }
@@ -528,7 +530,7 @@ class ProductController {
                 $missing[] = $field;
             }
         }
-        if ($description === '' || mb_strlen($description) < 50) {
+        if ($description === '' || mb_strlen($description) < self::MIN_PUBLIC_DESCRIPTION_LENGTH) {
             $missing[] = 'description';
         }
         if ($effectivePrice <= 0) {

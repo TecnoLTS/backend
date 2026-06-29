@@ -3,9 +3,9 @@
 namespace App\Controllers;
 
 use App\Repositories\OrderRepository;
-use App\Repositories\AuthSecurityRepository;
+use App\Repositories\CustomerAuthSecurityRepository;
+use App\Repositories\CustomerRepository;
 use App\Repositories\SettingsRepository;
-use App\Repositories\UserRepository;
 use App\Core\Response;
 use App\Core\Auth;
 use App\Core\TenantContext;
@@ -69,8 +69,8 @@ class OrderController {
 
     public function __construct() {
         $this->orderRepository = new OrderRepository();
-        $this->userRepository = new UserRepository();
-        $this->authSecurityRepository = new AuthSecurityRepository();
+        $this->userRepository = new CustomerRepository();
+        $this->authSecurityRepository = new CustomerAuthSecurityRepository();
     }
 
     private function billingGateway(): BillingGateway {
