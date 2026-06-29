@@ -61,7 +61,7 @@ final class ProductFieldValueNormalizer
     public static function normalizeVariantAttributeMap(array $attributes): array
     {
         $normalized = $attributes;
-        foreach (['size', 'weight', 'range', 'presentation', 'packaging', 'dosage', 'volume'] as $key) {
+        foreach (['size', 'weight', 'target', 'range', 'presentation', 'packaging', 'dosage', 'volume'] as $key) {
             if (!array_key_exists($key, $normalized)) {
                 continue;
             }

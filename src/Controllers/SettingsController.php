@@ -25,6 +25,7 @@ class SettingsController {
             'categoryImages' => [],
             'brands' => [],
             'suppliers' => [],
+            'commercialAttributes' => [],
             'sizes' => [],
             'weights' => [],
             'materials' => [],
@@ -136,15 +137,89 @@ class SettingsController {
         return $this->sanitizeReferenceOptionList($values, 'weights');
     }
 
+    private function normalizeCommercialAttributeKey(mixed $value, mixed $fallback = ''): string {
+        $raw = $this->sanitizeTextValue($value, 80);
+        if ($raw === '') {
+            $raw = $this->sanitizeTextValue($fallback, 80);
+        }
+        if ($raw === '') {
+            return '';
+        }
+        if (class_exists('\Normalizer')) {
+            $raw = \Normalizer::normalize($raw, \Normalizer::FORM_D) ?: $raw;
+            $raw = preg_replace('/\p{Mn}+/u', '', $raw) ?: $raw;
+        }
+        $raw = strtolower($raw);
+        $key = preg_replace('/[^a-z0-9]+/', '_', $raw) ?: '';
+        return trim(substr($key, 0, 48), '_');
+    }
+
+    private function sanitizeCommercialAttributeReferenceList(mixed $value): array {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $seen = [];
+        $normalized = [];
+
+        foreach (array_values($value) as $index => $item) {
+            if (is_string($item) || is_numeric($item)) {
+                $item = ['label' => (string)$item];
+            }
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $label = $this->sanitizeTextValue($item['label'] ?? ($item['name'] ?? ''), 120);
+            $key = $this->normalizeCommercialAttributeKey($item['key'] ?? '', $label);
+            if ($label === '' || $key === '' || isset($seen[$key])) {
+                continue;
+            }
+
+            $values = $this->sanitizeReferenceOptionList(
+                $this->parseReferenceOptionInput($item['values'] ?? ($item['options'] ?? []))
+            );
+            $legacyKeys = [];
+            if (is_array($item['legacyKeys'] ?? null)) {
+                foreach ($item['legacyKeys'] as $legacyKey) {
+                    $normalizedLegacyKey = $this->normalizeCommercialAttributeKey($legacyKey);
+                    if ($normalizedLegacyKey !== '' && $normalizedLegacyKey !== $key) {
+                        $legacyKeys[] = $normalizedLegacyKey;
+                    }
+                }
+            }
+
+            $seen[$key] = true;
+            $normalized[] = [
+                'id' => $this->sanitizeTextValue($item['id'] ?? '', 80) ?: 'attribute-' . $key . '-' . ($index + 1),
+                'key' => $key,
+                'label' => $label,
+                'values' => $values,
+                'legacyKeys' => array_values(array_unique($legacyKeys)),
+            ];
+        }
+
+        return $normalized;
+    }
+
+    private function parseReferenceOptionInput(mixed $value): array {
+        if (is_array($value)) {
+            return $value;
+        }
+        if (is_string($value) || is_numeric($value)) {
+            return preg_split('/[\n,;]+/', (string)$value) ?: [];
+        }
+        return [];
+    }
+
     private function migrateMeasuredOptions(array &$data): void {
         $sizes = $this->normalizeMeasuredReferenceList($data['sizes'] ?? []);
         $weights = [];
-        $dosages = [];
         $remainingSizes = [];
 
         foreach ($sizes as $size) {
             if ($this->isDosageReference($size)) {
-                $dosages[] = $size;
+                $weights[] = $size;
             } elseif ($this->isWeightOrContentReference($size)) {
                 $weights[] = $size;
             } else {
@@ -153,8 +228,26 @@ class SettingsController {
         }
 
         $data['sizes'] = $remainingSizes;
-        $data['weights'] = $this->normalizeMeasuredReferenceList(array_merge($data['weights'] ?? [], $weights));
-        $data['dosages'] = $this->normalizeMeasuredReferenceList(array_merge($data['dosages'] ?? [], $dosages));
+        $data['weights'] = $this->normalizeMeasuredReferenceList(array_merge($data['weights'] ?? [], $data['dosages'] ?? [], $weights));
+        $data['dosages'] = [];
+    }
+
+    private function defaultCommercialAttributesFromLegacyCatalogs(array $data): array {
+        $definitions = [
+            ['key' => 'weight', 'label' => 'Contenido / dosis', 'values' => $data['weights'] ?? [], 'legacyKeys' => ['volume', 'dosage']],
+            ['key' => 'presentation', 'label' => 'Presentacion', 'values' => $data['presentations'] ?? [], 'legacyKeys' => ['packaging']],
+            ['key' => 'flavor', 'label' => 'Sabor', 'values' => $data['flavors'] ?? []],
+            ['key' => 'target', 'label' => 'Etapa / rango recomendado', 'values' => $data['ageRanges'] ?? [], 'legacyKeys' => ['age', 'range']],
+            ['key' => 'size', 'label' => 'Talla / tamano', 'values' => $data['sizes'] ?? []],
+            ['key' => 'color', 'label' => 'Color', 'values' => $data['colors'] ?? []],
+            ['key' => 'material', 'label' => 'Material', 'values' => $data['materials'] ?? []],
+            ['key' => 'usage', 'label' => 'Uso / necesidad', 'values' => $data['usages'] ?? []],
+        ];
+
+        return $this->sanitizeCommercialAttributeReferenceList(array_values(array_filter(
+            $definitions,
+            static fn($definition) => !empty($definition['values'])
+        )));
     }
 
     private function sanitizeTextValue($value, $maxLength = 255) {
@@ -431,10 +524,18 @@ class SettingsController {
                 continue;
             }
 
+            if ($key === 'commercialAttributes') {
+                $defaults[$key] = $this->sanitizeCommercialAttributeReferenceList($source[$key] ?? []);
+                continue;
+            }
+
             $defaults[$key] = $this->sanitizeReferenceOptionList($source[$key] ?? [], $key);
         }
 
         $this->migrateMeasuredOptions($defaults);
+        if (empty($defaults['commercialAttributes'])) {
+            $defaults['commercialAttributes'] = $this->defaultCommercialAttributesFromLegacyCatalogs($defaults);
+        }
 
         return $defaults;
     }

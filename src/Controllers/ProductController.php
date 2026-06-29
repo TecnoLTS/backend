@@ -388,13 +388,53 @@ class ProductController {
             $addValue('categories', $category);
         }
 
+        $addCommercialAttributeValue = function (string $attributeKey, mixed $rawValue) use (&$catalog, &$changed): string {
+            if (!isset($catalog['commercialAttributes']) || !is_array($catalog['commercialAttributes'])) {
+                return '';
+            }
+
+            $value = trim(preg_replace('/\s+/', ' ', (string)$rawValue));
+            if ($value === '') {
+                return '';
+            }
+            $valueIdentity = $this->referenceCatalogIdentity($value);
+
+            foreach ($catalog['commercialAttributes'] as &$attribute) {
+                if (!is_array($attribute)) {
+                    continue;
+                }
+                $keys = array_filter(array_merge(
+                    [trim((string)($attribute['key'] ?? ''))],
+                    is_array($attribute['legacyKeys'] ?? null) ? $attribute['legacyKeys'] : []
+                ));
+                if (!in_array($attributeKey, $keys, true)) {
+                    continue;
+                }
+
+                $values = is_array($attribute['values'] ?? null) ? $attribute['values'] : [];
+                foreach ($values as $existingValue) {
+                    if ($this->referenceCatalogIdentity((string)$existingValue) === $valueIdentity) {
+                        return (string)$existingValue;
+                    }
+                }
+                $values[] = $value;
+                usort($values, fn($left, $right) => strcasecmp((string)$left, (string)$right));
+                $attribute['values'] = $values;
+                $changed = true;
+                return $value;
+            }
+            unset($attribute);
+
+            return '';
+        };
+
         $attributeCatalogMap = [
             'size' => 'sizes',
             'weight' => 'weights',
             'volume' => 'weights',
             'presentation' => 'presentations',
             'packaging' => 'presentations',
-            'dosage' => 'dosages',
+            'dosage' => 'weights',
             'material' => 'materials',
             'color' => 'colors',
             'usage' => 'usages',
@@ -402,7 +442,9 @@ class ProductController {
             'storageLocation' => 'storageLocations',
             'tag' => 'tags',
             'flavor' => 'flavors',
+            'target' => 'ageRanges',
             'age' => 'ageRanges',
+            'range' => 'ageRanges',
         ];
 
         foreach ($attributeCatalogMap as $attributeKey => $catalogKey) {
@@ -411,6 +453,24 @@ class ProductController {
                     $catalogKey = 'weights';
                 }
                 $addValue($catalogKey, $attributes[$attributeKey]);
+                $addCommercialAttributeValue($attributeKey, $attributes[$attributeKey]);
+            }
+        }
+
+        if (isset($catalog['commercialAttributes']) && is_array($catalog['commercialAttributes'])) {
+            foreach ($catalog['commercialAttributes'] as $attribute) {
+                if (!is_array($attribute)) {
+                    continue;
+                }
+                $keys = array_filter(array_merge(
+                    [trim((string)($attribute['key'] ?? ''))],
+                    is_array($attribute['legacyKeys'] ?? null) ? $attribute['legacyKeys'] : []
+                ));
+                foreach ($keys as $attributeKey) {
+                    if (!isset($attributeCatalogMap[$attributeKey]) && isset($attributes[$attributeKey])) {
+                        $addCommercialAttributeValue((string)$attributeKey, $attributes[$attributeKey]);
+                    }
+                }
             }
         }
 
@@ -577,9 +637,9 @@ class ProductController {
             'productType' => $data['productType'] ?? ($data['product_type'] ?? ($currentProduct['productType'] ?? ($currentProduct['product_type'] ?? ''))),
             'product_type' => $data['product_type'] ?? ($data['productType'] ?? ($currentProduct['product_type'] ?? ($currentProduct['productType'] ?? ''))),
             'gender' => $data['gender'] ?? ($currentProduct['gender'] ?? ''),
-            'variantLabel' => $data['variantLabel'] ?? ($currentProduct['variantLabel'] ?? ''),
-            'variantBaseName' => $data['variantBaseName'] ?? '',
-            'variantGroupKey' => $data['variantGroupKey'] ?? '',
+            'variantLabel' => $data['variantLabel'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantLabel'] ?? '')),
+            'variantBaseName' => $data['variantBaseName'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantBaseName'] ?? '')),
+            'variantGroupKey' => $data['variantGroupKey'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantGroupKey'] ?? '')),
         ];
 
         $data['attributes'] = ProductVariantMetadata::apply($effectiveProduct, $effectiveAttributes);
@@ -602,9 +662,9 @@ class ProductController {
             'productType' => $data['productType'] ?? ($data['product_type'] ?? ($currentProduct['productType'] ?? ($currentProduct['product_type'] ?? ''))),
             'product_type' => $data['product_type'] ?? ($data['productType'] ?? ($currentProduct['product_type'] ?? ($currentProduct['productType'] ?? ''))),
             'gender' => $data['gender'] ?? ($currentProduct['gender'] ?? ''),
-            'variantLabel' => $data['variantLabel'] ?? ($currentProduct['variantLabel'] ?? ''),
-            'variantBaseName' => $data['variantBaseName'] ?? '',
-            'variantGroupKey' => $data['variantGroupKey'] ?? '',
+            'variantLabel' => $data['variantLabel'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantLabel'] ?? '')),
+            'variantBaseName' => $data['variantBaseName'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantBaseName'] ?? '')),
+            'variantGroupKey' => $data['variantGroupKey'] ?? (array_key_exists('attributes', $data) ? '' : ($currentProduct['variantGroupKey'] ?? '')),
         ];
 
         $hasVariantContext =
@@ -624,6 +684,16 @@ class ProductController {
 
         $variantLabel = ProductVariantMetadata::resolveVariantLabel($effectiveProduct, $effectiveAttributes);
         if ($variantLabel === '') {
+            $axis = trim((string)($effectiveAttributes['variantDefinitionField'] ?? ($effectiveAttributes['variantAxis'] ?? '')));
+            $axisLabel = trim((string)($effectiveAttributes['variantAxisLabel'] ?? ''));
+            if ($axis !== '') {
+                $readableAxis = $axisLabel !== ''
+                    ? $axisLabel
+                    : ucfirst(str_replace('_', ' ', $axis));
+                Response::error('Selecciona o crea un valor para la característica que define la variante: ' . $readableAxis . '.', 400, 'PRODUCT_VARIANT_LABEL_REQUIRED');
+                exit;
+            }
+
             $normalizedType = ProductAudience::normalizeProductType(
                 (string)($effectiveProduct['productType'] ?? $effectiveProduct['product_type'] ?? ''),
                 (string)($effectiveProduct['category'] ?? '')

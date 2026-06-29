@@ -176,7 +176,20 @@ final class ProductSeoMetadata {
     private static function effectiveAttributes(array $data, ?array $currentProduct): array {
         $current = self::decodeAttributes($currentProduct['attributes'] ?? []);
         $incoming = self::decodeAttributes($data['attributes'] ?? []);
+        if (array_key_exists('attributes', $data) && self::isFullProductMutation($data)) {
+            return $incoming;
+        }
         return array_replace($current, $incoming);
+    }
+
+    private static function isFullProductMutation(array $data): bool {
+        foreach (['name', 'category', 'productType', 'product_type', 'brand', 'description', 'price', 'originPrice', 'cost', 'quantity'] as $key) {
+            if (array_key_exists($key, $data)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function decodeAttributes($value): array {

@@ -34,6 +34,7 @@ class ProductReferenceCatalogRepository {
             'categoryImages' => [],
             'brands' => [],
             'suppliers' => [],
+            'commercialAttributes' => [],
             'sizes' => [],
             'weights' => [],
             'materials' => [],
@@ -124,6 +125,23 @@ class ProductReferenceCatalogRepository {
                         'showInTopSection' => $showInTopSection,
                         'showInFeaturedSection' => $showInFeaturedSection,
                         'showInImageSection' => $showInTopSection || $showInFeaturedSection,
+                    ];
+                }
+                continue;
+            }
+
+            if ($catalogKey === 'commercialAttributes') {
+                $label = trim((string)($payload['label'] ?? ($payload['name'] ?? ($row['label'] ?? ''))));
+                $key = trim((string)($payload['key'] ?? ''));
+                if ($label !== '' && $key !== '') {
+                    $values = $payload['values'] ?? [];
+                    $legacyKeys = $payload['legacyKeys'] ?? [];
+                    $result['commercialAttributes'][] = [
+                        'id' => trim((string)($payload['id'] ?? $row['id'] ?? '')),
+                        'key' => $key,
+                        'label' => $label,
+                        'values' => is_array($values) ? array_values($values) : [],
+                        'legacyKeys' => is_array($legacyKeys) ? array_values($legacyKeys) : [],
                     ];
                 }
                 continue;
@@ -286,6 +304,34 @@ class ProductReferenceCatalogRepository {
                             'tenant_id' => $tenantId,
                             'catalog_key' => $catalogKey,
                             'label' => $categoryName,
+                            'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                            'sort_order' => $index,
+                        ]);
+                        continue;
+                    }
+
+                    if ($catalogKey === 'commercialAttributes' && is_array($value)) {
+                        $attributeLabel = trim((string)($value['label'] ?? ($value['name'] ?? '')));
+                        $attributeKey = trim((string)($value['key'] ?? ''));
+                        if ($attributeLabel === '' || $attributeKey === '') {
+                            continue;
+                        }
+
+                        $values = $value['values'] ?? [];
+                        $legacyKeys = $value['legacyKeys'] ?? [];
+                        $payload = [
+                            'id' => trim((string)($value['id'] ?? '')) ?: $this->buildRowId($catalogKey, $attributeKey, $index + 1),
+                            'key' => $attributeKey,
+                            'label' => $attributeLabel,
+                            'values' => is_array($values) ? array_values($values) : [],
+                            'legacyKeys' => is_array($legacyKeys) ? array_values($legacyKeys) : [],
+                        ];
+
+                        $insertStmt->execute([
+                            'id' => $payload['id'],
+                            'tenant_id' => $tenantId,
+                            'catalog_key' => $catalogKey,
+                            'label' => $attributeLabel,
                             'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                             'sort_order' => $index,
                         ]);

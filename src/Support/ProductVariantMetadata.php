@@ -6,38 +6,72 @@ namespace App\Support;
 
 final class ProductVariantMetadata
 {
-    private const CARE_VARIANT_FIELDS = ['range', 'weight', 'presentation', 'dosage', 'volume', 'packaging'];
+    private const CARE_VARIANT_FIELDS = ['target', 'weight', 'presentation'];
     private const VARIANT_DEFINITION_FIELDS = [
         'weight',
-        'volume',
         'presentation',
-        'packaging',
         'size',
         'color',
         'flavor',
         'target',
-        'age',
-        'range',
-        'dosage',
         'material',
     ];
-    private const CONTENT_VARIANT_FIELDS = ['weight', 'volume', 'presentation', 'packaging'];
-    private const DISPLAY_AXIS_FIELDS = ['presentation', 'size', 'color', 'range', 'dosage', 'flavor', 'target', 'age', 'material'];
+    private const VARIANT_DEFINITION_FIELD_ALIASES = [
+        'volume' => 'weight',
+        'dosage' => 'weight',
+        'packaging' => 'presentation',
+        'age' => 'target',
+        'range' => 'target',
+    ];
+    private const RESERVED_VARIANT_AXIS_FIELDS = [
+        'action',
+        'archived',
+        'archivedat',
+        'archivedlegacyid',
+        'archivedname',
+        'archivedproductid',
+        'catalogdisplayaxis',
+        'catalogdisplaymode',
+        'description',
+        'expirationalertdays',
+        'expirationdate',
+        'image',
+        'images',
+        'isnew',
+        'issale',
+        'name',
+        'originprice',
+        'price',
+        'producttype',
+        'publicvariantaxis',
+        'quantity',
+        'seodescription',
+        'seoimagealt',
+        'seosearchterms',
+        'seotitle',
+        'sku',
+        'sold',
+        'supplier',
+        'taxexempt',
+        'taxrate',
+        'variantaxis',
+        'variantaxislabel',
+        'variantbasename',
+        'variantdefinitionfield',
+        'variantdisplaymode',
+        'variantgroupkey',
+        'variantlabel',
+    ];
+    private const CONTENT_VARIANT_FIELDS = ['weight'];
 
     private const ATTRIBUTE_LABEL_KEYS = [
         'variantLabel',
         'size',
         'weight',
-        'range',
         'presentation',
-        'packaging',
-        'dosage',
-        'volume',
-        'range',
         'color',
         'flavor',
         'target',
-        'age',
         'material',
         'line',
     ];
@@ -60,17 +94,39 @@ final class ProductVariantMetadata
             (string)($product['productType'] ?? $product['product_type'] ?? ''),
             (string)($product['category'] ?? '')
         );
+        $attributes = self::normalizeCommercialAttributeAliases($attributes, $normalizedType);
         if ($normalizedType === 'cuidado') {
             $attributes = self::normalizeLegacyCareAttributes($attributes);
             unset($attributes['size']);
             $variantAxis = trim((string)($attributes['variantAxis'] ?? $attributes['variantDefinitionField'] ?? ''));
             if ($variantAxis !== '' && !in_array($variantAxis, self::CARE_VARIANT_FIELDS, true)) {
-                unset($attributes['variantAxis'], $attributes['variantDefinitionField']);
+                $normalizedAxis = self::normalizeVariantDefinitionField($variantAxis);
+                if ($normalizedAxis !== '') {
+                    $attributes['variantAxis'] = $normalizedAxis;
+                    $attributes['variantDefinitionField'] = $normalizedAxis;
+                } else {
+                    unset($attributes['variantAxis'], $attributes['variantDefinitionField']);
+                }
             }
         }
         if ($normalizedType === 'alimento') {
             $attributes = self::normalizeFoodMeasurementAttributes($attributes);
         }
+
+        if (!self::hasExplicitVariantContext($product, $attributes)) {
+            unset(
+                $attributes['variantAxis'],
+                $attributes['variantDefinitionField'],
+                $attributes['displayAxis'],
+                $attributes['variantLabel'],
+                $attributes['variantBaseName'],
+                $attributes['variantGroupKey'],
+                $attributes['catalogDisplayMode'],
+                $attributes['variantDisplayMode']
+            );
+            return $attributes;
+        }
+
         $variantDefinitionField = self::resolveVariantDefinitionFieldByType($normalizedType, $attributes);
         if ($variantDefinitionField !== '') {
             $attributes['variantAxis'] = $variantDefinitionField;
@@ -131,6 +187,23 @@ final class ProductVariantMetadata
         return $attributes;
     }
 
+    private static function hasExplicitVariantContext(array $product, array $attributes): bool
+    {
+        foreach (['variantLabel', 'variantBaseName', 'variantGroupKey'] as $key) {
+            if (trim((string)($product[$key] ?? '')) !== '' || trim((string)($attributes[$key] ?? '')) !== '') {
+                return true;
+            }
+        }
+
+        foreach (['variantDefinitionField', 'variantAxis', 'displayAxis', '__sourceVariantLabel', '__variantDefinitionField'] as $key) {
+            if (trim((string)($attributes[$key] ?? '')) !== '') {
+                return true;
+            }
+        }
+
+        return self::normalizeCatalogDisplayMode($attributes['catalogDisplayMode'] ?? ($attributes['variantDisplayMode'] ?? '')) === 'grouped';
+    }
+
     public static function resolveVariantLabel(array $product, array $attributes): string
     {
         $normalizedType = self::normalizeProductType(
@@ -147,6 +220,7 @@ final class ProductVariantMetadata
                 ProductFieldValueNormalizer::normalizeVariantAttributeMap($attributes)
             );
         }
+        $attributes = self::normalizeCommercialAttributeAliases($attributes, $normalizedType);
         $canonicalLabel = self::resolveCanonicalLabelByType($product, $attributes);
         if ($canonicalLabel !== '') {
             return $canonicalLabel;
@@ -202,27 +276,31 @@ final class ProductVariantMetadata
         if ($normalizedType === 'alimento') {
             $attributes = self::normalizeFoodMeasurementAttributes($attributes);
         }
+        $attributes = self::normalizeCommercialAttributeAliases($attributes, $normalizedType);
 
         $size = self::normalizeLabel((string)($attributes['size'] ?? ''));
         $weight = self::normalizeLabel((string)($attributes['weight'] ?? ''));
-        $range = self::normalizeLabel((string)($attributes['range'] ?? ''));
         $presentation = self::normalizeLabel((string)($attributes['presentation'] ?? ''));
-        $dosage = self::normalizeLabel((string)($attributes['dosage'] ?? ''));
-        $volume = self::normalizeLabel((string)($attributes['volume'] ?? ''));
-        $packaging = self::normalizeLabel((string)($attributes['packaging'] ?? ''));
+        $target = self::normalizeLabel((string)($attributes['target'] ?? ''));
         $color = self::cleanWhitespace((string)($attributes['color'] ?? ''));
         $normalizedColor = self::normalizeLabel($color);
         $explicit = self::normalizeLabel((string)($attributes['variantLabel'] ?? $product['variantLabel'] ?? ''));
         $variantAxis = self::resolveVariantDefinitionFieldByType($normalizedType, $attributes);
         $hasExplicitVariantAxis = trim((string)($attributes['variantDefinitionField'] ?? $attributes['variantAxis'] ?? '')) !== '';
-        if ($normalizedType === 'ropa' && $variantAxis === 'size' && $size !== '') {
+        if ($normalizedType === 'ropa' && $hasExplicitVariantAxis && $variantAxis === 'size' && $size !== '') {
             return $size;
         }
         if ($normalizedType === 'ropa' && $size !== '' && $normalizedColor !== '') {
             return trim($size . ' ' . $normalizedColor);
         }
-        if ($normalizedType === 'accesorios' && $variantAxis === 'size' && $size !== '') {
+        if ($normalizedType === 'ropa' && $variantAxis === 'size' && $size !== '') {
             return $size;
+        }
+        if ($normalizedType === 'accesorios' && $hasExplicitVariantAxis && $variantAxis === 'size' && $size !== '') {
+            return $size;
+        }
+        if ($normalizedType === 'accesorios' && $hasExplicitVariantAxis && $variantAxis === 'color' && $normalizedColor !== '') {
+            return $normalizedColor;
         }
         if ($normalizedType === 'accesorios' && $normalizedColor !== '' && $size !== '') {
             return trim($normalizedColor . ' ' . $size);
@@ -231,7 +309,7 @@ final class ProductVariantMetadata
             return $normalizedColor;
         }
 
-        if ($variantAxis !== '' && ($normalizedType !== 'cuidado' || in_array($variantAxis, self::CARE_VARIANT_FIELDS, true))) {
+        if ($variantAxis !== '') {
             $axisValue = self::normalizeLabel((string)($attributes[$variantAxis] ?? ''));
             if ($axisValue !== '') {
                 return $axisValue;
@@ -248,18 +326,8 @@ final class ProductVariantMetadata
             'accesorios' => self::shouldPreserveDetailedExplicitLabel($explicit, $size, $normalizedColor)
                 ? $explicit
                 : ($normalizedColor !== '' ? $normalizedColor : ($size !== '' ? $size : ($presentation !== '' ? $presentation : $explicit))),
-            'cuidado' => $weight !== ''
-                ? $weight
-                : ($volume !== ''
-                    ? $volume
-                    : ($dosage !== ''
-                        ? $dosage
-                        : ($presentation !== ''
-                            ? $presentation
-                            : ($packaging !== ''
-                                ? $packaging
-                                : $range)))),
-            'alimento' => $weight !== '' ? $weight : ($presentation !== '' ? $presentation : $explicit),
+            'cuidado' => $weight !== '' ? $weight : ($presentation !== '' ? $presentation : $target),
+            'alimento' => $weight !== '' ? $weight : ($presentation !== '' ? $presentation : ($target !== '' ? $target : $explicit)),
             default => $explicit,
         };
     }
@@ -267,10 +335,10 @@ final class ProductVariantMetadata
     private static function attributeLabelKeysForType(string $normalizedType): array
     {
         if ($normalizedType === 'cuidado') {
-            return ['weight', 'volume', 'dosage', 'presentation', 'packaging', 'range'];
+            return ['weight', 'presentation', 'target'];
         }
         if ($normalizedType === 'alimento') {
-            return ['weight', 'volume', 'presentation', 'packaging', 'flavor', 'target', 'age'];
+            return ['weight', 'presentation', 'flavor', 'target'];
         }
 
         return self::ATTRIBUTE_LABEL_KEYS;
@@ -280,7 +348,13 @@ final class ProductVariantMetadata
     {
         $variantAxis = trim((string)($attributes['variantAxis'] ?? $attributes['variantDefinitionField'] ?? ''));
         if ($variantAxis !== '' && !in_array($variantAxis, self::CARE_VARIANT_FIELDS, true)) {
-            unset($attributes['variantAxis'], $attributes['variantDefinitionField']);
+            $normalizedAxis = self::normalizeVariantDefinitionField($variantAxis);
+            if ($normalizedAxis !== '') {
+                $attributes['variantAxis'] = $normalizedAxis;
+                $attributes['variantDefinitionField'] = $normalizedAxis;
+            } else {
+                unset($attributes['variantAxis'], $attributes['variantDefinitionField']);
+            }
         }
 
         unset($attributes['size']);
@@ -354,7 +428,72 @@ final class ProductVariantMetadata
     private static function normalizeVariantDefinitionField(mixed $value): string
     {
         $field = strtolower(trim((string)$value));
-        return in_array($field, self::VARIANT_DEFINITION_FIELDS, true) ? $field : '';
+        $field = preg_replace('/[^a-z0-9_]+/', '_', $field) ?? $field;
+        $field = trim($field, '_');
+        $field = self::VARIANT_DEFINITION_FIELD_ALIASES[$field] ?? $field;
+        return self::isAllowedVariantDefinitionField($field) ? $field : '';
+    }
+
+    private static function isAllowedVariantDefinitionField(string $field): bool
+    {
+        if ($field === '') {
+            return false;
+        }
+
+        $reservedKey = str_replace('_', '', $field);
+        if (in_array($reservedKey, self::RESERVED_VARIANT_AXIS_FIELDS, true)) {
+            return false;
+        }
+
+        return in_array($field, self::VARIANT_DEFINITION_FIELDS, true)
+            || preg_match('/^[a-z][a-z0-9_]{1,47}$/', $field) === 1;
+    }
+
+    private static function firstAttributeValue(array $attributes, array $keys): string
+    {
+        foreach ($keys as $key) {
+            $value = trim((string)($attributes[$key] ?? ''));
+            if ($value !== '') {
+                return $value;
+            }
+        }
+
+        return '';
+    }
+
+    private static function normalizeCommercialAttributeAliases(array $attributes, string $normalizedType): array
+    {
+        foreach (['variantDefinitionField', 'variantAxis', 'displayAxis'] as $key) {
+            if (trim((string)($attributes[$key] ?? '')) !== '') {
+                $canonical = self::normalizeVariantDefinitionField($attributes[$key]);
+                if ($canonical !== '') {
+                    $attributes[$key] = $canonical;
+                }
+            }
+        }
+
+        $content = self::firstAttributeValue($attributes, ['weight', 'volume', 'dosage']);
+        if ($content !== '') {
+            $attributes['weight'] = ProductFieldValueNormalizer::normalizeDisplayValue($content);
+        }
+        unset($attributes['volume'], $attributes['dosage']);
+
+        $presentation = self::firstAttributeValue($attributes, ['presentation', 'packaging']);
+        if ($presentation !== '') {
+            $attributes['presentation'] = ProductFieldValueNormalizer::normalizeDisplayValue($presentation);
+        }
+        unset($attributes['packaging']);
+
+        $stageKeys = $normalizedType === 'cuidado'
+            ? ['range', 'target', 'age']
+            : ['target', 'age', 'range'];
+        $target = self::firstAttributeValue($attributes, $stageKeys);
+        if ($target !== '') {
+            $attributes['target'] = ProductFieldValueNormalizer::normalizeDisplayValue($target);
+        }
+        unset($attributes['age'], $attributes['range']);
+
+        return $attributes;
     }
 
     private static function attributeHasValue(array $attributes, string $field): bool
@@ -371,10 +510,10 @@ final class ProductVariantMetadata
         if (in_array($field, self::CONTENT_VARIANT_FIELDS, true)) {
             return 'presentation';
         }
-        if ($normalizedType === 'cuidado' && !in_array($field, ['range', 'dosage'], true)) {
+        if ($normalizedType === 'cuidado' && $field === 'presentation') {
             return 'presentation';
         }
-        return in_array($field, self::DISPLAY_AXIS_FIELDS, true) ? $field : '';
+        return self::isAllowedVariantDefinitionField($field) ? $field : '';
     }
 
     private static function resolveVariantDefinitionFieldByType(string $normalizedType, array $attributes): string
@@ -400,9 +539,6 @@ final class ProductVariantMetadata
         }
 
         if ($explicit !== '') {
-            if ($normalizedType === 'cuidado' && !in_array($explicit, self::CARE_VARIANT_FIELDS, true)) {
-                return '';
-            }
             return $explicit;
         }
 
@@ -416,10 +552,10 @@ final class ProductVariantMetadata
         }
 
         $preferredByType = match ($normalizedType) {
-            'alimento' => ['weight', 'volume', 'packaging', 'presentation', 'flavor', 'target', 'age'],
-            'cuidado' => ['weight', 'volume', 'dosage', 'presentation', 'packaging', 'range'],
+            'alimento' => ['weight', 'presentation', 'flavor', 'target'],
+            'cuidado' => ['weight', 'presentation', 'target'],
             'ropa' => ['size', 'color', 'material'],
-            'accesorios' => ['color', 'size', 'presentation', 'packaging', 'material'],
+            'accesorios' => ['color', 'size', 'presentation', 'material'],
             default => ['size', 'color', 'weight', 'presentation'],
         };
 
@@ -464,25 +600,22 @@ final class ProductVariantMetadata
             if ($hasValue('size')) {
                 return 'size';
             }
-            if ($hasValue('presentation') || $hasValue('packaging')) {
+            if ($hasValue('presentation')) {
                 return 'presentation';
             }
         }
 
         if ($normalizedType === 'cuidado') {
-            if ($hasValue('weight') || $hasValue('volume') || $hasValue('presentation') || $hasValue('packaging')) {
+            if ($hasValue('weight') || $hasValue('presentation')) {
                 return 'presentation';
             }
-            if ($hasValue('dosage')) {
-                return 'dosage';
-            }
-            if ($hasValue('range')) {
-                return 'range';
+            if ($hasValue('target')) {
+                return 'target';
             }
         }
 
         if ($normalizedType === 'alimento') {
-            if ($hasValue('weight') || $hasValue('presentation') || $hasValue('packaging') || $hasValue('volume')) {
+            if ($hasValue('weight') || $hasValue('presentation')) {
                 return 'presentation';
             }
         }
@@ -506,13 +639,9 @@ final class ProductVariantMetadata
             }
         }
 
-        $rawAxis = strtolower($rawAxis);
-        $axis = in_array($rawAxis, self::DISPLAY_AXIS_FIELDS, true) ? $rawAxis : '';
+        $rawAxis = self::normalizeVariantDefinitionField($rawAxis);
+        $axis = self::isAllowedVariantDefinitionField($rawAxis) ? $rawAxis : '';
         if ($axis === '') {
-            return '';
-        }
-
-        if ($normalizedType === 'cuidado' && !in_array($axis, ['presentation', 'range', 'dosage'], true)) {
             return '';
         }
 
@@ -521,14 +650,11 @@ final class ProductVariantMetadata
         return match ($axis) {
             'color' => $hasValue('color') ? 'color' : '',
             'size' => $hasValue('size') && !in_array($normalizedType, ['cuidado', 'alimento'], true) ? 'size' : '',
-            'presentation' => ($hasValue('weight') || $hasValue('volume') || $hasValue('presentation') || $hasValue('packaging')) ? 'presentation' : '',
-            'range' => $hasValue('range') ? 'range' : '',
-            'dosage' => $hasValue('dosage') ? 'dosage' : '',
+            'presentation' => ($hasValue('weight') || $hasValue('presentation')) ? 'presentation' : '',
             'flavor' => $hasValue('flavor') ? 'flavor' : '',
             'target' => $hasValue('target') ? 'target' : '',
-            'age' => $hasValue('age') ? 'age' : '',
             'material' => $hasValue('material') ? 'material' : '',
-            default => '',
+            default => $hasValue($axis) ? $axis : '',
         };
     }
 
@@ -738,7 +864,7 @@ final class ProductVariantMetadata
 
     private static function resolveDisplayAxisBaseName(string $name, array $attributes, string $normalizedType): string
     {
-        $displayAxis = trim((string)($attributes['displayAxis'] ?? $attributes['publicVariantAxis'] ?? $attributes['catalogDisplayAxis'] ?? ''));
+        $displayAxis = self::normalizeVariantDefinitionField($attributes['displayAxis'] ?? $attributes['publicVariantAxis'] ?? $attributes['catalogDisplayAxis'] ?? '');
         if ($displayAxis === '') {
             return '';
         }
