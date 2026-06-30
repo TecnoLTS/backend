@@ -53,10 +53,10 @@ return [
         'platform_admin_emails' => $dashboardPlatformAdminEmails,
         'platform_admin_domains' => $dashboardPlatformAdminDomains,
         'branding' => [
-            'logo_url' => $env('DASHBOARD_BRANDING_LOGO_URL', 'assets/images/logo.png'),
-            'logo_light_url' => $env('DASHBOARD_BRANDING_LOGO_LIGHT_URL', 'assets/images/logo-light.png'),
-            'logo_icon_url' => $env('DASHBOARD_BRANDING_LOGO_ICON_URL', 'assets/images/logo-icon.png'),
-            'primary_color' => $env('DASHBOARD_BRANDING_PRIMARY_COLOR', '#f97316'),
+            'logo_url' => $env('DASHBOARD_BRANDING_LOGO_URL', 'assets/images/tenants/paramascotasec-logo.svg'),
+            'logo_light_url' => $env('DASHBOARD_BRANDING_LOGO_LIGHT_URL', 'assets/images/tenants/paramascotasec-logo.svg'),
+            'logo_icon_url' => $env('DASHBOARD_BRANDING_LOGO_ICON_URL', 'assets/images/tenants/paramascotasec-logo.png'),
+            'primary_color' => $env('DASHBOARD_BRANDING_PRIMARY_COLOR', '#0a7b8f'),
         ],
     ]
 ];

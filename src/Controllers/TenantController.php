@@ -15,6 +15,11 @@ class TenantController {
     private TenantAccessService $tenantAccessService;
 
     private const TENANT_ADMIN_OVERRIDES_KEY = TenantAccessService::TENANT_ADMIN_OVERRIDES_KEY;
+    private const DASHBOARD_DEFAULT_LOGO_URL = 'assets/images/logo.png';
+    private const DASHBOARD_DEFAULT_LOGO_LIGHT_URL = 'assets/images/logo-light.png';
+    private const DASHBOARD_DEFAULT_LOGO_ICON_URL = 'assets/images/logo-icon.png';
+    private const PARAMASCOTAS_LOGO_URL = 'assets/images/tenants/paramascotasec-logo.svg';
+    private const PARAMASCOTAS_LOGO_ICON_URL = 'assets/images/tenants/paramascotasec-logo.png';
 
     public function __construct() {
         $this->userRepository = new UserRepository();
@@ -225,12 +230,48 @@ class TenantController {
 
     private function branding(array $tenant): array {
         $branding = $tenant['branding'] ?? [];
+        $tenantSlug = (string)($tenant['slug'] ?? TenantContext::slug() ?? '');
+        $knownBranding = $this->knownTenantBranding($tenantSlug);
+
         return [
-            'logoUrl' => (string)($branding['logo_url'] ?? 'assets/images/logo.png'),
-            'logoLightUrl' => (string)($branding['logo_light_url'] ?? 'assets/images/logo-light.png'),
-            'logoIconUrl' => (string)($branding['logo_icon_url'] ?? 'assets/images/logo-icon.png'),
-            'primaryColor' => (string)($branding['primary_color'] ?? '#f97316'),
+            'logoUrl' => $this->resolveBrandingLogo($branding['logo_url'] ?? null, $knownBranding['logo_url'] ?? self::DASHBOARD_DEFAULT_LOGO_URL),
+            'logoLightUrl' => $this->resolveBrandingLogo($branding['logo_light_url'] ?? null, $knownBranding['logo_light_url'] ?? self::DASHBOARD_DEFAULT_LOGO_LIGHT_URL),
+            'logoIconUrl' => $this->resolveBrandingLogo($branding['logo_icon_url'] ?? null, $knownBranding['logo_icon_url'] ?? self::DASHBOARD_DEFAULT_LOGO_ICON_URL),
+            'primaryColor' => (string)($branding['primary_color'] ?? $knownBranding['primary_color'] ?? '#f97316'),
         ];
+    }
+
+    private function knownTenantBranding(string $tenantSlug): ?array {
+        if ($tenantSlug !== 'paramascotasec') {
+            return null;
+        }
+
+        return [
+            'logo_url' => self::PARAMASCOTAS_LOGO_URL,
+            'logo_light_url' => self::PARAMASCOTAS_LOGO_URL,
+            'logo_icon_url' => self::PARAMASCOTAS_LOGO_ICON_URL,
+            'primary_color' => '#0a7b8f',
+        ];
+    }
+
+    private function resolveBrandingLogo($value, string $fallback): string {
+        $logoUrl = trim((string)($value ?? ''));
+        if ($logoUrl === '' || $this->isDefaultDashboardLogo($logoUrl)) {
+            return $fallback;
+        }
+
+        return $logoUrl;
+    }
+
+    private function isDefaultDashboardLogo(string $value): bool {
+        return in_array($value, [
+            self::DASHBOARD_DEFAULT_LOGO_URL,
+            self::DASHBOARD_DEFAULT_LOGO_LIGHT_URL,
+            self::DASHBOARD_DEFAULT_LOGO_ICON_URL,
+            '/' . self::DASHBOARD_DEFAULT_LOGO_URL,
+            '/' . self::DASHBOARD_DEFAULT_LOGO_LIGHT_URL,
+            '/' . self::DASHBOARD_DEFAULT_LOGO_ICON_URL,
+        ], true);
     }
 
     private function tenantAdminSummary(array $tenant): array {
