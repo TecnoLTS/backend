@@ -175,7 +175,7 @@ class PosRepository {
         ];
     }
 
-    private function getLocalPosOrders(string $openedAt, ?string $closedAt = null): array {
+    private function getLocalPosOrders(string $openedAt, ?string $closedAt = null, ?string $shiftId = null): array {
         $sql = '
             SELECT id, total, payment_method, payment_details, order_notes, created_at, status
             FROM "Order"
@@ -200,6 +200,10 @@ class PosRepository {
         $orders = [];
         foreach ($rows as $row) {
             $details = $this->decodeJsonField($row['payment_details'] ?? null);
+            $orderShiftId = trim((string)($details['shift_id'] ?? ''));
+            if ($shiftId !== null && trim($shiftId) !== '' && $orderShiftId !== '' && $orderShiftId !== trim($shiftId)) {
+                continue;
+            }
             $channel = strtolower(trim((string)($details['channel'] ?? '')));
             $notes = strtolower((string)($row['order_notes'] ?? ''));
             $isLocalPos = $channel === 'local_pos' || strpos($notes, 'venta en local') !== false;
@@ -286,7 +290,7 @@ class PosRepository {
         $openedAt = (string)($shift['opened_at'] ?? '');
         $closedAt = $shift['closed_at'] ?? null;
         $openingCash = round((float)($shift['opening_cash'] ?? 0), 2);
-        $orders = $this->getLocalPosOrders($openedAt, $closedAt);
+        $orders = $this->getLocalPosOrders($openedAt, $closedAt, (string)($shift['id'] ?? ''));
         $movements = $this->listMovements((string)$shift['id']);
 
         $ordersCount = 0;
