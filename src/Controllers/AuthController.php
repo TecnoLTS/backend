@@ -3,6 +3,7 @@
 namespace App\Controllers;
 
 use App\Repositories\AuthSecurityRepository;
+use App\Repositories\ContactMessageRepository;
 use App\Repositories\CustomerAuthSecurityRepository;
 use App\Repositories\CustomerPasswordResetTokenRepository;
 use App\Repositories\CustomerRepository;
@@ -22,6 +23,7 @@ class AuthController {
     private $settingsRepository;
     private $authSecurityRepository;
     private $passwordResetTokenRepository;
+    private ContactMessageRepository $contactMessageRepository;
     private string $authSurface;
 
     public function __construct() {
@@ -36,6 +38,7 @@ class AuthController {
             $this->passwordResetTokenRepository = new CustomerPasswordResetTokenRepository();
         }
         $this->settingsRepository = new SettingsRepository();
+        $this->contactMessageRepository = new ContactMessageRepository();
     }
 
     private function isQa(): bool {
@@ -321,6 +324,40 @@ class AuthController {
         return 'Si el correo existe, te enviaremos un enlace para restablecer tu contraseña.';
     }
 
+    private function sanitizeAccessText(mixed $value, int $maxLength): string {
+        $value = trim((string)$value);
+        if ($value === '') {
+            return '';
+        }
+
+        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
+        return mb_substr($value, 0, $maxLength);
+    }
+
+    private function sanitizeAccessMessage(mixed $value, int $maxLength): string {
+        $value = trim((string)$value);
+        if ($value === '') {
+            return '';
+        }
+
+        $value = strip_tags($value);
+        $value = preg_replace("/\r\n|\r/u", "\n", $value) ?? $value;
+        $value = preg_replace("/\n{3,}/u", "\n\n", $value) ?? $value;
+        return mb_substr(trim($value), 0, $maxLength);
+    }
+
+    private function contactDestination(): string {
+        $destination = trim((string)($_ENV['CONTACT_FORM_TO'] ?? ''));
+        if ($destination === '') {
+            $destination = trim((string)($_ENV['MAIL_FROM_ADDRESS'] ?? ''));
+        }
+        if ($destination === '') {
+            $destination = 'info@paramascotasec.com';
+        }
+
+        return $destination;
+    }
+
     private function isPasswordResetRateLimited(string $email): bool {
         $emailCount = $this->authSecurityRepository->countRecentEventsByEmail(
             'password_reset_requested',
@@ -333,6 +370,32 @@ class AuthController {
             : 0;
 
         return $emailCount >= 3 || $ipCount >= 10;
+    }
+
+    private function isOtpRequestRateLimited(string $email): bool {
+        $eventTypes = [
+            'otp_sent',
+            'otp_send_failed',
+            'otp_request_unknown_email',
+            'otp_request_rate_limited',
+        ];
+
+        $emailCount = $this->authSecurityRepository->countRecentEventsByEmailForTypes(
+            $eventTypes,
+            $email,
+            '1 hour'
+        );
+        $clientIp = $this->getClientIp();
+        $ipCount = $clientIp
+            ? $this->authSecurityRepository->countRecentEventsByIpForTypes($eventTypes, $clientIp, '1 hour')
+            : 0;
+
+        return $emailCount >= 3 || $ipCount >= 10;
+    }
+
+    private function otpInvalidMessage(): string
+    {
+        return 'Código incorrecto o expirado.';
     }
 
     private function tokenHash(string $token): string {
@@ -738,6 +801,129 @@ class AuthController {
         }
     }
 
+    public function requestAccess(): void {
+        $data = json_decode(file_get_contents('php://input'), true);
+
+        if (!is_array($data)) {
+            Response::error('Solicitud inválida', 400, 'AUTH_ACCESS_REQUEST_INVALID');
+            return;
+        }
+
+        $name = $this->sanitizeAccessText($data['name'] ?? '', 140);
+        $email = strtolower(trim((string)($data['email'] ?? '')));
+        $company = $this->sanitizeAccessText($data['company'] ?? '', 160);
+        $message = $this->sanitizeAccessMessage($data['message'] ?? '', 5000);
+
+        if ($name === '' || mb_strlen($name) < 3) {
+            Response::error('Ingresa tu nombre completo', 400, 'AUTH_ACCESS_REQUEST_INVALID');
+            return;
+        }
+
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            Response::error('Ingresa un correo válido', 400, 'AUTH_ACCESS_REQUEST_INVALID');
+            return;
+        }
+
+        if ($company === '' || mb_strlen($company) < 2) {
+            Response::error('Indica la empresa o negocio que solicita acceso', 400, 'AUTH_ACCESS_REQUEST_INVALID');
+            return;
+        }
+
+        if ($message === '' || mb_strlen($message) < 10) {
+            Response::error('Explica mejor el acceso que necesitas', 400, 'AUTH_ACCESS_REQUEST_INVALID');
+            return;
+        }
+
+        $clientIp = $this->getClientIp();
+        $emailLimit = max(2, (int)($_ENV['CONTACT_FORM_EMAIL_HOURLY_LIMIT'] ?? 5));
+        $ipLimit = max(5, (int)($_ENV['CONTACT_FORM_IP_HOURLY_LIMIT'] ?? 20));
+
+        if (
+            $this->contactMessageRepository->countRecentByEmail($email) >= $emailLimit
+            || $this->contactMessageRepository->countRecentByIp($clientIp) >= $ipLimit
+        ) {
+            Response::error(
+                'Recibimos varias solicitudes en poco tiempo. Espera unos minutos antes de intentar otra vez.',
+                429,
+                'AUTH_ACCESS_REQUEST_RATE_LIMITED'
+            );
+            return;
+        }
+
+        $tenant = TenantContext::get();
+        $record = $this->contactMessageRepository->create([
+            'name' => $name,
+            'email' => $email,
+            'phone' => null,
+            'subject' => 'Solicitud de acceso dashboard - ' . $company,
+            'message' => $message,
+            'source' => 'dashboard_access_request',
+            'status' => 'new',
+            'ip_address' => $clientIp,
+            'user_agent' => $this->getUserAgent(),
+            'metadata' => [
+                'company' => $company,
+                'auth_surface' => $this->authSurface,
+                'tenant_id' => $tenant['id'] ?? null,
+                'tenant_domain' => $tenant['domain'] ?? null,
+                'referer' => trim((string)($_SERVER['HTTP_REFERER'] ?? '')) ?: null,
+            ],
+        ]);
+
+        Response::json([
+            'id' => (string)($record['id'] ?? ''),
+            'status' => 'received',
+        ], 201, null, 'Solicitud recibida. Revisaremos tu acceso y te contactaremos por correo.');
+        $this->finishResponseForBackgroundWork();
+
+        $tenantName = trim((string)($tenant['name'] ?? 'Para Mascotas EC'));
+        $destination = $this->contactDestination();
+        $notificationSubject = sprintf('[Acceso %s] %s', $tenantName, $company);
+        $notificationMessage = implode("\n", [
+            'Nueva solicitud pública de acceso al dashboard.',
+            '',
+            'Nombre: ' . $name,
+            'Correo: ' . $email,
+            'Empresa: ' . $company,
+            'Tenant: ' . (($tenant['domain'] ?? '') ?: ($tenant['id'] ?? 'default')),
+            'ID interno: ' . ($record['id'] ?? ''),
+            '',
+            'Mensaje:',
+            $message,
+        ]);
+        MailService::send($destination, $notificationSubject, $notificationMessage, $email, $name);
+
+        $customerSubject = sprintf('[%s] Solicitud recibida', $tenantName);
+        $customerMessage = implode("\n", [
+            'Hola ' . $name . ',',
+            '',
+            'Recibimos tu solicitud de acceso y ya quedó registrada para revisión.',
+            'Nuestro equipo evaluará el requerimiento y te contactará por correo.',
+            '',
+            'Empresa: ' . $company,
+            'ID de seguimiento: ' . ($record['id'] ?? ''),
+            '',
+            $tenantName,
+            $destination,
+        ]);
+        MailService::send($email, $customerSubject, $customerMessage, $destination, $tenantName);
+    }
+
+    private function finishResponseForBackgroundWork(): void
+    {
+        if (function_exists('session_write_close')) {
+            @session_write_close();
+        }
+
+        if (function_exists('fastcgi_finish_request')) {
+            fastcgi_finish_request();
+            return;
+        }
+
+        @ob_flush();
+        flush();
+    }
+
     public function guestToken() {
         Response::error('Compra como invitado deshabilitada', 403, 'GUEST_DISABLED');
         return;
@@ -781,16 +967,29 @@ class AuthController {
 
     public function requestOtp() {
         $data = json_decode(file_get_contents('php://input'), true);
-        $email = $data['email'] ?? null;
-        if (!$email) {
+        $email = strtolower(trim((string)($data['email'] ?? '')));
+        if ($email === '') {
             Response::error('El correo es obligatorio', 400, 'AUTH_OTP_EMAIL_REQUIRED');
+            return;
+        }
+
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            Response::error('Ingresa un correo válido', 400, 'AUTH_OTP_EMAIL_INVALID');
+            return;
+        }
+
+        if ($this->isOtpRequestRateLimited($email)) {
+            $this->recordAuthEvent(null, 'otp_request_rate_limited', 'blocked', [
+                'email' => $email,
+            ]);
+            Response::error('Demasiadas solicitudes en poco tiempo. Espera antes de pedir otro código.', 429, 'AUTH_OTP_RATE_LIMITED');
             return;
         }
 
         $user = $this->userRepository->getByEmail($email);
         if (!$user) {
             $this->recordAuthEvent(null, 'otp_request_unknown_email', 'info', [
-                'email' => strtolower(trim((string)$email)),
+                'email' => $email,
             ]);
             // Avoid user enumeration.
             Response::json(['sent' => true], 200, null, 'Si el correo existe, se enviará un código de verificación.');
@@ -818,9 +1017,9 @@ class AuthController {
 
     public function verifyOtp() {
         $data = json_decode(file_get_contents('php://input'), true);
-        $email = $data['email'] ?? null;
-        $code = $data['code'] ?? null;
-        if (!$email || !$code) {
+        $email = strtolower(trim((string)($data['email'] ?? '')));
+        $code = trim((string)($data['code'] ?? ''));
+        if ($email === '' || $code === '') {
             Response::error('Correo y código son obligatorios', 400, 'AUTH_OTP_REQUIRED');
             return;
         }
@@ -828,9 +1027,9 @@ class AuthController {
         $user = $this->userRepository->getByEmailWithOtp($email);
         if (!$user) {
             $this->recordAuthEvent(null, 'otp_verify_unknown_email', 'failure', [
-                'email' => strtolower(trim((string)$email)),
+                'email' => $email,
             ]);
-            Response::error('Usuario no encontrado', 404, 'AUTH_OTP_USER_NOT_FOUND');
+            Response::error($this->otpInvalidMessage(), 400, 'AUTH_OTP_INVALID');
             return;
         }
 
@@ -846,14 +1045,14 @@ class AuthController {
         $expiresAt = $user['otp_expires_at'] ?? null;
         if (!$expiresAt || strtotime($expiresAt) < time()) {
             $this->recordAuthEvent($user, 'otp_expired', 'failure');
-            Response::error('El código ha expirado. Solicita uno nuevo.', 400, 'AUTH_OTP_EXPIRED');
+            Response::error($this->otpInvalidMessage(), 400, 'AUTH_OTP_INVALID');
             return;
         }
 
         if (($user['otp_code'] ?? '') !== $code) {
             $this->userRepository->incrementOtpAttempts($user['id']);
             $this->recordAuthEvent($user, 'otp_invalid', 'failure');
-            Response::error('Código incorrecto', 400, 'AUTH_OTP_INVALID');
+            Response::error($this->otpInvalidMessage(), 400, 'AUTH_OTP_INVALID');
             return;
         }
 
@@ -881,6 +1080,9 @@ class AuthController {
         }
 
         $user = $this->userRepository->getByEmail($email);
+        if (!is_array($user)) {
+            $user = null;
+        }
         $this->recordAuthEvent($user, 'password_reset_requested', 'info', [
             'email' => $email,
             'user_exists' => (bool)$user,

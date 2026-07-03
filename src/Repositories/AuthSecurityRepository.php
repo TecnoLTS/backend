@@ -112,6 +112,43 @@ class AuthSecurityRepository {
         return (int)$stmt->fetchColumn();
     }
 
+    public function countRecentEventsByEmailForTypes(array $eventTypes, string $email, string $interval = '1 hour'): int {
+        $normalizedEmail = strtolower(trim($email));
+        $normalizedTypes = array_values(array_filter(array_map(
+            static fn ($value) => trim((string)$value),
+            $eventTypes
+        )));
+
+        if ($normalizedEmail === '' || $normalizedTypes === []) {
+            return 0;
+        }
+
+        $intervalSql = $this->intervalSql($interval);
+        $typePlaceholders = [];
+        $params = [
+            'tenant_id' => $this->getTenantId(),
+            'email' => $normalizedEmail,
+        ];
+
+        foreach ($normalizedTypes as $index => $eventType) {
+            $placeholder = 'event_type_' . $index;
+            $typePlaceholders[] = ':' . $placeholder;
+            $params[$placeholder] = $eventType;
+        }
+
+        $stmt = $this->prepare('
+            SELECT COUNT(*)
+            FROM "AuthSecurityEvent"
+            WHERE tenant_id = :tenant_id
+              AND email = :email
+              AND event_type IN (' . implode(', ', $typePlaceholders) . ')
+              AND created_at >= NOW() - INTERVAL \'' . $intervalSql . '\'
+        ');
+        $stmt->execute($params);
+
+        return (int)$stmt->fetchColumn();
+    }
+
     public function countRecentEventsByIp(string $eventType, string $ipAddress, string $interval = '1 hour'): int {
         $ip = trim($ipAddress);
         if ($ip === '') {
@@ -132,6 +169,43 @@ class AuthSecurityRepository {
             'event_type' => $eventType,
             'ip_address' => $ip,
         ]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function countRecentEventsByIpForTypes(array $eventTypes, string $ipAddress, string $interval = '1 hour'): int {
+        $ip = trim($ipAddress);
+        $normalizedTypes = array_values(array_filter(array_map(
+            static fn ($value) => trim((string)$value),
+            $eventTypes
+        )));
+
+        if ($ip === '' || $normalizedTypes === []) {
+            return 0;
+        }
+
+        $intervalSql = $this->intervalSql($interval);
+        $typePlaceholders = [];
+        $params = [
+            'tenant_id' => $this->getTenantId(),
+            'ip_address' => $ip,
+        ];
+
+        foreach ($normalizedTypes as $index => $eventType) {
+            $placeholder = 'event_type_' . $index;
+            $typePlaceholders[] = ':' . $placeholder;
+            $params[$placeholder] = $eventType;
+        }
+
+        $stmt = $this->prepare('
+            SELECT COUNT(*)
+            FROM "AuthSecurityEvent"
+            WHERE tenant_id = :tenant_id
+              AND ip_address = :ip_address
+              AND event_type IN (' . implode(', ', $typePlaceholders) . ')
+              AND created_at >= NOW() - INTERVAL \'' . $intervalSql . '\'
+        ');
+        $stmt->execute($params);
 
         return (int)$stmt->fetchColumn();
     }

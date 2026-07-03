@@ -98,6 +98,7 @@ class MailService {
             'reply_to' => $replyTo,
             'reply_to_name' => $replyToName,
         ]);
+
         $smtpHost = $_ENV['SMTP_HOST'] ?? null;
 
         if ($smtpHost && class_exists(PHPMailer::class)) {
@@ -163,6 +164,7 @@ class MailService {
                 'bytes' => strlen($attachmentContent),
             ],
         ]);
+
         $smtpHost = $_ENV['SMTP_HOST'] ?? null;
         if (!$smtpHost || !class_exists(PHPMailer::class)) {
             error_log('Attachment email requires configured SMTP/PHPMailer.');

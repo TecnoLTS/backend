@@ -598,6 +598,7 @@ class TenantAccessService {
     private function isProductAdminRoute(string $capability, string $uri): bool {
         return in_array($capability, ['catalog.admin', 'catalog.reviews.admin'], true)
             || (str_starts_with($uri, '/api/products') && $this->isAdminCatalogProjection($capability))
+            || str_starts_with($uri, '/api/admin/products')
             || str_starts_with($uri, '/api/admin/reviews');
     }
 

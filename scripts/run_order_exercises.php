@@ -6,6 +6,7 @@ require_once __DIR__ . '/../vendor/autoload.php';
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Domain\CommerceDomain;
 use App\Repositories\OrderRepository;
 use Dotenv\Dotenv;
 
@@ -21,7 +22,7 @@ TenantContext::set([
 ]);
 
 /** @var PDO $db */
-$db = Database::getInstance();
+$db = Database::getModuleInstance(CommerceDomain::KEY);
 $repo = new OrderRepository();
 
 $report = [
@@ -32,22 +33,9 @@ $report = [
     'validations' => [],
 ];
 
-$requiredProductNames = [
-    'Abrigo Forrado para Perro',
-    'Set Comederos de Cerámica',
-    'Pelota para Perro 3',
-    'Juguete Ratón para Gato',
-    'Alimento Premium Royal Canin',
-    'Alimento Natural Milo Kitchen',
-    'Correa para Perro',
-    'Arnés Ajustable para Perro',
-    'Cama Acogedora para Perro',
-    'Champú Natural para Perro',
-];
-
 $selectUsers = $db->prepare('
     SELECT id, email, role
-    FROM "User"
+    FROM "Customer"
     WHERE tenant_id = :tenant_id AND role = :role
     ORDER BY email ASC
 ');
@@ -60,24 +48,97 @@ if (count($users) < 3) {
     throw new RuntimeException('Se requieren al menos 3 usuarios customer para ejecutar escenarios.');
 }
 
-$getProduct = $db->prepare('
-    SELECT id, name, quantity, sold, price, cost
+$catalogStmt = $db->prepare('
+    SELECT id, name, quantity, sold, price, cost, attributes
     FROM "Product"
-    WHERE tenant_id = :tenant_id AND name = :name
-    LIMIT 1
+    WHERE tenant_id = :tenant_id
+      AND COALESCE(quantity, 0) > 0
+      AND COALESCE(price, 0) > 0
+    ORDER BY price DESC, quantity DESC, name ASC
 ');
-$products = [];
-foreach ($requiredProductNames as $name) {
-    $getProduct->execute([
-        'tenant_id' => $tenantId,
-        'name' => $name,
-    ]);
-    $row = $getProduct->fetch(PDO::FETCH_ASSOC);
-    if (!$row) {
-        throw new RuntimeException("Producto requerido no encontrado: {$name}");
-    }
-    $products[$name] = $row;
+$catalogStmt->execute([
+    'tenant_id' => $tenantId,
+]);
+$catalog = $catalogStmt->fetchAll(PDO::FETCH_ASSOC);
+if (count($catalog) < 10) {
+    throw new RuntimeException('Se requieren al menos 10 productos con stock y precio para ejecutar escenarios.');
 }
+
+$catalogAsc = $catalog;
+usort($catalogAsc, static fn (array $a, array $b): int => ((float)$a['price'] <=> (float)$b['price']) ?: strcmp((string)$a['id'], (string)$b['id']));
+
+$reservedProductIds = [];
+$reserveProduct = static function (array $product) use (&$reservedProductIds): array {
+    $reservedProductIds[(string)$product['id']] = true;
+    return $product;
+};
+
+$takeProduct = static function (array $source, callable $predicate) use (&$reservedProductIds, $reserveProduct): array {
+    foreach ($source as $product) {
+        $productId = (string)($product['id'] ?? '');
+        if ($productId === '' || isset($reservedProductIds[$productId])) {
+            continue;
+        }
+        if ($predicate($product)) {
+            return $reserveProduct($product);
+        }
+    }
+
+    throw new RuntimeException('No hay suficientes productos compatibles para construir escenarios de pedidos.');
+};
+
+$takeAnyProduct = static function (array $source) use ($takeProduct): array {
+    return $takeProduct($source, static fn (array $product): bool => true);
+};
+
+$reuseProduct = static function (array $source, callable $predicate): array {
+    foreach ($source as $product) {
+        if ($predicate($product)) {
+            return $product;
+        }
+    }
+
+    throw new RuntimeException('No existe un producto compatible para escenario de validación negativa.');
+};
+
+$productAttributes = static function (array $product): array {
+    $decoded = json_decode((string)($product['attributes'] ?? ''), true);
+    return is_array($decoded) ? $decoded : [];
+};
+
+$productTaxRate = static function (array $product) use ($productAttributes): float {
+    $attributes = $productAttributes($product);
+    $rawValue = $attributes['taxRate'] ?? $attributes['tax_rate'] ?? 0;
+    return is_numeric($rawValue) ? round((float)$rawValue, 2) : 0.0;
+};
+
+$productTaxExempt = static function (array $product) use ($productAttributes): bool {
+    $attributes = $productAttributes($product);
+    $rawValue = strtolower(trim((string)($attributes['taxExempt'] ?? $attributes['tax_exempt'] ?? 'false')));
+    return in_array($rawValue, ['1', 'true', 't', 'yes', 'on'], true);
+};
+
+$premiumA = $takeAnyProduct($catalog);
+$premiumB = $takeAnyProduct($catalog);
+$premiumC = $takeAnyProduct($catalog);
+$premiumD = $takeAnyProduct($catalog);
+$premiumE = $takeAnyProduct($catalog);
+$taxedA = $takeProduct($catalog, static fn (array $product): bool => $productTaxRate($product) > 0 && !$productTaxExempt($product));
+$taxedB = $takeProduct($catalog, static fn (array $product): bool => $productTaxRate($product) > 0 && !$productTaxExempt($product));
+$taxedC = $takeProduct($catalog, static fn (array $product): bool => $productTaxRate($product) > 0 && !$productTaxExempt($product));
+$standardA = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 15);
+$standardB = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 10);
+$standardC = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 5);
+$standardD = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 5);
+$standardE = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 5);
+$canceledProduct = $takeProduct($catalog, static fn (array $product): bool => (float)$product['price'] >= 5);
+$cheapNegative = $reuseProduct($catalogAsc, static fn (array $product): bool => (float)$product['price'] < 30);
+$canceledInitialState = [
+    'id' => (string)$canceledProduct['id'],
+    'name' => (string)$canceledProduct['name'],
+    'quantity' => (int)$canceledProduct['quantity'],
+    'sold' => (int)$canceledProduct['sold'],
+];
 
 $upsertDiscount = $db->prepare('
     INSERT INTO "DiscountCode" (
@@ -151,11 +212,16 @@ $baseAddress = [
     'zip' => '170101',
     'phone' => '0999999999',
     'email' => 'qa@paramascotasec.com',
+    'formattedAddress' => 'Av. Pruebas 123, Quito, Ecuador',
+    'latitude' => -0.088306,
+    'longitude' => -78.490870,
 ];
+
+$runToken = gmdate('YmdHis');
 
 $scenarios = [
     [
-        'id' => 'TST-20260302-001',
+        'id' => "TST-{$runToken}-001",
         'user_idx' => 0,
         'status' => 'delivered',
         'delivery_method' => 'delivery',
@@ -163,12 +229,12 @@ $scenarios = [
         'coupon_code' => null,
         'created_at' => '2026-03-01 10:30:00',
         'items' => [
-            ['name' => 'Abrigo Forrado para Perro', 'qty' => 1],
-            ['name' => 'Set Comederos de Cerámica', 'qty' => 2],
+            ['product' => $premiumA, 'qty' => 1],
+            ['product' => $standardA, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-002',
+        'id' => "TST-{$runToken}-002",
         'user_idx' => 1,
         'status' => 'pending',
         'delivery_method' => 'pickup',
@@ -176,12 +242,12 @@ $scenarios = [
         'coupon_code' => null,
         'created_at' => '2026-03-02 11:00:00',
         'items' => [
-            ['name' => 'Pelota para Perro 3', 'qty' => 3],
-            ['name' => 'Juguete Ratón para Gato', 'qty' => 2],
+            ['product' => $taxedA, 'qty' => 1],
+            ['product' => $taxedB, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-003',
+        'id' => "TST-{$runToken}-003",
         'user_idx' => 2,
         'status' => 'completed',
         'delivery_method' => 'delivery',
@@ -189,12 +255,12 @@ $scenarios = [
         'coupon_code' => 'TEST10',
         'created_at' => '2026-02-15 09:15:00',
         'items' => [
-            ['name' => 'Alimento Premium Royal Canin', 'qty' => 2],
-            ['name' => 'Alimento Natural Milo Kitchen', 'qty' => 1],
+            ['product' => $premiumB, 'qty' => 1],
+            ['product' => $premiumC, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-004',
+        'id' => "TST-{$runToken}-004",
         'user_idx' => 0,
         'status' => 'canceled',
         'delivery_method' => 'delivery',
@@ -202,11 +268,11 @@ $scenarios = [
         'coupon_code' => null,
         'created_at' => '2026-02-20 14:45:00',
         'items' => [
-            ['name' => 'Cama Acogedora para Perro', 'qty' => 1],
+            ['product' => $canceledProduct, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-005',
+        'id' => "TST-{$runToken}-005",
         'user_idx' => 1,
         'status' => 'processing',
         'delivery_method' => 'pickup',
@@ -214,12 +280,12 @@ $scenarios = [
         'coupon_code' => 'FIX5',
         'created_at' => '2026-01-28 08:20:00',
         'items' => [
-            ['name' => 'Correa para Perro', 'qty' => 2],
-            ['name' => 'Arnés Ajustable para Perro', 'qty' => 1],
+            ['product' => $premiumD, 'qty' => 1],
+            ['product' => $premiumE, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-006',
+        'id' => "TST-{$runToken}-006",
         'user_idx' => 2,
         'status' => 'delivered',
         'delivery_method' => 'delivery',
@@ -227,12 +293,12 @@ $scenarios = [
         'coupon_code' => null,
         'created_at' => '2026-03-02 12:40:00',
         'items' => [
-            ['name' => 'Champú Natural para Perro', 'qty' => 4],
-            ['name' => 'Juguete Ratón para Gato', 'qty' => 3],
+            ['product' => $taxedC, 'qty' => 1],
+            ['product' => $standardE, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-007',
+        'id' => "TST-{$runToken}-007",
         'user_idx' => 0,
         'status' => 'pending',
         'delivery_method' => 'delivery',
@@ -241,11 +307,11 @@ $scenarios = [
         'expect_fail' => true,
         'expected_error_contains' => 'no registrado',
         'items' => [
-            ['name' => 'Pelota para Perro 3', 'qty' => 1],
+            ['product' => $cheapNegative, 'qty' => 1],
         ],
     ],
     [
-        'id' => 'TST-20260302-008',
+        'id' => "TST-{$runToken}-008",
         'user_idx' => 1,
         'status' => 'pending',
         'delivery_method' => 'pickup',
@@ -254,7 +320,7 @@ $scenarios = [
         'expect_fail' => true,
         'expected_error_contains' => 'mínimo',
         'items' => [
-            ['name' => 'Pelota para Perro 3', 'qty' => 1],
+            ['product' => $cheapNegative, 'qty' => 1],
         ],
     ],
 ];
@@ -268,7 +334,7 @@ $setCreatedAt = $db->prepare('
 foreach ($scenarios as $scenario) {
     $items = [];
     foreach ($scenario['items'] as $itemDef) {
-        $product = $products[$itemDef['name']];
+        $product = $itemDef['product'];
         $items[] = [
             'product_id' => $product['id'],
             'quantity' => (int)$itemDef['qty'],
@@ -334,6 +400,7 @@ foreach ($scenarios as $scenario) {
             'items_subtotal' => round($itemsSubtotal, 2),
             'vat_subtotal' => round($vatSubtotal, 2),
             'vat_amount' => round($vatAmount, 2),
+            'mixed_vat_rates' => !empty($created['mixed_vat_rates']),
             'shipping' => round($shipping, 2),
             'total' => round($total, 2),
             'created_at' => $scenario['created_at'] ?? ($created['created_at'] ?? null),
@@ -382,9 +449,19 @@ $checkCanceledProduct = $db->prepare('
 ');
 $checkCanceledProduct->execute([
     'tenant_id' => $tenantId,
-    'name' => 'Cama Acogedora para Perro',
+    'name' => $canceledProduct['name'],
 ]);
-$report['validations']['canceled_order_inventory_check'] = $checkCanceledProduct->fetch(PDO::FETCH_ASSOC);
+$canceledCurrentState = $checkCanceledProduct->fetch(PDO::FETCH_ASSOC) ?: [];
+$report['validations']['canceled_order_inventory_check'] = [
+    'product_id' => $canceledInitialState['id'],
+    'name' => $canceledInitialState['name'],
+    'initial_quantity' => $canceledInitialState['quantity'],
+    'current_quantity' => isset($canceledCurrentState['quantity']) ? (int)$canceledCurrentState['quantity'] : null,
+    'initial_sold' => $canceledInitialState['sold'],
+    'current_sold' => isset($canceledCurrentState['sold']) ? (int)$canceledCurrentState['sold'] : null,
+    'quantity_restored' => isset($canceledCurrentState['quantity']) ? ((int)$canceledCurrentState['quantity'] === $canceledInitialState['quantity']) : false,
+    'sold_restored' => isset($canceledCurrentState['sold']) ? ((int)$canceledCurrentState['sold'] === $canceledInitialState['sold']) : false,
+];
 
 $discountStateStmt = $db->prepare(<<<'SQL'
     SELECT code, is_active, used_count

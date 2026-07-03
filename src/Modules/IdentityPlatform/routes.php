@@ -22,6 +22,7 @@ return [
     ['method' => 'POST', 'path' => '/api/auth/register', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@register', 'capability' => 'users.auth'],
     ['method' => 'POST', 'path' => '/api/auth/request-otp', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@requestOtp', 'capability' => 'users.auth'],
     ['method' => 'POST', 'path' => '/api/auth/verify-otp', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@verifyOtp', 'capability' => 'users.auth'],
+    ['method' => 'POST', 'path' => '/api/auth/access-requests', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@requestAccess', 'capability' => 'users.auth'],
     ['method' => 'POST', 'path' => '/api/auth/password-reset/request', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@requestPasswordReset', 'capability' => 'users.auth'],
     ['method' => 'POST', 'path' => '/api/auth/password-reset/confirm', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@confirmPasswordReset', 'capability' => 'users.auth'],
     ['method' => 'GET', 'path' => '/api/auth/verify', 'handler' => 'App\\Modules\\IdentityPlatform\\Controllers\\AuthController@verify', 'capability' => 'users.auth'],

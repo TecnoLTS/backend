@@ -724,6 +724,23 @@ class ProductController {
         }
     }
 
+    public function adminIndex() {
+        Auth::requireAdmin();
+
+        try {
+            $projection = strtolower(trim((string)($_GET['projection'] ?? 'catalog')));
+            $includeProcurement = in_array($projection, ['inventory', 'procurement', 'financial'], true);
+            $products = $this->productRepository->getAll([
+                'includeUnpublished' => true,
+                'includeProcurement' => $includeProcurement,
+                'includeOutOfStock' => true,
+            ]);
+            Response::json($products);
+        } catch (\Exception $e) {
+            Response::error($e->getMessage(), 500, 'PRODUCTS_ADMIN_LIST_FAILED');
+        }
+    }
+
     public function show($id) {
         try {
             $includeUnpublished = $this->includeUnpublishedFromRequest();
@@ -741,6 +758,26 @@ class ProductController {
             Response::json($product);
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'PRODUCT_FETCH_FAILED');
+        }
+    }
+
+    public function adminShow($id) {
+        Auth::requireAdmin();
+
+        try {
+            $product = $this->productRepository->getById($id, [
+                'includeUnpublished' => true,
+                'includeProcurement' => true,
+                'includeProcurementDetail' => $this->includeProcurementDetailFromRequest(),
+                'includeOutOfStock' => true,
+            ]);
+            if (!$product) {
+                Response::error('Producto no encontrado', 404, 'PRODUCT_NOT_FOUND');
+                return;
+            }
+            Response::json($product);
+        } catch (\Exception $e) {
+            Response::error($e->getMessage(), 500, 'PRODUCT_ADMIN_FETCH_FAILED');
         }
     }
 

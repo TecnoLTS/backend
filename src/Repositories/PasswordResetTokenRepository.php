@@ -37,30 +37,54 @@ class PasswordResetTokenRepository {
         return $this->db->exec($this->rewriteSql($sql));
     }
 
+    private function normalizedTableName(): string {
+        return trim($this->tableName, '"');
+    }
+
+    private function schemaTableExists(): bool {
+        $stmt = $this->db->prepare('SELECT to_regclass(:table_name)');
+        $stmt->execute([
+            'table_name' => sprintf('public."%s"', $this->normalizedTableName()),
+        ]);
+
+        return $stmt->fetchColumn() !== false;
+    }
+
     private function ensureSchema(): void {
         if (self::$schemaEnsured[$this->tableName] ?? false) {
             return;
         }
 
-        $this->exec('
-            CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
-                id text PRIMARY KEY,
-                tenant_id text NOT NULL,
-                user_id text NOT NULL,
-                token_hash text NOT NULL,
-                expires_at timestamp without time zone NOT NULL,
-                used_at timestamp without time zone,
-                request_ip text,
-                request_user_agent text,
-                used_ip text,
-                used_user_agent text,
-                created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-                updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-            )
-        ');
-        $this->exec('CREATE UNIQUE INDEX IF NOT EXISTS "PasswordResetToken_tenant_hash_uidx" ON "PasswordResetToken" (tenant_id, token_hash)');
-        $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_user_idx" ON "PasswordResetToken" (tenant_id, user_id, created_at DESC)');
-        $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_expires_idx" ON "PasswordResetToken" (tenant_id, expires_at)');
+        if ($this->schemaTableExists()) {
+            self::$schemaEnsured[$this->tableName] = true;
+            return;
+        }
+
+        try {
+            $this->exec('
+                CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
+                    id text PRIMARY KEY,
+                    tenant_id text NOT NULL,
+                    user_id text NOT NULL,
+                    token_hash text NOT NULL,
+                    expires_at timestamp without time zone NOT NULL,
+                    used_at timestamp without time zone,
+                    request_ip text,
+                    request_user_agent text,
+                    used_ip text,
+                    used_user_agent text,
+                    created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+                    updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+                )
+            ');
+            $this->exec('CREATE UNIQUE INDEX IF NOT EXISTS "PasswordResetToken_tenant_hash_uidx" ON "PasswordResetToken" (tenant_id, token_hash)');
+            $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_user_idx" ON "PasswordResetToken" (tenant_id, user_id, created_at DESC)');
+            $this->exec('CREATE INDEX IF NOT EXISTS "PasswordResetToken_tenant_expires_idx" ON "PasswordResetToken" (tenant_id, expires_at)');
+        } catch (\Throwable $exception) {
+            if (!$this->schemaTableExists()) {
+                throw $exception;
+            }
+        }
 
         self::$schemaEnsured[$this->tableName] = true;
     }
