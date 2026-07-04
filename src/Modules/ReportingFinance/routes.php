@@ -2,7 +2,10 @@
 
 return [
     ['method' => 'GET', 'path' => '/api/admin/dashboard/stats', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\DashboardController@stats', 'capability' => 'admin.reporting'],
-    ['method' => 'GET', 'path' => '/api/admin/report', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\DashboardController@report', 'capability' => 'admin.reporting'],
+    ['method' => 'GET', 'path' => '/api/admin/reports/general', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\GeneralReportController@show', 'capability' => 'admin.reporting'],
+    ['method' => 'GET', 'path' => '/api/admin/reports/product-ranking', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\DashboardProjectionController@productRanking', 'capability' => 'admin.reporting'],
+    ['method' => 'GET', 'path' => '/api/admin/reports/operational-alerts', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\DashboardProjectionController@operationalAlerts', 'capability' => 'admin.reporting'],
+    ['method' => 'GET', 'path' => '/api/admin/reports/financial-overview', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\DashboardProjectionController@financialOverview', 'capability' => 'admin.reporting'],
     ['method' => 'GET', 'path' => '/api/admin/inventory/intelligence', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\InventoryIntelligenceController@intelligence', 'capability' => 'admin.reporting'],
     ['method' => 'GET', 'path' => '/api/admin/expenses', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\BusinessExpenseController@index', 'capability' => 'admin.finance'],
     ['method' => 'POST', 'path' => '/api/admin/expenses', 'handler' => 'App\\Modules\\ReportingFinance\\Controllers\\BusinessExpenseController@store', 'capability' => 'admin.finance'],

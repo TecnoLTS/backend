@@ -91,6 +91,40 @@ class BusinessIntelligenceService {
         ];
     }
 
+    public function getProductRankingStats(?string $selectedMonth = null, ?string $selectedDate = null): array {
+        return [
+            'businessMetrics' => [
+                'productSalesRanking' => $this->orderRepo->getProductSalesRanking($selectedMonth, $selectedDate),
+            ],
+        ];
+    }
+
+    public function getOperationalAlertStats(): array {
+        $inventoryService = new InventoryIntelligenceService();
+        $inventoryDeepDive = $inventoryService->toInventoryDeepDive($inventoryService->getIntelligence());
+        $salesProgress = $this->orderRepo->getSalesProgress();
+        $productAnalysis = $this->productAnalytics();
+        $ordersByStatus = $this->orderRepo->getOrdersByStatus();
+        $alerts = $this->generateAlerts($inventoryDeepDive, $salesProgress, $productAnalysis, $ordersByStatus);
+
+        return [
+            'businessMetrics' => [
+                'strategicAlerts' => $alerts,
+            ],
+            'strategicAlerts' => $alerts,
+        ];
+    }
+
+    public function getFinancialOverviewStats(): array {
+        return [
+            'businessMetrics' => [
+                'financialTrends' => $this->orderRepo->getFinancialTrends(),
+                'salesSummary' => $this->orderRepo->getSalesSummary(),
+                'profitStats' => $this->profitAnalysis(),
+            ],
+        ];
+    }
+
     private function profitAnalysis() {
         $raw = $this->orderRepo->getProfitStats();
         $grossProfit = (float)($raw['gross_profit'] ?? $raw['profit'] ?? 0);

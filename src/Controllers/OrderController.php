@@ -128,7 +128,15 @@ class OrderController {
         try {
             $isAdmin = (($user['role'] ?? 'customer') === 'admin');
             if ($isAdmin) {
-                $orders = $this->orderRepository->getAll();
+                $limit = filter_var($_GET['limit'] ?? 100, FILTER_VALIDATE_INT, [
+                    'options' => [
+                        'min_range' => 1,
+                        'max_range' => 300,
+                    ],
+                ]);
+                $orders = $this->orderRepository->getAll([
+                    'limit' => $limit === false ? 100 : (int)$limit,
+                ]);
             } else {
                 if (empty($user['sub'])) {
                     Response::error('No autorizado', 403, 'AUTH_FORBIDDEN');

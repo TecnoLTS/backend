@@ -28,7 +28,15 @@ class OrderRepository {
         $this->discountRepository = new DiscountRepository($this->db);
     }
 
-    public function getAll() {
+    public function getAll(array $options = []) {
+        $limit = filter_var($options['limit'] ?? 100, FILTER_VALIDATE_INT, [
+            'options' => [
+                'min_range' => 1,
+                'max_range' => 300,
+            ],
+        ]);
+        $safeLimit = $limit === false ? 100 : (int)$limit;
+
         // Lean but operationally useful list for admin table.
         $stmt = $this->db->prepare('
             SELECT
@@ -71,8 +79,11 @@ class OrderRepository {
                 u.name,
                 u.email
             ORDER BY o.created_at DESC
+            LIMIT :limit
         ');
-        $stmt->execute(['tenant_id' => $this->getTenantId()]);
+        $stmt->bindValue(':tenant_id', $this->getTenantId(), PDO::PARAM_STR);
+        $stmt->bindValue(':limit', $safeLimit, PDO::PARAM_INT);
+        $stmt->execute();
         return $stmt->fetchAll();
     }
 
@@ -1497,6 +1508,33 @@ class OrderRepository {
         ];
     }
 
+    public function getFinancialTrendsForPeriod(array $period, ?string $scope = null): array {
+        try {
+            (new BusinessExpenseRepository())->summary();
+        } catch (\Throwable $e) {
+            // Trend generation should not fail the report if expenses are temporarily unavailable.
+        }
+
+        $startDate = (string)($period['start_date'] ?? '');
+        $endDate = (string)($period['end_date'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate)) {
+            $startDate = (new \DateTimeImmutable('first day of this month', new \DateTimeZone('America/Guayaquil')))->format('Y-m-d');
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate)) {
+            $endDate = (new \DateTimeImmutable('today', new \DateTimeZone('America/Guayaquil')))->format('Y-m-d');
+        }
+
+        $grain = in_array($scope, ['year', 'historical'], true) ? 'month' : 'day';
+        $rows = $this->getFinancialTrendRows($grain, $startDate, $endDate);
+
+        return [
+            'start_date' => $startDate,
+            'daily' => $grain === 'day' ? $rows : [],
+            'monthly' => $grain === 'month' ? $rows : [],
+            'totals' => $this->summarizeFinancialTrendRows($rows),
+        ];
+    }
+
     private function resolveFinancialTrendStartDate(): string {
         $stmt = $this->db->prepare("
             SELECT MIN(activity_date) AS first_activity
@@ -1528,11 +1566,17 @@ class OrderRepository {
         return (new \DateTimeImmutable('first day of this month', new \DateTimeZone('America/Guayaquil')))->format('Y-m-d');
     }
 
-    private function getFinancialTrendRows(string $grain, string $startDate): array {
+    private function getFinancialTrendRows(string $grain, string $startDate, ?string $endDate = null): array {
         $isMonthly = $grain === 'month';
-        $seriesSql = $isMonthly
-            ? "generate_series(DATE_TRUNC('month', CAST(:start_date AS date)), DATE_TRUNC('month', (NOW() AT TIME ZONE 'America/Guayaquil')::date), INTERVAL '1 month')"
-            : "generate_series(GREATEST(CAST(:start_date AS date), (NOW() AT TIME ZONE 'America/Guayaquil')::date - INTERVAL '89 days'), (NOW() AT TIME ZONE 'America/Guayaquil')::date, INTERVAL '1 day')";
+        if ($endDate !== null) {
+            $seriesSql = $isMonthly
+                ? "generate_series(DATE_TRUNC('month', CAST(:start_date AS date)), DATE_TRUNC('month', CAST(:end_date AS date)), INTERVAL '1 month')"
+                : "generate_series(CAST(:start_date AS date), CAST(:end_date AS date), INTERVAL '1 day')";
+        } else {
+            $seriesSql = $isMonthly
+                ? "generate_series(DATE_TRUNC('month', CAST(:start_date AS date)), DATE_TRUNC('month', (NOW() AT TIME ZONE 'America/Guayaquil')::date), INTERVAL '1 month')"
+                : "generate_series(GREATEST(CAST(:start_date AS date), (NOW() AT TIME ZONE 'America/Guayaquil')::date - INTERVAL '89 days'), (NOW() AT TIME ZONE 'America/Guayaquil')::date, INTERVAL '1 day')";
+        }
         $periodSelect = $isMonthly ? "TO_CHAR(s.period_start, 'YYYY-MM')" : "TO_CHAR(s.period_start, 'YYYY-MM-DD')";
         $salesGroup = $isMonthly
             ? "DATE_TRUNC('month', (o.created_at AT TIME ZONE 'America/Guayaquil')::date)::date"
@@ -1642,10 +1686,14 @@ class OrderRepository {
             LEFT JOIN adjustments a ON a.period_start = s.period_start
             ORDER BY s.period_start ASC
         ");
-        $stmt->execute([
+        $params = [
             'tenant_id' => $this->getTenantId(),
             'start_date' => $startDate,
-        ]);
+        ];
+        if ($endDate !== null) {
+            $params['end_date'] = $endDate;
+        }
+        $stmt->execute($params);
 
         return array_map(function (array $row): array {
             $net = (float)($row['net_sales'] ?? 0);
@@ -2046,8 +2094,17 @@ class OrderRepository {
         ];
     }
 
-    public function getReportPeriodSummary(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null, ?string $selectedYear = null): array {
+    public function getReportPeriodSummary(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null, ?string $selectedYear = null, array $options = []): array {
         $tenantId = $this->getTenantId();
+        $projection = (string)($options['projection'] ?? 'export');
+        $screenProjection = $projection === 'screen';
+        $ordersLimitValue = $this->reportLimitValue($options['orders_limit'] ?? 5);
+        $productsLimitValue = $this->reportLimitValue($options['products_limit'] ?? 8);
+        $categoriesLimitValue = $this->reportLimitValue($options['categories_limit'] ?? 8);
+        $ordersLimit = $screenProjection ? 'LIMIT ' . $ordersLimitValue : '';
+        $productsLimit = $screenProjection ? 'LIMIT ' . $productsLimitValue : '';
+        $categoriesLimit = $screenProjection ? 'LIMIT ' . $categoriesLimitValue : '';
+        $includeFinancialTrends = (bool)($options['include_financial_trends'] ?? false);
         $timezone = new \DateTimeZone('America/Guayaquil');
         if ($scope === 'historical') {
             $period = [
@@ -2141,6 +2198,7 @@ class OrderRepository {
               AND (o.created_at AT TIME ZONE 'America/Guayaquil')::date >= CAST(:start_date AS date)
               AND (o.created_at AT TIME ZONE 'America/Guayaquil')::date < CAST(:end_exclusive AS date)
             ORDER BY o.created_at DESC
+            {$ordersLimit}
         ");
         $ordersStmt->execute([
             'tenant_id' => $tenantId,
@@ -2255,6 +2313,8 @@ class OrderRepository {
                     STRING_AGG(DISTINCT order_id::text, ', ' ORDER BY order_id::text) AS order_refs
                 FROM distributed_lines
                 GROUP BY product_group_key, category
+                ORDER BY net_revenue DESC, units_sold DESC
+                {$productsLimit}
             ),
             category_rows AS (
                 SELECT
@@ -2269,6 +2329,8 @@ class OrderRepository {
                     STRING_AGG(DISTINCT order_id::text, ', ' ORDER BY order_id::text) AS order_refs
                 FROM distributed_lines
                 GROUP BY category
+                ORDER BY net_revenue DESC, units_sold DESC
+                {$categoriesLimit}
             )
             SELECT 'product' AS row_type, product_id, legacy_id, product_name, category, sku, orders_count, units_sold, gross_revenue, net_revenue, vat_amount, shipping_amount, cost, order_refs
             FROM product_rows
@@ -2324,10 +2386,30 @@ class OrderRepository {
             'expenses' => $snapshot['expenses'] ?? [],
             'adjustments' => $snapshot['adjustments'] ?? [],
             'purchase_invoices' => $purchaseInvoiceSummary,
+            'meta' => [
+                'projection' => $screenProjection ? 'screen' : 'export',
+                'limits' => [
+                    'orders' => $screenProjection ? $ordersLimitValue : null,
+                    'products' => $screenProjection ? $productsLimitValue : null,
+                    'categories' => $screenProjection ? $categoriesLimitValue : null,
+                ],
+            ],
+            'financial_trends' => $includeFinancialTrends ? $this->getFinancialTrendsForPeriod($period, $scope) : null,
             'orders' => $orders,
             'products' => $products,
             'categories' => $categories,
         ];
+    }
+
+    private function reportLimitValue(mixed $value): int {
+        $limit = filter_var($value, FILTER_VALIDATE_INT, [
+            'options' => [
+                'min_range' => 1,
+                'max_range' => 100,
+            ],
+        ]);
+
+        return $limit === false ? 10 : (int)$limit;
     }
 
     public function getProductSalesRanking(?string $selectedMonth = null, ?string $selectedDate = null) {
