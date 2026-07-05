@@ -1039,7 +1039,7 @@ final class LoyaltyRepository {
         [$from, $to] = $this->dateRange($filters);
         $params = ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to];
 
-        return match ($reportKey) {
+        $report = match ($reportKey) {
             'executive-summary' => [
                 'key' => $reportKey,
                 'title' => 'Resumen ejecutivo',
@@ -1157,6 +1157,314 @@ final class LoyaltyRepository {
             ],
             default => throw new \InvalidArgumentException('Reporte no disponible.'),
         };
+
+        return $this->localizeReport($report);
+    }
+
+    private function localizeReport(array $report): array {
+        if (is_array($report['metrics'] ?? null)) {
+            $localizedMetrics = [];
+            foreach ($report['metrics'] as $key => $value) {
+                $localizedMetrics[$this->reportMetricLabel((string)$key)] = $value;
+            }
+            $report['metrics'] = $localizedMetrics;
+        }
+
+        if (is_array($report['rows'] ?? null)) {
+            $report['rows'] = array_map(fn($row) => $this->localizeReportRow((array)$row), $report['rows']);
+        }
+
+        return $report;
+    }
+
+    private function localizeReportRow(array $row): array {
+        $localized = [];
+        foreach ($row as $key => $value) {
+            if (in_array((string)$key, ['id', 'tenant_id', 'program_id', 'member_id', 'created_by_user_id', 'api_client_id'], true)) {
+                continue;
+            }
+            $localized[$this->reportColumnLabel((string)$key)] = $this->reportValue((string)$key, $value);
+        }
+
+        return $localized;
+    }
+
+    private function reportMetricLabel(string $key): string {
+        return [
+            'activeMembers' => 'Socios activos',
+            'newMembers' => 'Socios nuevos',
+            'pointsIssued' => 'Puntos emitidos',
+            'pointsRedeemed' => 'Puntos canjeados',
+            'availableLiabilityPoints' => 'Saldo pendiente',
+        ][$key] ?? $this->humanizeKey($key);
+    }
+
+    private function reportColumnLabel(string $key): string {
+        return [
+            'date' => 'Fecha',
+            'label' => 'Dia',
+            'created_at' => 'Fecha',
+            'updated_at' => 'Actualizado',
+            'last_used_at' => 'Ultimo uso',
+            'account_id' => 'Cuenta',
+            'account_name' => 'Socio',
+            'member_id' => 'Socio',
+            'entry_type' => 'Movimiento',
+            'points' => 'Puntos',
+            'balance' => 'Saldo',
+            'balance_after' => 'Saldo posterior',
+            'ledger_balance' => 'Saldo libro mayor',
+            'difference' => 'Diferencia',
+            'reference' => 'Referencia',
+            'source' => 'Canal',
+            'metadata' => 'Detalle',
+            'points_issued' => 'Puntos emitidos',
+            'points_redeemed' => 'Puntos canjeados',
+            'purchases' => 'Compras',
+            'redemptions' => 'Canjes',
+            'tier' => 'Nivel',
+            'status' => 'Estado',
+            'wallet_platform' => 'Tarjeta',
+            'pass_status' => 'Estado de tarjeta',
+            'total' => 'Total',
+            'reward' => 'Premio',
+            'stock' => 'Stock',
+            'name' => 'Nombre',
+            'scopes' => 'Permisos',
+            'rate_limit_per_minute' => 'Limite por minuto',
+            'requests' => 'Solicitudes',
+            'severity' => 'Prioridad',
+            'event_type' => 'Evento',
+            'message' => 'Mensaje',
+            'created_by_user_id' => 'Usuario',
+            'before_state' => 'Antes',
+            'after_state' => 'Despues',
+        ][$key] ?? $this->humanizeKey($key);
+    }
+
+    private function reportValue(string $key, $value) {
+        if ($value === null || $value === '') {
+            return 'Sin dato';
+        }
+
+        if (in_array($key, ['metadata', 'before_state', 'after_state', 'settings', 'benefits', 'last_payload', 'response_payload'], true)) {
+            return $this->metadataSummary($value);
+        }
+
+        if ($key === 'entry_type') {
+            return $this->movementLabel((string)$value);
+        }
+
+        if ($key === 'reference') {
+            return $this->referenceLabel((string)$value);
+        }
+
+        if (in_array($key, ['source'], true)) {
+            return $this->channelLabel((string)$value);
+        }
+
+        if ($key === 'wallet_platform') {
+            return $this->walletLabel((string)$value);
+        }
+
+        if ($key === 'pass_status') {
+            return $this->passStatusLabel((string)$value);
+        }
+
+        if ($key === 'status') {
+            return $this->statusLabel((string)$value);
+        }
+
+        if ($key === 'severity') {
+            return $this->severityLabel((string)$value);
+        }
+
+        if ($key === 'event_type') {
+            return $this->eventTypeLabel((string)$value);
+        }
+
+        if ($key === 'scopes' && is_array($value)) {
+            return $value === [] ? 'Sin permisos' : implode(', ', array_map([$this, 'scopeLabel'], $value));
+        }
+
+        if (is_array($value) || is_object($value)) {
+            return $this->metadataSummary($value);
+        }
+
+        return $value;
+    }
+
+    private function movementLabel(string $value): string {
+        return [
+            'purchase' => 'Compra',
+            'redemption' => 'Canje',
+            'adjustment' => 'Ajuste',
+            'reversal' => 'Reversa',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function channelLabel(string $value): string {
+        return [
+            'pos' => 'Caja',
+            'dashboard' => 'Panel administrativo',
+            'api' => 'API externa',
+            'external' => 'Sistema externo',
+            'system' => 'Sistema',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function referenceLabel(string $value): string {
+        foreach ([
+            'redemption_' => 'Canje',
+            'adjustment_' => 'Ajuste',
+            'reversal_' => 'Reversa',
+        ] as $prefix => $label) {
+            if (str_starts_with($value, $prefix)) {
+                return $label . ' ' . strtoupper(substr($value, strlen($prefix)));
+            }
+        }
+
+        return $value;
+    }
+
+    private function walletLabel(string $value): string {
+        return [
+            'google' => 'Android',
+            'apple' => 'iPhone',
+            'none' => 'Sin tarjeta',
+            'sin tarjeta' => 'Sin tarjeta',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function passStatusLabel(string $value): string {
+        return [
+            'ready-for-issuer' => 'Lista para emitir',
+            'issued' => 'Emitida',
+            'active' => 'Activa',
+            'inactive' => 'Inactiva',
+            'revoked' => 'Revocada',
+            'sin tarjeta' => 'Sin tarjeta',
+        ][$value] ?? $this->statusLabel($value);
+    }
+
+    private function statusLabel(string $value): string {
+        return [
+            'active' => 'Activo',
+            'inactive' => 'Inactivo',
+            'blocked' => 'Bloqueado',
+            'approved' => 'Aprobado',
+            'cancelled' => 'Cancelado',
+            'deleted' => 'Eliminado',
+            'revoked' => 'Revocado',
+            'open' => 'Abierto',
+            'resolved' => 'Resuelto',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function severityLabel(string $value): string {
+        return [
+            'critical' => 'Critica',
+            'high' => 'Alta',
+            'medium' => 'Media',
+            'low' => 'Baja',
+            'info' => 'Informativa',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function eventTypeLabel(string $value): string {
+        return [
+            'duplicate_invoice' => 'Factura duplicada',
+            'negative_balance' => 'Saldo negativo',
+            'missing_wallet' => 'Sin tarjeta digital',
+            'daily_redemption_limit' => 'Limite diario de canjes',
+            'daily_reward_limit' => 'Limite diario por premio',
+            'out_of_stock' => 'Premio sin stock',
+            'insufficient_points' => 'Puntos insuficientes',
+            'blocked_member' => 'Socio bloqueado',
+            'member_blocked' => 'Socio bloqueado',
+            'rule_update' => 'Cambio de reglas',
+            'manual_adjustment' => 'Ajuste manual',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function scopeLabel(string $value): string {
+        return [
+            'points:write' => 'Registrar puntos',
+            'points:read' => 'Consultar puntos',
+            'redemptions:write' => 'Registrar canjes',
+            'members:read' => 'Consultar socios',
+            'members:write' => 'Administrar socios',
+        ][$value] ?? $this->humanizeKey($value);
+    }
+
+    private function metadataSummary($value): string {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            $value = is_array($decoded) ? $decoded : trim($value);
+        }
+
+        if (!is_array($value)) {
+            return $value === '' || $value === null ? 'Sin detalle' : (string)$value;
+        }
+
+        if ($value === []) {
+            return 'Sin detalle';
+        }
+
+        $parts = [];
+        foreach ($value as $key => $item) {
+            if ($item === null || $item === '') {
+                continue;
+            }
+
+            $parts[] = $this->metadataKeyLabel((string)$key) . ': ' . $this->metadataValue($item);
+        }
+
+        return $parts === [] ? 'Sin detalle' : implode(' | ', $parts);
+    }
+
+    private function metadataKeyLabel(string $key): string {
+        return [
+            'rewardId' => 'Premio',
+            'rewardName' => 'Premio',
+            'invoiceAmount' => 'Monto factura',
+            'invoiceNumber' => 'Factura',
+            'store' => 'Sucursal',
+            'reason' => 'Motivo',
+            'evidence' => 'Evidencia',
+            'originalPoints' => 'Puntos originales',
+            'pointsReversed' => 'Puntos reversados',
+            'requestedBy' => 'Solicitado por',
+            'memberId' => 'Socio',
+            'accountId' => 'Cuenta',
+            'walletPlatform' => 'Tarjeta',
+            'source' => 'Canal',
+            'channel' => 'Canal',
+        ][$key] ?? $this->humanizeKey($key);
+    }
+
+    private function metadataValue($value): string {
+        if (is_array($value) || is_object($value)) {
+            return $this->metadataSummary((array)$value);
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'Si' : 'No';
+        }
+
+        if (is_string($value)) {
+            if (in_array($value, ['purchase', 'redemption', 'adjustment', 'reversal'], true)) {
+                return $this->movementLabel($value);
+            }
+            if (in_array($value, ['pos', 'dashboard', 'api', 'external', 'system'], true)) {
+                return $this->channelLabel($value);
+            }
+            if (in_array($value, ['google', 'apple', 'none'], true)) {
+                return $this->walletLabel($value);
+            }
+        }
+
+        return (string)$value;
     }
 
     public function reportsCatalog(): array {
@@ -1164,7 +1472,7 @@ final class LoyaltyRepository {
             ['key' => 'executive-summary', 'name' => 'Resumen ejecutivo', 'purpose' => 'Muestra salud general, puntos emitidos, canjes y pasivo de puntos.'],
             ['key' => 'point-activity', 'name' => 'Actividad de puntos', 'purpose' => 'Detalle de compras, canjes, ajustes y reversas.'],
             ['key' => 'members-tiers', 'name' => 'Socios y niveles', 'purpose' => 'Distribucion por Bronce, Plata, Oro, estado y tarjeta.'],
-            ['key' => 'card-adoption', 'name' => 'Tarjetas digitales', 'purpose' => 'Adopcion Android/iPhone y pases listos para issuer.'],
+            ['key' => 'card-adoption', 'name' => 'Tarjetas digitales', 'purpose' => 'Adopcion Android/iPhone y pases listos para emitir.'],
             ['key' => 'redemptions-rewards', 'name' => 'Canjes y premios', 'purpose' => 'Premios mas usados, puntos canjeados y stock.'],
             ['key' => 'risk-events', 'name' => 'Riesgo y antifraude', 'purpose' => 'Bloqueos por duplicados, saldo, tarjeta o limites.'],
             ['key' => 'audit-events', 'name' => 'Auditoria', 'purpose' => 'Cambios de reglas, ajustes, reversas y acciones administrativas.'],
@@ -1180,29 +1488,29 @@ final class LoyaltyRepository {
             throw new \RuntimeException('No se pudo preparar el archivo de exportacion.');
         }
 
-        fputcsv($handle, ['Reporte', (string)($report['title'] ?? $reportKey)]);
-        fputcsv($handle, ['Periodo desde', (string)($report['period']['from'] ?? '')]);
-        fputcsv($handle, ['Periodo hasta', (string)($report['period']['to'] ?? '')]);
-        fputcsv($handle, []);
+        $this->writeCsvLine($handle, ['Reporte', (string)($report['title'] ?? $reportKey)]);
+        $this->writeCsvLine($handle, ['Periodo desde', (string)($report['period']['from'] ?? '')]);
+        $this->writeCsvLine($handle, ['Periodo hasta', (string)($report['period']['to'] ?? '')]);
+        $this->writeCsvLine($handle, []);
 
         $metrics = is_array($report['metrics'] ?? null) ? $report['metrics'] : [];
         if ($metrics !== []) {
-            fputcsv($handle, ['Indicador', 'Valor']);
+            $this->writeCsvLine($handle, ['Indicador', 'Valor']);
             foreach ($metrics as $key => $value) {
-                fputcsv($handle, [$this->humanizeKey((string)$key), $this->csvValue($value)]);
+                $this->writeCsvLine($handle, [$this->humanizeKey((string)$key), $this->csvValue($value)]);
             }
-            fputcsv($handle, []);
+            $this->writeCsvLine($handle, []);
         }
 
         $rows = is_array($report['rows'] ?? null) ? $report['rows'] : [];
         if ($rows === []) {
-            fputcsv($handle, ['Sin datos para el periodo seleccionado']);
+            $this->writeCsvLine($handle, ['Sin datos para el periodo seleccionado']);
         } else {
             $columns = array_keys((array)$rows[0]);
-            fputcsv($handle, array_map(fn($column) => $this->humanizeKey((string)$column), $columns));
+            $this->writeCsvLine($handle, array_map(fn($column) => $this->humanizeKey((string)$column), $columns));
             foreach ($rows as $row) {
                 $row = (array)$row;
-                fputcsv($handle, array_map(fn($column) => $this->csvValue($row[$column] ?? null), $columns));
+                $this->writeCsvLine($handle, array_map(fn($column) => $this->csvValue($row[$column] ?? null), $columns));
             }
         }
 
@@ -2164,10 +2472,10 @@ final class LoyaltyRepository {
         }
 
         $members = [
-            ['Maria Hidalgo', 'maria.hidalgo@example.com', 'FID-1001', 'Oro', 'google', 12450, 149.90],
-            ['Carlos Mejia', 'carlos.mejia@example.com', 'FID-1002', 'Plata', 'apple', 8120, 82.40],
-            ['Ana Salazar', 'ana.salazar@example.com', 'FID-1003', 'Bronce', 'none', 3680, 45.10],
-            ['Daniel Castro', 'daniel.castro@example.com', 'FID-1004', 'Plata', 'google', 5940, 63.75],
+            ['Mariana Hidalgo', 'mariana.hidalgo@andesshop.ec', 'FID-1001', 'Oro', 'google', 12450, 149.90],
+            ['Carlos Mejia', 'carlos.mejia@marketquito.ec', 'FID-1002', 'Plata', 'apple', 8120, 82.40],
+            ['Ana Salazar', 'ana.salazar@familiasalazar.ec', 'FID-1003', 'Bronce', 'none', 3680, 45.10],
+            ['Daniel Castro', 'daniel.castro@castroretail.ec', 'FID-1004', 'Plata', 'google', 5940, 63.75],
         ];
         foreach ($members as [$name, $email, $accountId, $tier, $wallet, $points, $amount]) {
             $memberId = $this->id('member');
@@ -2213,17 +2521,17 @@ final class LoyaltyRepository {
                     'entry_type' => 'purchase',
                     'points' => $points,
                     'balance_after' => $points,
-                    'reference' => 'FAC-DEMO-' . substr($accountId, -4),
-                    'source' => 'demo',
-                    'metadata' => json_encode(['invoiceAmount' => $amount, 'invoiceNumber' => 'FAC-DEMO-' . substr($accountId, -4)]),
+                    'reference' => '001-001-' . str_pad(substr($accountId, -4), 9, '0', STR_PAD_LEFT),
+                    'source' => 'pos',
+                    'metadata' => json_encode(['invoiceAmount' => $amount, 'invoiceNumber' => '001-001-' . str_pad(substr($accountId, -4), 9, '0', STR_PAD_LEFT), 'store' => 'Sucursal Norte']),
                 ]
             );
         }
 
         foreach ([
-            ['Descuento $10', 'Cupon aplicable en la siguiente compra.', 1000, 25],
-            ['Envio gratis', 'Envio sin costo en zona configurada.', 450, 100],
-            ['Producto sorpresa', 'Premio promocional definido por el comercio.', 1800, 12],
+            ['Bono de compra $10', 'Credito comercial aplicable en la siguiente factura.', 1000, 25],
+            ['Envio a domicilio sin costo', 'Entrega gratis dentro de la zona configurada.', 450, 100],
+            ['Producto seleccionado del mes', 'Producto promocional definido por el comercio.', 1800, 12],
         ] as [$name, $description, $pointsCost, $stock]) {
             $this->execute(
                 'INSERT INTO loyalty_rewards (id, tenant_id, program_id, name, description, points_cost, stock, status)
@@ -2246,10 +2554,10 @@ final class LoyaltyRepository {
 
     private function ensureDemoEnhancements(string $tenantId, array $program): void {
         foreach ([
-            ['Lucia Paredes', 'lucia.paredes@example.com', 'FID-1005', 'Oro', 'apple', 15320, 120.30],
-            ['Jorge Andrade', 'jorge.andrade@example.com', 'FID-1006', 'Bronce', 'none', 980, 18.75],
-            ['Paola Vera', 'paola.vera@example.com', 'FID-1007', 'Plata', 'google', 6420, 70.25],
-            ['Rafael Cardenas', 'rafael.cardenas@example.com', 'FID-1008', 'Bronce', 'none', 240, 12.00],
+            ['Lucia Paredes', 'lucia.paredes@paredesstore.ec', 'FID-1005', 'Oro', 'apple', 15320, 120.30],
+            ['Jorge Andrade', 'jorge.andrade@andradehogar.ec', 'FID-1006', 'Bronce', 'none', 980, 18.75],
+            ['Paola Vera', 'paola.vera@veracompras.ec', 'FID-1007', 'Plata', 'google', 6420, 70.25],
+            ['Rafael Cardenas', 'rafael.cardenas@cardenas.ec', 'FID-1008', 'Bronce', 'none', 240, 12.00],
         ] as [$name, $email, $accountId, $tier, $wallet, $points, $amount]) {
             $exists = (int)$this->scalar(
                 'SELECT COUNT(*) FROM loyalty_members WHERE tenant_id = :tenant_id AND account_id = :account_id',
@@ -2302,17 +2610,17 @@ final class LoyaltyRepository {
                     'entry_type' => 'purchase',
                     'points' => $points,
                     'balance_after' => $points,
-                    'reference' => 'FAC-DEMO-' . substr($accountId, -4),
-                    'source' => 'demo',
-                    'metadata' => json_encode(['invoiceAmount' => $amount, 'invoiceNumber' => 'FAC-DEMO-' . substr($accountId, -4)]),
+                    'reference' => '001-002-' . str_pad(substr($accountId, -4), 9, '0', STR_PAD_LEFT),
+                    'source' => 'pos',
+                    'metadata' => json_encode(['invoiceAmount' => $amount, 'invoiceNumber' => '001-002-' . str_pad(substr($accountId, -4), 9, '0', STR_PAD_LEFT), 'store' => 'Sucursal Cumbaya']),
                 ]
             );
         }
 
         foreach ([
-            ['Cafe gratis', 'Beneficio para punto fisico o cafeteria aliada.', 300, 50],
-            ['Upgrade VIP', 'Sube al socio a beneficios VIP por 30 dias.', 2500, 8],
-            ['Cashback $5', 'Credito comercial aplicable en la siguiente factura.', 700, 40],
+            ['Cafe de cortesia', 'Beneficio para punto fisico o cafeteria aliada.', 300, 50],
+            ['Atencion preferente 30 dias', 'Activa prioridad de atencion para socios frecuentes.', 2500, 8],
+            ['Bono de compra $5', 'Credito comercial aplicable en la siguiente factura.', 700, 40],
             ['Experiencia premium', 'Premio de alto valor para clientes Oro.', 5000, 4],
         ] as [$name, $description, $pointsCost, $stock]) {
             $exists = (int)$this->scalar(
@@ -2340,8 +2648,8 @@ final class LoyaltyRepository {
 
         $redemptions = (int)$this->scalar('SELECT COUNT(*) FROM loyalty_redemptions WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
         if ($redemptions === 0) {
-            $this->seedDemoRedemption($tenantId, 'FID-1001', 'Envio gratis');
-            $this->seedDemoRedemption($tenantId, 'FID-1002', 'Cafe gratis');
+            $this->seedDemoRedemption($tenantId, 'FID-1001', 'Envio a domicilio sin costo');
+            $this->seedDemoRedemption($tenantId, 'FID-1002', 'Cafe de cortesia');
         }
 
         $this->execute(
@@ -2468,6 +2776,10 @@ final class LoyaltyRepository {
         $key = str_replace(['_', '-'], ' ', $key);
 
         return mb_convert_case(trim($key), MB_CASE_TITLE, 'UTF-8');
+    }
+
+    private function writeCsvLine($handle, array $fields): void {
+        fputcsv($handle, $fields, ',', '"', '');
     }
 
     private function csvValue($value): string {
