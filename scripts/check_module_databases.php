@@ -65,6 +65,15 @@ const MODULE_OWNER_TABLES = [
         'EmailOutbox',
         'EmailDeliveryLog',
     ],
+    'loyalty-rewards' => [
+        'loyalty_programs',
+        'loyalty_members',
+        'loyalty_point_accounts',
+        'loyalty_point_ledger',
+        'loyalty_rewards',
+        'loyalty_redemptions',
+        'loyalty_wallet_passes',
+    ],
 ];
 
 const MODULE_CONNECTIONS = [
@@ -77,6 +86,8 @@ const MODULE_CONNECTIONS = [
     'reporting-finance' => ['database' => 'ecommerce', 'owner' => 'reporting-finance'],
     'mailer-service' => ['database' => 'dashboard', 'owner' => 'mailer-service'],
     'email-service' => ['database' => 'dashboard', 'owner' => 'mailer-service'],
+    'loyalty-rewards' => ['database' => 'loyalty', 'owner' => 'loyalty-rewards'],
+    'loyalty-points' => ['database' => 'loyalty', 'owner' => 'loyalty-rewards'],
 ];
 
 const FDW_COMPATIBILITY_TABLES = [
@@ -108,6 +119,13 @@ const FDW_COMPATIBILITY_TABLES = [
     'BusinessExpense',
     'BusinessExpensePayment',
     'ContactMessage',
+    'loyalty_programs',
+    'loyalty_members',
+    'loyalty_point_accounts',
+    'loyalty_point_ledger',
+    'loyalty_rewards',
+    'loyalty_redemptions',
+    'loyalty_wallet_passes',
 ];
 
 const LOCAL_RELKINDS = ['r', 'p'];

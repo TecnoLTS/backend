@@ -30,6 +30,7 @@ $scheme = parse_url($publicBaseUrl, PHP_URL_SCHEME) ?: $env('PUBLIC_SCHEME', 'ht
 $dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,users,ecommerce'));
 $dashboardPlatformAdminEmails = $csv($env('DASHBOARD_PLATFORM_ADMIN_EMAILS', ''));
 $dashboardPlatformAdminDomains = $csv($env('DASHBOARD_PLATFORM_ADMIN_DOMAINS', 'tecnolts.com'));
+$fidepuntosDemoEnabled = !in_array(strtolower($env('FIDEPUNTOS_DEMO_ENABLED', '1')), ['0', 'false', 'no', 'off'], true);
 
 $domains = array_values(array_unique(array_filter([$primaryDomain, ...$aliases])));
 $allowedOrigins = array_values(array_unique(array_map(
@@ -37,7 +38,7 @@ $allowedOrigins = array_values(array_unique(array_map(
     $domains
 )));
 
-return [
+$tenants = [
     $tenantId => [
         'id' => $tenantId,
         'slug' => $tenantSlug,
@@ -60,3 +61,33 @@ return [
         ],
     ]
 ];
+
+if ($fidepuntosDemoEnabled) {
+    $fidepuntosDomain = strtolower($env('FIDEPUNTOS_DEMO_DOMAIN', 'fidepuntos.tecnolts.com'));
+    $fidepuntosScheme = $env('FIDEPUNTOS_DEMO_SCHEME', $scheme);
+    $fidepuntosModules = $csv($env('FIDEPUNTOS_DEMO_MODULES', 'dashboard,users,loyalty-points'));
+    $tenants['fidepuntos'] = [
+        'id' => 'fidepuntos',
+        'slug' => 'fidepuntos',
+        'name' => $env('FIDEPUNTOS_DEMO_NAME', 'Fidepuntos Demo'),
+        'db' => [
+            'database' => $env('DB_DATABASE', 'ecommerce')
+        ],
+        'domains' => [$fidepuntosDomain],
+        'allowed_origins' => ["{$fidepuntosScheme}://{$fidepuntosDomain}"],
+        'app_url' => "{$fidepuntosScheme}://{$fidepuntosDomain}",
+        'public_base_url' => "{$fidepuntosScheme}://{$fidepuntosDomain}",
+        'enabled_modules' => $fidepuntosModules,
+        'platform_admin_emails' => $dashboardPlatformAdminEmails,
+        'platform_admin_domains' => $dashboardPlatformAdminDomains,
+        'contact_email' => $env('FIDEPUNTOS_DEMO_CONTACT_EMAIL', 'fidepuntos@tecnolts.com'),
+        'branding' => [
+            'logo_url' => $env('FIDEPUNTOS_DEMO_LOGO_URL', 'assets/images/logo.png'),
+            'logo_light_url' => $env('FIDEPUNTOS_DEMO_LOGO_LIGHT_URL', 'assets/images/logo-light.png'),
+            'logo_icon_url' => $env('FIDEPUNTOS_DEMO_LOGO_ICON_URL', 'assets/images/logo-icon.png'),
+            'primary_color' => $env('FIDEPUNTOS_DEMO_PRIMARY_COLOR', '#0369a1'),
+        ],
+    ];
+}
+
+return $tenants;

@@ -17,6 +17,7 @@ class TenantAccessService {
         'ecommerce' => ['read', 'create', 'update', 'delete'],
         'users' => ['read', 'create', 'update', 'delete'],
         'billing-sri' => ['read', 'create', 'update'],
+        'loyalty-points' => ['read', 'create', 'update', 'delete'],
         'tenant-admin' => ['read', 'update'],
     ];
 
@@ -337,6 +338,11 @@ class TenantAccessService {
         }
 
         $profile = $this->decodeProfile($user['profile'] ?? null);
+        $explicitType = strtolower(trim((string)($profile['identityType'] ?? $profile['identity_type'] ?? '')));
+        if (in_array($explicitType, ['tenant_staff', 'customer'], true)) {
+            return false;
+        }
+
         $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
         foreach ($roleIds as $roleId) {
             if (in_array($roleId, ['platform_admin', 'superadmin'], true)) {
@@ -474,6 +480,14 @@ class TenantAccessService {
                 'requiresPermission' => true,
                 'permission' => $this->permissionForMethod('email-service', $method),
                 'module' => 'email-service',
+            ];
+        }
+
+        if ($capability === 'loyalty.admin' || str_starts_with($uri, '/api/admin/loyalty')) {
+            return [
+                'requiresPermission' => true,
+                'permission' => $this->permissionForMethod('loyalty-points', $method),
+                'module' => 'loyalty-points',
             ];
         }
 

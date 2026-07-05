@@ -129,10 +129,17 @@ class UserRepository {
     }
 
     public function getByEmail($email) {
+        $email = strtolower(trim((string)$email));
         $stmt = $this->prepare('
             SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, failed_login_attempts, login_locked_until
             FROM "User"
-            WHERE email = :email
+            WHERE (
+                lower(email) = :email
+                OR (
+                    jsonb_typeof(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\') = \'array\'
+                    AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
+                )
+            )
               AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
             ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
             LIMIT 1
@@ -146,10 +153,17 @@ class UserRepository {
     }
 
     public function getByEmailWithOtp($email) {
+        $email = strtolower(trim((string)$email));
         $stmt = $this->prepare('
             SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, otp_code, otp_expires_at, otp_attempts, failed_login_attempts, login_locked_until
             FROM "User"
-            WHERE email = :email
+            WHERE (
+                lower(email) = :email
+                OR (
+                    jsonb_typeof(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\') = \'array\'
+                    AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
+                )
+            )
               AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
             ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
             LIMIT 1

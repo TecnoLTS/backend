@@ -4,6 +4,7 @@ use App\Modules\Billing\Domain\BillingDomain;
 use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use App\Modules\Commerce\Domain\CommerceDomain;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
+use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
 use App\Modules\Mailer\Domain\MailerDomain;
 use App\Modules\ReportingFinance\Domain\ReportingFinanceDomain;
 
@@ -42,6 +43,12 @@ return [
         'aliases' => [MailerDomain::STORE_KEY, 'mailer', 'email-service'],
         'database' => MailerDomain::STORE_KEY,
         'target_database' => MailerDomain::STORE_KEY,
+        'mode' => 'service-group',
+    ],
+    LoyaltyRewardsDomain::KEY => [
+        'aliases' => [LoyaltyRewardsDomain::STORE_KEY, LoyaltyRewardsDomain::PUBLIC_MODULE_KEY, 'fidelizacion', 'rewards-points'],
+        'database' => LoyaltyRewardsDomain::STORE_KEY,
+        'target_database' => LoyaltyRewardsDomain::STORE_KEY,
         'mode' => 'service-group',
     ],
 ];

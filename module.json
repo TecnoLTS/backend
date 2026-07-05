@@ -79,7 +79,8 @@
     "databaseKey": "dashboard",
     "additionalDatabaseKeys": [
       "ecommerce",
-      "facturacion"
+      "facturacion",
+      "loyalty"
     ],
     "boundedContexts": [
       {
@@ -111,6 +112,11 @@
         "key": "mailer-service",
         "summary": "Mensajes de contacto, outbox y auditoria de entregas de correo del backend.",
         "extractionStatus": "service-group-db-internal"
+      },
+      {
+        "key": "loyalty-rewards",
+        "summary": "Programas de puntos, socios, saldos, ledger, canjes y pases wallet del modulo loyalty-points.",
+        "extractionStatus": "service-group-db"
       }
     ],
     "rules": [
@@ -119,7 +125,8 @@
       "Usar IDs estables, snapshots o contratos API para relaciones entre modulos.",
       "Las tablas foraneas FDW son una capa de compatibilidad para consultas existentes, no ownership funcional.",
       "Billing SRI corre dentro del Core API y usa la base logica facturacion como store fiscal.",
-      "Mailer corre dentro del Core API y usa la base logica dashboard para mensajes, outbox y logs."
+      "Mailer corre dentro del Core API y usa la base logica dashboard para mensajes, outbox y logs.",
+      "LoyaltyRewards corre dentro del Core API y usa la base logica loyalty para saldos, ledger, canjes y pases wallet."
     ],
     "identityAccessModel": {
       "owner": "identity-platform",
@@ -235,6 +242,23 @@
         "mailer-operator"
       ],
       "status": "active-internal"
+    },
+    {
+      "moduleKey": "loyalty-points",
+      "databaseKey": "loyalty",
+      "ownsUsers": false,
+      "dependsOnIdentityPlatform": true,
+      "permissions": [
+        "loyalty-points.read",
+        "loyalty-points.create",
+        "loyalty-points.update",
+        "loyalty-points.delete"
+      ],
+      "moduleProfiles": [
+        "loyalty-manager",
+        "cashier"
+      ],
+      "backendDomain": "loyalty-rewards"
     }
   ],
   "dashboardProjection": {
@@ -242,6 +266,7 @@
       "ecommerce",
       "users",
       "billing-sri",
+      "loyalty-points",
       "tenant-admin"
     ],
     "routeSources": [
@@ -249,12 +274,13 @@
       "users",
       "business",
       "billing-services",
+      "loyalty-points",
       "tenant-admin"
     ],
     "notes": [
       "Estas features viven en la UI del dashboard, pero su ownership de datos y contratos runtime sigue en el Core API.",
       "Billing SRI ya entra por el Core API y su driver nativo usa facturacion sin runtime fiscal paralelo.",
-      "IdentityPlatform y Mailer resuelven en dashboard; CatalogInventory, Commerce y ReportingFinance resuelven en ecommerce; Billing resuelve en facturacion.",
+      "IdentityPlatform y Mailer resuelven en dashboard; CatalogInventory, Commerce y ReportingFinance resuelven en ecommerce; Billing resuelve en facturacion; LoyaltyRewards resuelve en loyalty.",
       "Al extraer dominios desde el core a runtimes propios, esta proyeccion debe migrarse al nuevo modulo duenio sin cambiar la clave del modulo contratado."
     ]
   },

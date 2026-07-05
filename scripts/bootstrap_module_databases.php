@@ -51,6 +51,15 @@ const MODULE_TABLES = [
         'EmailOutbox',
         'EmailDeliveryLog',
     ],
+    'loyalty-rewards' => [
+        'loyalty_programs',
+        'loyalty_members',
+        'loyalty_point_accounts',
+        'loyalty_point_ledger',
+        'loyalty_rewards',
+        'loyalty_redemptions',
+        'loyalty_wallet_passes',
+    ],
 ];
 
 const LEGACY_TABLES = [
@@ -88,6 +97,13 @@ const LEGACY_TABLES = [
     'BusinessExpense',
     'BusinessExpensePayment',
     'ContactMessage',
+    'loyalty_programs',
+    'loyalty_members',
+    'loyalty_point_accounts',
+    'loyalty_point_ledger',
+    'loyalty_rewards',
+    'loyalty_redemptions',
+    'loyalty_wallet_passes',
 ];
 
 const MODULE_SKIPPED_CONSTRAINTS = [
@@ -153,6 +169,57 @@ function connectionTargetConfig(array $targetConfig, array $adminConfig): array 
         'username' => (string)$adminConfig['username'],
         'password' => (string)$adminConfig['password'],
     ]);
+}
+
+function ensureTargetDatabase(array $targetConfig, array $adminConfig): void {
+    $database = trim((string)($targetConfig['database'] ?? ''));
+    if ($database === '') {
+        return;
+    }
+
+    $adminDatabaseConfig = normalizeConfig($adminConfig, ['database' => 'postgres']);
+    $pdo = connect($adminDatabaseConfig);
+    $stmt = $pdo->prepare('SELECT 1 FROM pg_database WHERE datname = :database');
+    $stmt->execute(['database' => $database]);
+    if ($stmt->fetchColumn()) {
+        return;
+    }
+
+    $ownerRole = trim((string)($targetConfig['username'] ?? ''));
+    $ownerExists = false;
+    if ($ownerRole !== '') {
+        $roleStmt = $pdo->prepare('SELECT to_regrole(:role_name) IS NOT NULL');
+        $roleStmt->execute(['role_name' => $ownerRole]);
+        $ownerExists = (bool)$roleStmt->fetchColumn();
+    }
+
+    $sql = 'CREATE DATABASE ' . quoteIdent($database);
+    if ($ownerExists) {
+        $sql .= ' OWNER ' . quoteIdent($ownerRole);
+    }
+    $pdo->exec($sql);
+}
+
+function grantRuntimeSchemaAccess(PDO $pdo, string $runtimeRole): void {
+    $runtimeRole = trim($runtimeRole);
+    if ($runtimeRole === '') {
+        return;
+    }
+
+    $roleExists = $pdo
+        ->query('SELECT to_regrole(' . $pdo->quote($runtimeRole) . ') IS NOT NULL')
+        ->fetchColumn();
+    if (!$roleExists) {
+        return;
+    }
+
+    $quotedRole = quoteIdent($runtimeRole);
+    $pdo->exec('GRANT CONNECT ON DATABASE ' . quoteIdent((string)$pdo->query('SELECT current_database()')->fetchColumn()) . ' TO ' . $quotedRole);
+    $pdo->exec('GRANT USAGE ON SCHEMA public TO ' . $quotedRole);
+    $pdo->exec('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ' . $quotedRole);
+    $pdo->exec('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO ' . $quotedRole);
+    $pdo->exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ' . $quotedRole);
+    $pdo->exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ' . $quotedRole);
 }
 
 function tableOwnerMap(): array {
@@ -222,6 +289,104 @@ function createMailerTables(PDO $pdo): void {
     ');
     $pdo->exec('CREATE INDEX IF NOT EXISTS "EmailOutbox_tenant_status_idx" ON "EmailOutbox" (tenant_id, status, created_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS "EmailDeliveryLog_tenant_created_idx" ON "EmailDeliveryLog" (tenant_id, created_at DESC)');
+}
+
+function createLoyaltyTables(PDO $pdo): void {
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_programs (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        name text NOT NULL,
+        status text NOT NULL DEFAULT \'active\',
+        points_per_currency numeric(12,4) NOT NULL DEFAULT 1,
+        currency_code text NOT NULL DEFAULT \'USD\',
+        wallet_issuer_name text,
+        wallet_program_name text,
+        brand_color text,
+        logo_url text,
+        metadata jsonb DEFAULT \'{}\'::jsonb,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_members (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        program_id text NOT NULL,
+        external_customer_id text,
+        account_id text NOT NULL,
+        account_name text NOT NULL,
+        email text,
+        phone text,
+        tier text NOT NULL DEFAULT \'Bronce\',
+        status text NOT NULL DEFAULT \'active\',
+        wallet_platform text NOT NULL DEFAULT \'none\',
+        metadata jsonb DEFAULT \'{}\'::jsonb,
+        last_activity_at timestamp without time zone,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        UNIQUE (tenant_id, account_id)
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_accounts (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        member_id text NOT NULL,
+        program_id text NOT NULL,
+        balance integer NOT NULL DEFAULT 0,
+        lifetime_points integer NOT NULL DEFAULT 0,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        UNIQUE (tenant_id, member_id)
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_ledger (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        member_id text NOT NULL,
+        program_id text NOT NULL,
+        entry_type text NOT NULL,
+        points integer NOT NULL,
+        balance_after integer NOT NULL,
+        reference text,
+        source text,
+        metadata jsonb DEFAULT \'{}\'::jsonb,
+        created_by_user_id text,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_rewards (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        program_id text,
+        name text NOT NULL,
+        description text,
+        points_cost integer NOT NULL,
+        stock integer NOT NULL DEFAULT 0,
+        status text NOT NULL DEFAULT \'active\',
+        image_url text,
+        metadata jsonb DEFAULT \'{}\'::jsonb,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_redemptions (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        member_id text NOT NULL,
+        reward_id text NOT NULL,
+        points_cost integer NOT NULL,
+        status text NOT NULL DEFAULT \'pending\',
+        metadata jsonb DEFAULT \'{}\'::jsonb,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+    )');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_passes (
+        id text PRIMARY KEY,
+        tenant_id text NOT NULL,
+        member_id text NOT NULL,
+        platform text NOT NULL,
+        external_object_id text,
+        status text NOT NULL DEFAULT \'pending\',
+        last_payload jsonb DEFAULT \'{}\'::jsonb,
+        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+    )');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_members_tenant_search_idx ON loyalty_members (tenant_id, lower(account_name), lower(email))');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
 }
 
 function dropRemoteSchema(PDO $pdo, string $schema): void {
@@ -495,6 +660,7 @@ function runModuleDatabaseBootstrap(): int {
             $target = $group['target'];
             $modules = $group['modules'];
             $tables = $group['tables'];
+            ensureTargetDatabase($target, $adminConfig);
             $pdo = connect(connectionTargetConfig($target, $adminConfig));
             dropForeignLegacyTables($pdo);
             dropForeignOwnerTables($pdo, $tables);
@@ -502,6 +668,10 @@ function runModuleDatabaseBootstrap(): int {
             if (in_array('mailer-service', $modules, true)) {
                 createMailerTables($pdo);
             }
+            if (in_array('loyalty-rewards', $modules, true)) {
+                createLoyaltyTables($pdo);
+            }
+            grantRuntimeSchemaAccess($pdo, (string)($target['username'] ?? ''));
             dropKnownCrossDomainConstraints($pdo);
             if ((string)$target['database'] !== (string)$primaryRuntimeConfig['database']) {
                 createFdwServer($pdo, 'origen_ecommerce', $primaryRuntimeConfig);
@@ -520,6 +690,7 @@ function runModuleDatabaseBootstrap(): int {
         foreach ($targetGroups as $databaseName => $group) {
             $target = $group['target'];
             $modules = $group['modules'];
+            ensureTargetDatabase($target, $adminConfig);
             $pdo = connect(connectionTargetConfig($target, $adminConfig));
             replaceNonOwnedTablesWithForeignTables($pdo, $modules, $targets);
             $pdo->exec('
@@ -545,6 +716,7 @@ function runModuleDatabaseBootstrap(): int {
                     'ownership_mode' => 'service-db-with-fdw-compat',
                 ]);
             }
+            grantRuntimeSchemaAccess($pdo, (string)($target['username'] ?? ''));
             fwrite(STDOUT, sprintf(
                 "[module-db] linked compatibility tables modules=%s db=%s\n",
                 implode(',', $modules),

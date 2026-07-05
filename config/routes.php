@@ -7,6 +7,7 @@ $routeRegistryPaths = [
     dirname(__DIR__) . '/src/Modules/Billing/routes.php',
     dirname(__DIR__) . '/src/Modules/Mailer/routes.php',
     dirname(__DIR__) . '/src/Modules/ReportingFinance/routes.php',
+    dirname(__DIR__) . '/src/Modules/LoyaltyRewards/routes.php',
 ];
 
 $routes = [];
