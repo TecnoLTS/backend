@@ -592,6 +592,7 @@ class TenantAccessService {
             'catalog.reviews',
             'content.contact',
             'orders.checkout',
+            'loyalty.public',
             'security.telemetry',
             'system.health',
             'users.auth',

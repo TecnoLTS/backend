@@ -154,17 +154,37 @@ final class LoyaltyRepository {
         ];
     }
 
-    public function rewards(): array {
+    public function rewards(array $filters = []): array {
+        $where = ['tenant_id = :tenant_id'];
+        $params = ['tenant_id' => $this->tenantId()];
+        $query = mb_strtolower(trim((string)($filters['q'] ?? '')));
+        $status = strtolower(trim((string)($filters['status'] ?? 'all')));
+        $stock = strtolower(trim((string)($filters['stock'] ?? 'all')));
+        if ($query !== '') {
+            $where[] = '(lower(name) LIKE :q OR lower(COALESCE(description, \'\')) LIKE :q)';
+            $params['q'] = '%' . $query . '%';
+        }
+        if (in_array($status, ['active', 'inactive', 'deleted'], true)) {
+            $where[] = 'status = :status';
+            $params['status'] = $status;
+        }
+        if ($stock === 'available') {
+            $where[] = 'stock > 0';
+        } elseif ($stock === 'empty') {
+            $where[] = 'stock <= 0';
+        }
+
         return $this->fetchAll(
-            "SELECT id, name, description, points_cost, stock, status, image_url, metadata, created_at, updated_at
+            "SELECT id, name, description, points_cost, stock, status, image_url, metadata, created_at, updated_at,
+                    (SELECT COUNT(*) FROM loyalty_redemptions r WHERE r.tenant_id = loyalty_rewards.tenant_id AND r.reward_id = loyalty_rewards.id) AS redemption_count
              FROM loyalty_rewards
-             WHERE tenant_id = :tenant_id
-             ORDER BY status ASC, points_cost ASC, name ASC",
-            ['tenant_id' => $this->tenantId()]
+             WHERE " . implode(' AND ', $where) . "
+             ORDER BY CASE status WHEN 'active' THEN 1 WHEN 'inactive' THEN 2 ELSE 3 END, points_cost ASC, name ASC",
+            $params
         );
     }
 
-    public function createReward(array $payload): array {
+    public function createReward(array $payload, ?string $userId = null): array {
         $tenantId = $this->tenantId();
         $name = trim((string)($payload['name'] ?? ''));
         $pointsCost = max(1, (int)($payload['pointsCost'] ?? $payload['points_cost'] ?? 0));
@@ -183,14 +203,432 @@ final class LoyaltyRepository {
             'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? '')),
             'metadata' => json_encode($payload['metadata'] ?? new \stdClass()),
         ];
+        if (!in_array($reward['status'], ['active', 'inactive'], true)) {
+            throw new \InvalidArgumentException('El estado del premio debe ser activo o inactivo.');
+        }
 
         $stmt = $this->pdo->prepare(
             'INSERT INTO loyalty_rewards (id, tenant_id, name, description, points_cost, stock, status, image_url, metadata)
              VALUES (:id, :tenant_id, :name, :description, :points_cost, :stock, :status, :image_url, :metadata)'
         );
         $stmt->execute($reward);
+        $created = $this->rewardById($reward['id']);
+        $this->recordAudit('reward.created', 'reward', $reward['id'], null, $created, trim((string)($payload['reason'] ?? '')), $userId);
 
-        return $this->rewardById($reward['id']);
+        return $created;
+    }
+
+    public function rewardDetail(string $rewardId): array {
+        $reward = $this->rewardById($rewardId);
+        if (!$reward) {
+            throw new \RuntimeException('Premio no encontrado.');
+        }
+
+        $summary = $this->fetchAll(
+            "SELECT COUNT(*) AS redemption_count,
+                    COALESCE(SUM(points_cost), 0) AS points_redeemed,
+                    MAX(created_at) AS last_redeemed_at
+             FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id AND reward_id = :reward_id",
+            ['tenant_id' => $this->tenantId(), 'reward_id' => $rewardId]
+        )[0] ?? [];
+        $recent = $this->fetchAll(
+            "SELECT r.id, r.member_id, m.account_name AS customer, r.points_cost, r.status, r.created_at
+             FROM loyalty_redemptions r
+             JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
+             WHERE r.tenant_id = :tenant_id AND r.reward_id = :reward_id
+             ORDER BY r.created_at DESC
+             LIMIT 8",
+            ['tenant_id' => $this->tenantId(), 'reward_id' => $rewardId]
+        );
+
+        return [
+            'reward' => $reward,
+            'summary' => $summary,
+            'recentRedemptions' => $recent,
+        ];
+    }
+
+    public function updateReward(string $rewardId, array $payload, ?string $userId = null): array {
+        $before = $this->rewardById($rewardId);
+        if (!$before) {
+            throw new \RuntimeException('Premio no encontrado.');
+        }
+
+        $name = trim((string)($payload['name'] ?? $before['name'] ?? ''));
+        $pointsCost = max(1, (int)($payload['pointsCost'] ?? $payload['points_cost'] ?? $before['points_cost'] ?? 0));
+        $stock = max(0, (int)($payload['stock'] ?? $before['stock'] ?? 0));
+        $status = strtolower(trim((string)($payload['status'] ?? $before['status'] ?? 'active')));
+        if ($name === '' || $pointsCost <= 0) {
+            throw new \InvalidArgumentException('Nombre y costo en puntos son obligatorios.');
+        }
+        if (!in_array($status, ['active', 'inactive', 'deleted'], true)) {
+            throw new \InvalidArgumentException('El estado del premio debe ser activo, inactivo o eliminado.');
+        }
+        if (($before['status'] ?? '') === 'deleted' && $status !== 'deleted') {
+            throw new \InvalidArgumentException('Un premio eliminado no puede reactivarse.');
+        }
+
+        $this->execute(
+            'UPDATE loyalty_rewards
+             SET name = :name,
+                 description = :description,
+                 points_cost = :points_cost,
+                 stock = :stock,
+                 status = :status,
+                 image_url = :image_url,
+                 updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'name' => $name,
+                'description' => trim((string)($payload['description'] ?? $before['description'] ?? '')),
+                'points_cost' => $pointsCost,
+                'stock' => $stock,
+                'status' => $status,
+                'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? $before['image_url'] ?? '')),
+                'tenant_id' => $this->tenantId(),
+                'id' => $rewardId,
+            ]
+        );
+        $after = $this->rewardById($rewardId);
+        $this->recordAudit('reward.updated', 'reward', $rewardId, $before, $after, trim((string)($payload['reason'] ?? '')), $userId);
+
+        return $after;
+    }
+
+    public function deleteReward(string $rewardId, ?string $userId = null): array {
+        $before = $this->rewardById($rewardId);
+        if (!$before) {
+            throw new \RuntimeException('Premio no encontrado.');
+        }
+        $redemptionCount = (int)$this->scalar(
+            'SELECT COUNT(*) FROM loyalty_redemptions WHERE tenant_id = :tenant_id AND reward_id = :reward_id',
+            ['tenant_id' => $this->tenantId(), 'reward_id' => $rewardId]
+        );
+        if ($redemptionCount > 0) {
+            $this->execute(
+                'UPDATE loyalty_rewards SET status = :status, updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+                ['status' => 'deleted', 'tenant_id' => $this->tenantId(), 'id' => $rewardId]
+            );
+            $after = $this->rewardById($rewardId);
+            $this->recordAudit('reward.deleted', 'reward', $rewardId, $before, $after, 'Baja logica por historial de canjes.', $userId);
+
+            return ['deleted' => false, 'archived' => true, 'reward' => $after];
+        }
+
+        $this->execute('DELETE FROM loyalty_rewards WHERE tenant_id = :tenant_id AND id = :id', [
+            'tenant_id' => $this->tenantId(),
+            'id' => $rewardId,
+        ]);
+        $this->recordAudit('reward.deleted', 'reward', $rewardId, $before, ['deleted' => true], 'Premio sin historial eliminado.', $userId);
+
+        return ['deleted' => true, 'archived' => false, 'reward' => $before];
+    }
+
+    public function createMember(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $program = $this->program($tenantId);
+        $name = trim((string)($payload['name'] ?? $payload['accountName'] ?? $payload['account_name'] ?? ''));
+        $email = mb_strtolower(trim((string)($payload['email'] ?? '')));
+        if ($name === '') {
+            throw new \InvalidArgumentException('El nombre del socio es obligatorio.');
+        }
+
+        $accountId = trim((string)($payload['accountId'] ?? $payload['account_id'] ?? ''));
+        if ($accountId === '') {
+            $accountId = $this->nextAccountId($tenantId);
+        }
+        $this->assertUniqueMemberIdentity($tenantId, $accountId, $email);
+
+        $walletPlatform = strtolower(trim((string)($payload['walletPlatform'] ?? $payload['wallet_platform'] ?? 'none')));
+        if (!in_array($walletPlatform, ['google', 'apple', 'none'], true)) {
+            throw new \InvalidArgumentException('La tarjeta debe ser Android, iPhone o sin tarjeta.');
+        }
+
+        $memberId = $this->id('member');
+        $metadata = is_array($payload['metadata'] ?? null) ? $payload['metadata'] : [];
+        $this->pdo->beginTransaction();
+        try {
+            $this->execute(
+                'INSERT INTO loyalty_members
+                    (id, tenant_id, program_id, external_customer_id, account_id, account_name, email, phone, tier, status, wallet_platform, metadata, last_activity_at)
+                 VALUES
+                    (:id, :tenant_id, :program_id, :external_customer_id, :account_id, :account_name, :email, :phone, :tier, :status, :wallet_platform, :metadata, NOW())',
+                [
+                    'id' => $memberId,
+                    'tenant_id' => $tenantId,
+                    'program_id' => $program['id'],
+                    'external_customer_id' => trim((string)($payload['externalCustomerId'] ?? $payload['external_customer_id'] ?? '')),
+                    'account_id' => $accountId,
+                    'account_name' => $name,
+                    'email' => $email,
+                    'phone' => trim((string)($payload['phone'] ?? '')),
+                    'tier' => 'Bronce',
+                    'status' => 'active',
+                    'wallet_platform' => $walletPlatform,
+                    'metadata' => json_encode($metadata),
+                ]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_point_accounts (id, tenant_id, member_id, program_id, balance, lifetime_points)
+                 VALUES (:id, :tenant_id, :member_id, :program_id, 0, 0)',
+                [
+                    'id' => $this->id('account'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $memberId,
+                    'program_id' => $program['id'],
+                ]
+            );
+            if ($walletPlatform !== 'none') {
+                $this->createWalletPass($tenantId, $memberId, $walletPlatform, $accountId, ['source' => 'member-create']);
+            }
+            $this->recordAudit('member.created', 'member', $memberId, null, ['accountId' => $accountId, 'email' => $email], null, $userId);
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return $this->memberById($memberId) ?? [];
+    }
+
+    public function updateMember(string $memberId, array $payload, ?string $userId = null): array {
+        $member = $this->memberById($memberId);
+        if (!$member) {
+            throw new \RuntimeException('Socio no encontrado.');
+        }
+
+        $tenantId = $this->tenantId();
+        $name = trim((string)($payload['name'] ?? $payload['accountName'] ?? $payload['account_name'] ?? $member['account_name']));
+        $email = mb_strtolower(trim((string)($payload['email'] ?? $member['email'] ?? '')));
+        $status = strtolower(trim((string)($payload['status'] ?? $member['status'])));
+        if (!in_array($status, ['active', 'inactive', 'blocked'], true)) {
+            throw new \InvalidArgumentException('El estado debe ser activo, inactivo o bloqueado.');
+        }
+        if ($status === 'blocked' && trim((string)($payload['reason'] ?? $payload['blockedReason'] ?? '')) === '') {
+            throw new \InvalidArgumentException('Indica el motivo para bloquear al socio.');
+        }
+
+        $before = $member;
+        $this->pdo->beginTransaction();
+        try {
+            $this->execute(
+                'UPDATE loyalty_members
+                 SET account_name = :account_name,
+                     email = :email,
+                     phone = :phone,
+                     status = :status,
+                     blocked_reason = :blocked_reason,
+                     blocked_at = CASE WHEN :status = \'blocked\' AND blocked_at IS NULL THEN NOW() WHEN :status <> \'blocked\' THEN NULL ELSE blocked_at END,
+                     updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND id = :id',
+                [
+                    'account_name' => $name,
+                    'email' => $email,
+                    'phone' => trim((string)($payload['phone'] ?? $member['phone'] ?? '')),
+                    'status' => $status,
+                    'blocked_reason' => $status === 'blocked' ? trim((string)($payload['reason'] ?? $payload['blockedReason'] ?? '')) : null,
+                    'tenant_id' => $tenantId,
+                    'id' => $memberId,
+                ]
+            );
+            $after = $this->memberById($memberId) ?? [];
+            $this->recordAudit('member.updated', 'member', $memberId, $before, $after, trim((string)($payload['reason'] ?? '')), $userId);
+            if ($status === 'blocked') {
+                $this->recordRisk('medium', 'member_blocked', 'Socio bloqueado por operador.', $memberId, null, ['reason' => $payload['reason'] ?? $payload['blockedReason'] ?? '']);
+            }
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return $this->memberById($memberId) ?? [];
+    }
+
+    public function settings(): array {
+        $tenantId = $this->tenantId();
+        $program = $this->program($tenantId);
+        $this->ensureProgramConfiguration($tenantId, (string)$program['id']);
+
+        $rows = $this->fetchAll(
+            'SELECT tenant_id, program_id, settings, updated_by_user_id, created_at, updated_at
+             FROM loyalty_program_settings
+             WHERE tenant_id = :tenant_id LIMIT 1',
+            ['tenant_id' => $tenantId]
+        );
+
+        return [
+            'program' => $program,
+            'settings' => $rows[0]['settings'] ?? (new LoyaltySchema($this->pdo))->defaultSettings(),
+            'updatedAt' => $rows[0]['updated_at'] ?? null,
+            'updatedByUserId' => $rows[0]['updated_by_user_id'] ?? null,
+        ];
+    }
+
+    public function updateSettings(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $program = $this->program($tenantId);
+        $before = $this->settings()['settings'];
+        $settings = $this->mergeSettings($before, $payload['settings'] ?? $payload);
+        $this->validateSettings($settings);
+
+        $this->execute(
+            'INSERT INTO loyalty_program_settings (tenant_id, program_id, settings, updated_by_user_id)
+             VALUES (:tenant_id, :program_id, :settings, :updated_by_user_id)
+             ON CONFLICT (tenant_id) DO UPDATE
+             SET settings = EXCLUDED.settings,
+                 updated_by_user_id = EXCLUDED.updated_by_user_id,
+                 updated_at = NOW()',
+            [
+                'tenant_id' => $tenantId,
+                'program_id' => $program['id'],
+                'settings' => json_encode($settings),
+                'updated_by_user_id' => $userId,
+            ]
+        );
+        $programSettings = $settings['program'] ?? [];
+        $this->execute(
+            'UPDATE loyalty_programs
+             SET name = :name, status = :status, currency_code = :currency_code, brand_color = :brand_color, logo_url = :logo_url, updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'name' => trim((string)($programSettings['name'] ?? $program['name'] ?? 'Fidepuntos')),
+                'status' => trim((string)($programSettings['status'] ?? $program['status'] ?? 'active')),
+                'currency_code' => trim((string)($programSettings['currencyCode'] ?? $program['currency_code'] ?? 'USD')),
+                'brand_color' => trim((string)($programSettings['brandColor'] ?? $program['brand_color'] ?? '#0f766e')),
+                'logo_url' => trim((string)($programSettings['logoUrl'] ?? $program['logo_url'] ?? '')),
+                'tenant_id' => $tenantId,
+                'id' => $program['id'],
+            ]
+        );
+        $this->recordAudit('settings.updated', 'program', (string)$program['id'], $before, $settings, trim((string)($payload['reason'] ?? '')), $userId);
+
+        return $this->settings();
+    }
+
+    public function rules(): array {
+        $tenantId = $this->tenantId();
+        $program = $this->program($tenantId);
+        $this->ensureProgramConfiguration($tenantId, (string)$program['id']);
+
+        return [
+            'settings' => $this->settings()['settings'],
+            'tiers' => $this->tierRules($tenantId),
+        ];
+    }
+
+    public function updateRules(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $program = $this->program($tenantId);
+        $before = $this->rules();
+        if (isset($payload['settings']) || isset($payload['earning']) || isset($payload['redemption']) || isset($payload['expiration'])) {
+            $this->updateSettings($payload['settings'] ?? $payload, $userId);
+        }
+
+        if (isset($payload['tiers']) && is_array($payload['tiers'])) {
+            $this->execute('DELETE FROM loyalty_tier_rules WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
+            foreach ($payload['tiers'] as $index => $tier) {
+                $name = trim((string)($tier['name'] ?? ''));
+                if ($name === '') {
+                    throw new \InvalidArgumentException('Cada nivel debe tener nombre.');
+                }
+                $this->execute(
+                    'INSERT INTO loyalty_tier_rules
+                        (id, tenant_id, program_id, name, min_lifetime_points, max_lifetime_points, multiplier, benefits, status, sort_order)
+                     VALUES
+                        (:id, :tenant_id, :program_id, :name, :min_lifetime_points, :max_lifetime_points, :multiplier, :benefits, :status, :sort_order)',
+                    [
+                        'id' => $this->id('tier'),
+                        'tenant_id' => $tenantId,
+                        'program_id' => $program['id'],
+                        'name' => $name,
+                        'min_lifetime_points' => max(0, (int)($tier['minLifetimePoints'] ?? $tier['min_lifetime_points'] ?? 0)),
+                        'max_lifetime_points' => isset($tier['maxLifetimePoints']) && $tier['maxLifetimePoints'] !== '' ? (int)$tier['maxLifetimePoints'] : (isset($tier['max_lifetime_points']) && $tier['max_lifetime_points'] !== '' ? (int)$tier['max_lifetime_points'] : null),
+                        'multiplier' => max(0.01, (float)($tier['multiplier'] ?? 1)),
+                        'benefits' => json_encode(is_array($tier['benefits'] ?? null) ? $tier['benefits'] : []),
+                        'status' => trim((string)($tier['status'] ?? 'active')) ?: 'active',
+                        'sort_order' => (int)($tier['sortOrder'] ?? $tier['sort_order'] ?? ($index + 1)),
+                    ]
+                );
+            }
+            $this->refreshAllMemberTiers($tenantId);
+        }
+
+        $after = $this->rules();
+        $this->recordAudit('rules.updated', 'program', (string)$program['id'], $before, $after, trim((string)($payload['reason'] ?? '')), $userId);
+
+        return $after;
+    }
+
+    public function adjustPoints(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $member = $this->memberFromPayload($payload);
+        if (!$member) {
+            throw new \InvalidArgumentException('Selecciona un socio existente.');
+        }
+        $points = (int)($payload['points'] ?? 0);
+        $reason = trim((string)($payload['reason'] ?? ''));
+        if ($points === 0 || $reason === '') {
+            throw new \InvalidArgumentException('El ajuste requiere puntos diferentes de cero y un motivo.');
+        }
+        $this->assertMemberCanOperate($member, 'recibir ajustes');
+
+        $program = $this->program($tenantId);
+        $this->pdo->beginTransaction();
+        try {
+            $account = $this->accountForMember($tenantId, (string)$member['id']);
+            $balanceAfter = (int)$account['balance'] + $points;
+            if ($balanceAfter < 0) {
+                $this->recordRisk('high', 'negative_balance_attempt', 'Ajuste bloqueado por saldo negativo.', (string)$member['id'], null, ['points' => $points]);
+                throw new \InvalidArgumentException('El ajuste dejaria al socio con saldo negativo.');
+            }
+            $this->execute(
+                'UPDATE loyalty_point_accounts
+                 SET balance = :balance,
+                     lifetime_points = CASE WHEN :points > 0 THEN lifetime_points + :points ELSE lifetime_points END,
+                     updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND member_id = :member_id',
+                [
+                    'balance' => $balanceAfter,
+                    'points' => $points,
+                    'tenant_id' => $tenantId,
+                    'member_id' => $member['id'],
+                ]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_point_ledger
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
+                [
+                    'id' => $this->id('ledger'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $member['id'],
+                    'program_id' => $program['id'],
+                    'entry_type' => 'adjustment',
+                    'points' => $points,
+                    'balance_after' => $balanceAfter,
+                    'reference' => $this->id('adjustment'),
+                    'source' => 'dashboard',
+                    'source_reference' => trim((string)($payload['reference'] ?? '')),
+                    'metadata' => json_encode(['reason' => $reason, 'evidence' => trim((string)($payload['evidence'] ?? ''))]),
+                    'created_by_user_id' => $userId,
+                ]
+            );
+            $this->refreshMemberTier($tenantId, (string)$member['id']);
+            $this->recordAudit('points.adjusted', 'member', (string)$member['id'], null, ['points' => $points, 'balanceAfter' => $balanceAfter], $reason, $userId);
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return [
+            'member' => $this->memberById((string)$member['id']),
+            'pointsAdjusted' => $points,
+            'balanceAfter' => $balanceAfter,
+        ];
     }
 
     public function registerPurchase(array $payload, ?string $userId = null): array {
@@ -201,9 +639,16 @@ final class LoyaltyRepository {
             throw new \InvalidArgumentException('Monto de factura y numero de factura son obligatorios.');
         }
 
-        $member = $this->resolveMember($tenantId, $payload);
+        $member = $this->memberFromPayload($payload);
+        if (!$member) {
+            throw new \InvalidArgumentException('Selecciona un socio existente antes de registrar la compra.');
+        }
+        $this->assertMemberCanOperate($member, 'acumular puntos');
+        $this->assertUniqueReference($tenantId, $invoiceNumber, 'purchase');
+
         $program = $this->program($tenantId);
-        $points = max(1, (int)round($amount * (float)($program['points_per_currency'] ?? 1)));
+        $settings = $this->settings()['settings'];
+        $points = $this->calculatePurchasePoints($amount, $member, $settings);
         $ledgerId = $this->id('ledger');
 
         $this->pdo->beginTransaction();
@@ -222,9 +667,9 @@ final class LoyaltyRepository {
             );
             $this->execute(
                 'INSERT INTO loyalty_point_ledger
-                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, metadata, created_by_user_id)
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
                  VALUES
-                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :metadata, :created_by_user_id)',
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
                 [
                     'id' => $ledgerId,
                     'tenant_id' => $tenantId,
@@ -235,17 +680,25 @@ final class LoyaltyRepository {
                     'balance_after' => $balanceAfter,
                     'reference' => $invoiceNumber,
                     'source' => 'pos',
+                    'source_reference' => $invoiceNumber,
                     'metadata' => json_encode([
                         'invoiceAmount' => $amount,
                         'invoiceNumber' => $invoiceNumber,
+                        'formula' => $this->purchaseFormulaSummary($settings, $member),
                     ]),
                     'created_by_user_id' => $userId,
                 ]
             );
+            $this->refreshMemberTier($tenantId, $member['id']);
             $this->execute(
                 'UPDATE loyalty_members SET last_activity_at = NOW(), updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
                 ['tenant_id' => $tenantId, 'id' => $member['id']]
             );
+            $this->recordAudit('purchase.registered', 'member', $member['id'], null, [
+                'invoiceNumber' => $invoiceNumber,
+                'invoiceAmount' => $amount,
+                'points' => $points,
+            ], null, $userId);
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
@@ -258,6 +711,110 @@ final class LoyaltyRepository {
             'balanceAfter' => $balanceAfter,
             'invoiceNumber' => $invoiceNumber,
             'invoiceAmount' => $amount,
+        ];
+    }
+
+    public function reversePurchase(string $reference, array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $reference = trim($reference);
+        $reason = trim((string)($payload['reason'] ?? ''));
+        if ($reference === '' || $reason === '') {
+            throw new \InvalidArgumentException('La reversa requiere referencia y motivo.');
+        }
+
+        $ledgerRows = $this->fetchAll(
+            "SELECT *
+             FROM loyalty_point_ledger
+             WHERE tenant_id = :tenant_id
+               AND entry_type = 'purchase'
+               AND reference = :reference
+               AND reversed_at IS NULL
+             ORDER BY created_at DESC
+             LIMIT 1",
+            ['tenant_id' => $tenantId, 'reference' => $reference]
+        );
+        if ($ledgerRows === []) {
+            throw new \RuntimeException('Compra no encontrada o ya reversada.');
+        }
+        $ledger = $ledgerRows[0];
+        $member = $this->memberById((string)$ledger['member_id']);
+        if (!$member) {
+            throw new \RuntimeException('Socio no encontrado para reversar la compra.');
+        }
+
+        $points = (int)$ledger['points'];
+        $this->pdo->beginTransaction();
+        try {
+            $account = $this->accountForMember($tenantId, (string)$member['id']);
+            $pointsToReverse = min($points, (int)$account['balance']);
+            $balanceAfter = (int)$account['balance'] - $pointsToReverse;
+            $this->execute(
+                'UPDATE loyalty_point_accounts
+                 SET balance = :balance,
+                     lifetime_points = GREATEST(lifetime_points - :points, 0),
+                     updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND member_id = :member_id',
+                [
+                    'balance' => $balanceAfter,
+                    'points' => $points,
+                    'tenant_id' => $tenantId,
+                    'member_id' => $member['id'],
+                ]
+            );
+            $this->execute(
+                'UPDATE loyalty_point_ledger SET reversed_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $tenantId, 'id' => $ledger['id']]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_point_ledger
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
+                [
+                    'id' => $this->id('ledger'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $member['id'],
+                    'program_id' => $ledger['program_id'],
+                    'entry_type' => 'reversal',
+                    'points' => -$pointsToReverse,
+                    'balance_after' => $balanceAfter,
+                    'reference' => 'REV-' . $reference,
+                    'source' => 'dashboard',
+                    'source_reference' => $reference,
+                    'metadata' => json_encode(['reason' => $reason, 'originalPoints' => $points, 'pointsReversed' => $pointsToReverse]),
+                    'created_by_user_id' => $userId,
+                ]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_reversals
+                    (id, tenant_id, member_id, original_reference, ledger_id, points_reversed, reason, created_by_user_id, metadata)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :original_reference, :ledger_id, :points_reversed, :reason, :created_by_user_id, :metadata)',
+                [
+                    'id' => $this->id('reversal'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $member['id'],
+                    'original_reference' => $reference,
+                    'ledger_id' => $ledger['id'],
+                    'points_reversed' => $pointsToReverse,
+                    'reason' => $reason,
+                    'created_by_user_id' => $userId,
+                    'metadata' => json_encode(['requestedBy' => $payload['requestedBy'] ?? null]),
+                ]
+            );
+            $this->refreshMemberTier($tenantId, (string)$member['id']);
+            $this->recordAudit('purchase.reversed', 'member', (string)$member['id'], $ledger, ['balanceAfter' => $balanceAfter], $reason, $userId);
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return [
+            'member' => $this->memberById((string)$member['id']),
+            'originalReference' => $reference,
+            'pointsReversed' => $pointsToReverse,
+            'balanceAfter' => $balanceAfter,
         ];
     }
 
@@ -274,12 +831,19 @@ final class LoyaltyRepository {
         if (!$member || !$reward) {
             throw new \RuntimeException('Socio o premio no encontrado.');
         }
+        $this->assertMemberCanOperate($member, 'canjear puntos');
+        $settings = $this->settings()['settings'];
+        if ((bool)($settings['redemption']['requireDigitalCard'] ?? true) && !$this->hasActiveWallet($memberId)) {
+            $this->recordRisk('high', 'redemption_without_card', 'Canje bloqueado porque el socio no tiene tarjeta digital activa.', $memberId, null);
+            throw new \InvalidArgumentException('Este socio necesita una tarjeta digital activa para canjear puntos.');
+        }
         if (($reward['status'] ?? '') !== 'active') {
             throw new \InvalidArgumentException('El premio no esta activo.');
         }
         if ((int)($reward['stock'] ?? 0) <= 0) {
             throw new \InvalidArgumentException('El premio no tiene stock disponible.');
         }
+        $this->assertRedemptionLimits($tenantId, $memberId, $rewardId, $settings);
 
         $program = $this->program($tenantId);
         $account = $this->accountForMember($tenantId, $memberId);
@@ -304,9 +868,9 @@ final class LoyaltyRepository {
             );
             $this->execute(
                 'INSERT INTO loyalty_redemptions
-                    (id, tenant_id, member_id, reward_id, points_cost, status, metadata)
+                    (id, tenant_id, member_id, reward_id, points_cost, status, metadata, created_by_user_id)
                  VALUES
-                    (:id, :tenant_id, :member_id, :reward_id, :points_cost, :status, :metadata)',
+                    (:id, :tenant_id, :member_id, :reward_id, :points_cost, :status, :metadata, :created_by_user_id)',
                 [
                     'id' => $redemptionId,
                     'tenant_id' => $tenantId,
@@ -318,13 +882,14 @@ final class LoyaltyRepository {
                         'rewardName' => $reward['name'],
                         'memberName' => $member['name'] ?? $member['account_name'] ?? '',
                     ]),
+                    'created_by_user_id' => $userId,
                 ]
             );
             $this->execute(
                 'INSERT INTO loyalty_point_ledger
-                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, metadata, created_by_user_id)
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
                  VALUES
-                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :metadata, :created_by_user_id)',
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
                 [
                     'id' => $this->id('ledger'),
                     'tenant_id' => $tenantId,
@@ -335,6 +900,7 @@ final class LoyaltyRepository {
                     'balance_after' => $balanceAfter,
                     'reference' => $redemptionId,
                     'source' => 'dashboard',
+                    'source_reference' => $redemptionId,
                     'metadata' => json_encode(['rewardId' => $rewardId, 'rewardName' => $reward['name']]),
                     'created_by_user_id' => $userId,
                 ]
@@ -343,6 +909,12 @@ final class LoyaltyRepository {
                 'UPDATE loyalty_members SET last_activity_at = NOW(), updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
                 ['tenant_id' => $tenantId, 'id' => $memberId]
             );
+            $this->recordAudit('redemption.approved', 'member', $memberId, null, [
+                'rewardId' => $rewardId,
+                'rewardName' => $reward['name'],
+                'pointsCost' => $pointsCost,
+                'balanceAfter' => $balanceAfter,
+            ], null, $userId);
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
@@ -460,6 +1032,766 @@ final class LoyaltyRepository {
             ],
             'script' => 'backend/tools/loyalty-google-wallet-demo/generate-google-wallet-link.js',
         ];
+    }
+
+    public function report(string $reportKey, array $filters = []): array {
+        $tenantId = $this->tenantId();
+        [$from, $to] = $this->dateRange($filters);
+        $params = ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to];
+
+        return match ($reportKey) {
+            'executive-summary' => [
+                'key' => $reportKey,
+                'title' => 'Resumen ejecutivo',
+                'period' => ['from' => $from, 'to' => $to],
+                'metrics' => [
+                    'activeMembers' => (int)$this->scalar("SELECT COUNT(*) FROM loyalty_members WHERE tenant_id = :tenant_id AND status = 'active'", ['tenant_id' => $tenantId]),
+                    'newMembers' => (int)$this->scalar('SELECT COUNT(*) FROM loyalty_members WHERE tenant_id = :tenant_id AND created_at::date BETWEEN :from::date AND :to::date', $params),
+                    'pointsIssued' => (int)$this->scalar("SELECT COALESCE(SUM(points), 0) FROM loyalty_point_ledger WHERE tenant_id = :tenant_id AND points > 0 AND created_at::date BETWEEN :from::date AND :to::date", $params),
+                    'pointsRedeemed' => abs((int)$this->scalar("SELECT COALESCE(SUM(points), 0) FROM loyalty_point_ledger WHERE tenant_id = :tenant_id AND points < 0 AND entry_type = 'redemption' AND created_at::date BETWEEN :from::date AND :to::date", $params)),
+                    'availableLiabilityPoints' => (int)$this->scalar('SELECT COALESCE(SUM(balance), 0) FROM loyalty_point_accounts WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]),
+                ],
+                'rows' => $this->activityTrend($tenantId),
+            ],
+            'point-activity' => [
+                'key' => $reportKey,
+                'title' => 'Actividad de puntos',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT l.created_at, m.account_id, m.account_name, l.entry_type, l.points, l.balance_after, l.reference, l.source, l.metadata
+                     FROM loyalty_point_ledger l
+                     JOIN loyalty_members m ON m.id = l.member_id AND m.tenant_id = l.tenant_id
+                     WHERE l.tenant_id = :tenant_id AND l.created_at::date BETWEEN :from::date AND :to::date
+                     ORDER BY l.created_at DESC
+                     LIMIT 500",
+                    $params
+                ),
+            ],
+            'members-tiers' => [
+                'key' => $reportKey,
+                'title' => 'Socios y niveles',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT m.tier, m.status, m.wallet_platform, COUNT(*) AS total, COALESCE(SUM(a.balance), 0) AS balance
+                     FROM loyalty_members m
+                     LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                     WHERE m.tenant_id = :tenant_id
+                     GROUP BY m.tier, m.status, m.wallet_platform
+                     ORDER BY m.tier, m.status, m.wallet_platform",
+                    ['tenant_id' => $tenantId]
+                ),
+            ],
+            'card-adoption' => [
+                'key' => $reportKey,
+                'title' => 'Adopcion de tarjetas digitales',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT m.wallet_platform, COALESCE(p.status, 'sin tarjeta') AS pass_status, COUNT(*) AS total
+                     FROM loyalty_members m
+                     LEFT JOIN loyalty_wallet_passes p ON p.member_id = m.id AND p.tenant_id = m.tenant_id AND p.platform = m.wallet_platform
+                     WHERE m.tenant_id = :tenant_id
+                     GROUP BY m.wallet_platform, COALESCE(p.status, 'sin tarjeta')
+                     ORDER BY m.wallet_platform, pass_status",
+                    ['tenant_id' => $tenantId]
+                ),
+            ],
+            'redemptions-rewards' => [
+                'key' => $reportKey,
+                'title' => 'Canjes y premios',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT w.name AS reward, w.stock, COUNT(r.id) AS redemptions, COALESCE(SUM(r.points_cost), 0) AS points_redeemed
+                     FROM loyalty_rewards w
+                     LEFT JOIN loyalty_redemptions r ON r.reward_id = w.id AND r.tenant_id = w.tenant_id AND r.created_at::date BETWEEN :from::date AND :to::date
+                     WHERE w.tenant_id = :tenant_id
+                     GROUP BY w.name, w.stock
+                     ORDER BY redemptions DESC, points_redeemed DESC",
+                    $params
+                ),
+            ],
+            'risk-events' => [
+                'key' => $reportKey,
+                'title' => 'Riesgo y antifraude',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->riskEvents($filters)['items'],
+            ],
+            'audit-events' => [
+                'key' => $reportKey,
+                'title' => 'Auditoria',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->auditEvents($filters)['items'],
+            ],
+            'api-usage' => [
+                'key' => $reportKey,
+                'title' => 'Uso de API externa',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT c.name, c.source, c.status, c.scopes, c.rate_limit_per_minute, c.last_used_at,
+                            COUNT(k.id) FILTER (WHERE k.created_at::date BETWEEN :from::date AND :to::date) AS requests
+                     FROM loyalty_api_clients c
+                     LEFT JOIN loyalty_idempotency_keys k ON k.api_client_id = c.id AND k.tenant_id = c.tenant_id
+                     WHERE c.tenant_id = :tenant_id
+                     GROUP BY c.id
+                     ORDER BY requests DESC, c.name",
+                    $params
+                ),
+            ],
+            'ledger-reconciliation' => [
+                'key' => $reportKey,
+                'title' => 'Conciliacion de saldos',
+                'period' => ['from' => $from, 'to' => $to],
+                'rows' => $this->fetchAll(
+                    "SELECT m.account_id, m.account_name, a.balance,
+                            COALESCE(SUM(l.points), 0) AS ledger_balance,
+                            a.balance - COALESCE(SUM(l.points), 0) AS difference
+                     FROM loyalty_members m
+                     JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                     LEFT JOIN loyalty_point_ledger l ON l.member_id = m.id AND l.tenant_id = m.tenant_id
+                     WHERE m.tenant_id = :tenant_id
+                     GROUP BY m.account_id, m.account_name, a.balance
+                     HAVING a.balance <> COALESCE(SUM(l.points), 0)
+                     ORDER BY ABS(a.balance - COALESCE(SUM(l.points), 0)) DESC
+                     LIMIT 500",
+                    ['tenant_id' => $tenantId]
+                ),
+            ],
+            default => throw new \InvalidArgumentException('Reporte no disponible.'),
+        };
+    }
+
+    public function reportsCatalog(): array {
+        return [
+            ['key' => 'executive-summary', 'name' => 'Resumen ejecutivo', 'purpose' => 'Muestra salud general, puntos emitidos, canjes y pasivo de puntos.'],
+            ['key' => 'point-activity', 'name' => 'Actividad de puntos', 'purpose' => 'Detalle de compras, canjes, ajustes y reversas.'],
+            ['key' => 'members-tiers', 'name' => 'Socios y niveles', 'purpose' => 'Distribucion por Bronce, Plata, Oro, estado y tarjeta.'],
+            ['key' => 'card-adoption', 'name' => 'Tarjetas digitales', 'purpose' => 'Adopcion Android/iPhone y pases listos para issuer.'],
+            ['key' => 'redemptions-rewards', 'name' => 'Canjes y premios', 'purpose' => 'Premios mas usados, puntos canjeados y stock.'],
+            ['key' => 'risk-events', 'name' => 'Riesgo y antifraude', 'purpose' => 'Bloqueos por duplicados, saldo, tarjeta o limites.'],
+            ['key' => 'audit-events', 'name' => 'Auditoria', 'purpose' => 'Cambios de reglas, ajustes, reversas y acciones administrativas.'],
+            ['key' => 'api-usage', 'name' => 'Uso de API', 'purpose' => 'Consumo por sistemas externos autorizados.'],
+            ['key' => 'ledger-reconciliation', 'name' => 'Conciliacion de saldos', 'purpose' => 'Diferencias entre libro mayor y saldos actuales.'],
+        ];
+    }
+
+    public function reportCsv(string $reportKey, array $filters = []): array {
+        $report = $this->report($reportKey, $filters);
+        $handle = fopen('php://temp', 'r+');
+        if ($handle === false) {
+            throw new \RuntimeException('No se pudo preparar el archivo de exportacion.');
+        }
+
+        fputcsv($handle, ['Reporte', (string)($report['title'] ?? $reportKey)]);
+        fputcsv($handle, ['Periodo desde', (string)($report['period']['from'] ?? '')]);
+        fputcsv($handle, ['Periodo hasta', (string)($report['period']['to'] ?? '')]);
+        fputcsv($handle, []);
+
+        $metrics = is_array($report['metrics'] ?? null) ? $report['metrics'] : [];
+        if ($metrics !== []) {
+            fputcsv($handle, ['Indicador', 'Valor']);
+            foreach ($metrics as $key => $value) {
+                fputcsv($handle, [$this->humanizeKey((string)$key), $this->csvValue($value)]);
+            }
+            fputcsv($handle, []);
+        }
+
+        $rows = is_array($report['rows'] ?? null) ? $report['rows'] : [];
+        if ($rows === []) {
+            fputcsv($handle, ['Sin datos para el periodo seleccionado']);
+        } else {
+            $columns = array_keys((array)$rows[0]);
+            fputcsv($handle, array_map(fn($column) => $this->humanizeKey((string)$column), $columns));
+            foreach ($rows as $row) {
+                $row = (array)$row;
+                fputcsv($handle, array_map(fn($column) => $this->csvValue($row[$column] ?? null), $columns));
+            }
+        }
+
+        rewind($handle);
+        $content = stream_get_contents($handle);
+        fclose($handle);
+
+        return [
+            'filename' => 'fidepuntos-' . preg_replace('/[^a-z0-9-]+/i', '-', $reportKey) . '-' . date('Ymd-His') . '.csv',
+            'content' => "\xEF\xBB\xBF" . (is_string($content) ? $content : ''),
+        ];
+    }
+
+    public function auditEvents(array $filters = []): array {
+        return $this->eventPage('loyalty_audit_events', $filters);
+    }
+
+    public function riskEvents(array $filters = []): array {
+        return $this->eventPage('loyalty_risk_events', $filters);
+    }
+
+    public function apiClients(): array {
+        return $this->fetchAll(
+            'SELECT id, name, source, scopes, status, rate_limit_per_minute, last_used_at, created_at, updated_at, revoked_at
+             FROM loyalty_api_clients
+             WHERE tenant_id = :tenant_id
+             ORDER BY status ASC, name ASC',
+            ['tenant_id' => $this->tenantId()]
+        );
+    }
+
+    public function createApiClient(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $name = trim((string)($payload['name'] ?? ''));
+        $source = trim((string)($payload['source'] ?? 'external'));
+        if ($name === '') {
+            throw new \InvalidArgumentException('El nombre del cliente API es obligatorio.');
+        }
+        $rawKey = 'fp_' . bin2hex(random_bytes(24));
+        $clientId = $this->id('api_client');
+        $scopes = is_array($payload['scopes'] ?? null) ? $payload['scopes'] : ['program:read', 'members:read', 'members:write', 'purchases:write', 'purchases:reverse', 'redemptions:write', 'rewards:read', 'reports:read'];
+        $this->execute(
+            'INSERT INTO loyalty_api_clients (id, tenant_id, name, source, key_hash, scopes, status, rate_limit_per_minute)
+             VALUES (:id, :tenant_id, :name, :source, :key_hash, :scopes, :status, :rate_limit_per_minute)',
+            [
+                'id' => $clientId,
+                'tenant_id' => $tenantId,
+                'name' => $name,
+                'source' => $source,
+                'key_hash' => hash('sha256', $rawKey),
+                'scopes' => json_encode($scopes),
+                'status' => 'active',
+                'rate_limit_per_minute' => max(1, (int)($payload['rateLimitPerMinute'] ?? $payload['rate_limit_per_minute'] ?? 120)),
+            ]
+        );
+        $this->recordAudit('api_client.created', 'api_client', $clientId, null, ['name' => $name, 'source' => $source, 'scopes' => $scopes], null, $userId);
+
+        $client = $this->fetchAll(
+            'SELECT id, name, source, scopes, status, rate_limit_per_minute, created_at FROM loyalty_api_clients WHERE tenant_id = :tenant_id AND id = :id LIMIT 1',
+            ['tenant_id' => $tenantId, 'id' => $clientId]
+        )[0] ?? [];
+        $client['apiKey'] = $rawKey;
+        $client['apiKeyNotice'] = 'Guarda esta clave ahora. Luego solo se conserva su hash.';
+
+        return $client;
+    }
+
+    public function updateApiClient(string $clientId, array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $before = $this->apiClientById($clientId);
+        if (!$before) {
+            throw new \RuntimeException('Cliente API no encontrado.');
+        }
+
+        $name = trim((string)($payload['name'] ?? $before['name'] ?? ''));
+        $source = trim((string)($payload['source'] ?? $before['source'] ?? 'external'));
+        $status = trim((string)($payload['status'] ?? $before['status'] ?? 'active'));
+        $allowedStatuses = ['active', 'suspended', 'revoked'];
+        if ($name === '') {
+            throw new \InvalidArgumentException('El nombre del cliente API es obligatorio.');
+        }
+        if (!in_array($status, $allowedStatuses, true)) {
+            throw new \InvalidArgumentException('Estado de cliente API no permitido.');
+        }
+
+        $scopes = is_array($payload['scopes'] ?? null)
+            ? array_values(array_filter(array_map('strval', $payload['scopes'])))
+            : (is_array($before['scopes'] ?? null) ? $before['scopes'] : []);
+        $rateLimit = max(1, (int)($payload['rateLimitPerMinute'] ?? $payload['rate_limit_per_minute'] ?? $before['rate_limit_per_minute'] ?? 120));
+
+        $this->execute(
+            'UPDATE loyalty_api_clients
+             SET name = :name,
+                 source = :source,
+                 scopes = :scopes,
+                 status = :status,
+                 rate_limit_per_minute = :rate_limit_per_minute,
+                 revoked_at = CASE WHEN :status = \'revoked\' THEN COALESCE(revoked_at, NOW()) ELSE NULL END,
+                 updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'tenant_id' => $tenantId,
+                'id' => $clientId,
+                'name' => $name,
+                'source' => $source,
+                'scopes' => json_encode($scopes),
+                'status' => $status,
+                'rate_limit_per_minute' => $rateLimit,
+            ]
+        );
+
+        $after = $this->apiClientById($clientId) ?? [];
+        $this->recordAudit('api_client.updated', 'api_client', $clientId, $before, $after, trim((string)($payload['reason'] ?? '')), $userId);
+
+        return $after;
+    }
+
+    public function revokeApiClient(string $clientId, array $payload = [], ?string $userId = null): array {
+        $payload['status'] = 'revoked';
+        $payload['reason'] = trim((string)($payload['reason'] ?? 'Clave revocada por operador.'));
+
+        return $this->updateApiClient($clientId, $payload, $userId);
+    }
+
+    public function externalProgram(): array {
+        return [
+            'program' => $this->program($this->tenantId()),
+            'settings' => $this->settings()['settings'],
+            'tiers' => $this->tierRules($this->tenantId()),
+            'rewards' => $this->rewards(),
+        ];
+    }
+
+    public function upsertExternalMember(array $payload, array $client): array {
+        $existing = $this->memberFromPayload($payload);
+        if ($existing) {
+            return $this->updateMember((string)$existing['id'], $payload, 'api:' . ($client['id'] ?? 'external'));
+        }
+
+        return $this->createMember($payload, 'api:' . ($client['id'] ?? 'external'));
+    }
+
+    public function authenticateExternalClient(string $rawKey, string $requiredScope): array {
+        $tenantId = $this->tenantId();
+        $key = trim($rawKey);
+        if ($key === '') {
+            throw new \RuntimeException('Clave API requerida.');
+        }
+        $rows = $this->fetchAll(
+            "SELECT id, name, source, scopes, status, rate_limit_per_minute
+             FROM loyalty_api_clients
+             WHERE tenant_id = :tenant_id AND key_hash = :key_hash AND status = 'active'
+             LIMIT 1",
+            ['tenant_id' => $tenantId, 'key_hash' => hash('sha256', $key)]
+        );
+        if ($rows === []) {
+            throw new \RuntimeException('Clave API no autorizada.');
+        }
+        $client = $rows[0];
+        $scopes = is_array($client['scopes'] ?? null) ? $client['scopes'] : [];
+        if (!in_array($requiredScope, $scopes, true) && !in_array('*', $scopes, true)) {
+            throw new \RuntimeException('El cliente API no tiene permisos para esta operacion.');
+        }
+        $this->execute(
+            'UPDATE loyalty_api_clients SET last_used_at = NOW(), updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+            ['tenant_id' => $tenantId, 'id' => $client['id']]
+        );
+
+        return $client;
+    }
+
+    public function idempotentExternalMutation(string $operation, string $idempotencyKey, array $payload, callable $callback): array {
+        $tenantId = $this->tenantId();
+        $key = trim($idempotencyKey);
+        if ($key === '') {
+            throw new \InvalidArgumentException('Idempotency-Key es obligatorio para mutaciones externas.');
+        }
+
+        $requestHash = hash('sha256', json_encode($payload));
+        $rows = $this->fetchAll(
+            'SELECT request_hash, status_code, response_payload
+             FROM loyalty_idempotency_keys
+             WHERE tenant_id = :tenant_id AND idempotency_key = :idempotency_key AND operation = :operation
+             LIMIT 1',
+            ['tenant_id' => $tenantId, 'idempotency_key' => $key, 'operation' => $operation]
+        );
+        if ($rows !== []) {
+            if (($rows[0]['request_hash'] ?? '') !== $requestHash) {
+                throw new \InvalidArgumentException('Idempotency-Key ya fue usada con un payload diferente.');
+            }
+            return [
+                'payload' => $rows[0]['response_payload'] ?? [],
+                'status' => (int)($rows[0]['status_code'] ?? 200),
+                'replayed' => true,
+            ];
+        }
+
+        $payloadResult = $callback();
+        $this->execute(
+            'INSERT INTO loyalty_idempotency_keys
+                (id, tenant_id, idempotency_key, operation, request_hash, status_code, response_payload)
+             VALUES
+                (:id, :tenant_id, :idempotency_key, :operation, :request_hash, :status_code, :response_payload)',
+            [
+                'id' => $this->id('idem'),
+                'tenant_id' => $tenantId,
+                'idempotency_key' => $key,
+                'operation' => $operation,
+                'request_hash' => $requestHash,
+                'status_code' => 201,
+                'response_payload' => json_encode($payloadResult),
+            ]
+        );
+
+        return ['payload' => $payloadResult, 'status' => 201, 'replayed' => false];
+    }
+
+    private function memberFromPayload(array $payload): ?array {
+        $tenantId = $this->tenantId();
+        $memberId = trim((string)($payload['memberId'] ?? $payload['member_id'] ?? ''));
+        if ($memberId !== '') {
+            return $this->memberById($memberId);
+        }
+
+        $accountId = trim((string)($payload['accountId'] ?? $payload['account_id'] ?? ''));
+        if ($accountId !== '') {
+            $rows = $this->fetchAll(
+                'SELECT m.*, COALESCE(a.balance, 0) AS points
+                 FROM loyalty_members m
+                 LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                 WHERE m.tenant_id = :tenant_id AND m.account_id = :account_id
+                 LIMIT 1',
+                ['tenant_id' => $tenantId, 'account_id' => $accountId]
+            );
+            return $rows[0] ?? null;
+        }
+
+        $email = mb_strtolower(trim((string)($payload['customerEmail'] ?? $payload['email'] ?? '')));
+        if ($email !== '') {
+            $rows = $this->fetchAll(
+                'SELECT m.*, COALESCE(a.balance, 0) AS points
+                 FROM loyalty_members m
+                 LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                 WHERE m.tenant_id = :tenant_id AND lower(m.email) = :email
+                 LIMIT 1',
+                ['tenant_id' => $tenantId, 'email' => $email]
+            );
+            return $rows[0] ?? null;
+        }
+
+        return null;
+    }
+
+    private function assertMemberCanOperate(array $member, string $operation): void {
+        $status = strtolower((string)($member['status'] ?? 'inactive'));
+        if ($status !== 'active') {
+            $this->recordRisk('high', 'inactive_member_operation', "Operacion bloqueada: socio no puede {$operation}.", (string)($member['id'] ?? ''), null, ['status' => $status]);
+            throw new \InvalidArgumentException("Este socio no puede {$operation} porque no esta activo.");
+        }
+    }
+
+    private function assertUniqueReference(string $tenantId, string $reference, string $entryType): void {
+        $exists = (int)$this->scalar(
+            'SELECT COUNT(*) FROM loyalty_point_ledger
+             WHERE tenant_id = :tenant_id AND entry_type = :entry_type AND reference = :reference AND reversed_at IS NULL',
+            ['tenant_id' => $tenantId, 'entry_type' => $entryType, 'reference' => $reference]
+        );
+        if ($exists > 0) {
+            $this->recordRisk('high', 'duplicate_reference', 'Factura duplicada bloqueada.', null, $reference, ['entryType' => $entryType]);
+            throw new \InvalidArgumentException('Esta factura ya fue registrada en el programa.');
+        }
+    }
+
+    private function assertUniqueMemberIdentity(string $tenantId, string $accountId, string $email): void {
+        $exists = (int)$this->scalar(
+            'SELECT COUNT(*) FROM loyalty_members
+             WHERE tenant_id = :tenant_id AND (account_id = :account_id OR (:email <> \'\' AND lower(email) = :email))',
+            ['tenant_id' => $tenantId, 'account_id' => $accountId, 'email' => $email]
+        );
+        if ($exists > 0) {
+            throw new \InvalidArgumentException('Ya existe un socio con esa cuenta o correo.');
+        }
+    }
+
+    private function calculatePurchasePoints(float $amount, array $member, array $settings): int {
+        $earning = $settings['earning'] ?? [];
+        $minimum = (float)($earning['minimumPurchaseAmount'] ?? 1.0);
+        if ($amount < $minimum) {
+            throw new \InvalidArgumentException(sprintf('El monto minimo para acumular puntos es %.2f.', $minimum));
+        }
+
+        $pointsPerUnit = max(0.0001, (float)($earning['pointsPerUnit'] ?? 1));
+        $amountPerUnit = max(0.0001, (float)($earning['amountPerUnit'] ?? 1));
+        $multiplier = $this->tierMultiplier((string)($member['tier'] ?? 'Bronce'));
+        $raw = ($amount / $amountPerUnit) * $pointsPerUnit * $multiplier;
+        $points = match ((string)($earning['roundingMode'] ?? 'floor')) {
+            'ceil' => (int)ceil($raw),
+            'round' => (int)round($raw),
+            default => (int)floor($raw),
+        };
+        $points = max(1, $points);
+        $maximum = max(1, (int)($earning['maximumPointsPerPurchase'] ?? 20000));
+        if ($points > $maximum) {
+            $this->recordRisk('medium', 'purchase_points_capped', 'Compra limitada por maximo de puntos.', (string)($member['id'] ?? ''), null, ['calculated' => $points, 'maximum' => $maximum]);
+            $points = $maximum;
+        }
+
+        $dailyLimit = (int)($earning['maximumPointsPerMemberPerDay'] ?? 50000);
+        $today = (int)$this->scalar(
+            "SELECT COALESCE(SUM(points), 0)
+             FROM loyalty_point_ledger
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND entry_type = 'purchase'
+               AND created_at::date = CURRENT_DATE",
+            ['tenant_id' => $this->tenantId(), 'member_id' => $member['id']]
+        );
+        if ($dailyLimit > 0 && ($today + $points) > $dailyLimit) {
+            $this->recordRisk('high', 'daily_earning_limit', 'Compra bloqueada por limite diario de puntos.', (string)$member['id'], null, ['today' => $today, 'points' => $points, 'limit' => $dailyLimit]);
+            throw new \InvalidArgumentException('El socio alcanzo el limite diario de puntos acumulables.');
+        }
+
+        return $points;
+    }
+
+    private function purchaseFormulaSummary(array $settings, array $member): array {
+        $earning = $settings['earning'] ?? [];
+        return [
+            'pointsPerUnit' => (float)($earning['pointsPerUnit'] ?? 1),
+            'amountPerUnit' => (float)($earning['amountPerUnit'] ?? 1),
+            'roundingMode' => (string)($earning['roundingMode'] ?? 'floor'),
+            'tier' => (string)($member['tier'] ?? 'Bronce'),
+            'tierMultiplier' => $this->tierMultiplier((string)($member['tier'] ?? 'Bronce')),
+        ];
+    }
+
+    private function assertRedemptionLimits(string $tenantId, string $memberId, string $rewardId, array $settings): void {
+        $redemption = $settings['redemption'] ?? [];
+        $maxDaily = max(1, (int)($redemption['maximumRedemptionsPerMemberPerDay'] ?? 3));
+        $maxSameReward = max(1, (int)($redemption['maximumSameRewardPerMemberPerDay'] ?? 1));
+        $dailyTotal = (int)$this->scalar(
+            "SELECT COUNT(*) FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id AND member_id = :member_id AND status = 'approved' AND created_at::date = CURRENT_DATE",
+            ['tenant_id' => $tenantId, 'member_id' => $memberId]
+        );
+        if ($dailyTotal >= $maxDaily) {
+            $this->recordRisk('high', 'daily_redemption_limit', 'Canje bloqueado por limite diario.', $memberId, null, ['limit' => $maxDaily]);
+            throw new \InvalidArgumentException('El socio alcanzo el limite diario de canjes.');
+        }
+        $sameReward = (int)$this->scalar(
+            "SELECT COUNT(*) FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id AND member_id = :member_id AND reward_id = :reward_id AND status = 'approved' AND created_at::date = CURRENT_DATE",
+            ['tenant_id' => $tenantId, 'member_id' => $memberId, 'reward_id' => $rewardId]
+        );
+        if ($sameReward >= $maxSameReward) {
+            $this->recordRisk('medium', 'same_reward_daily_limit', 'Canje bloqueado por limite del mismo premio.', $memberId, null, ['rewardId' => $rewardId, 'limit' => $maxSameReward]);
+            throw new \InvalidArgumentException('El socio ya canjeo este premio hoy.');
+        }
+    }
+
+    private function hasActiveWallet(string $memberId): bool {
+        $passes = (int)$this->scalar(
+            "SELECT COUNT(*) FROM loyalty_wallet_passes
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND platform IN ('google', 'apple')
+               AND status IN ('ready-for-issuer', 'issued')",
+            ['tenant_id' => $this->tenantId(), 'member_id' => $memberId]
+        );
+
+        return $passes > 0;
+    }
+
+    private function tierMultiplier(string $tierName): float {
+        foreach ($this->tierRules($this->tenantId()) as $tier) {
+            if (strcasecmp((string)$tier['name'], $tierName) === 0) {
+                return max(0.01, (float)($tier['multiplier'] ?? 1));
+            }
+        }
+
+        return 1.0;
+    }
+
+    private function tierRules(string $tenantId): array {
+        $program = $this->program($tenantId);
+        $this->ensureProgramConfiguration($tenantId, (string)$program['id']);
+        return $this->fetchAll(
+            "SELECT id, name, min_lifetime_points AS \"minLifetimePoints\", max_lifetime_points AS \"maxLifetimePoints\",
+                    multiplier, benefits, status, sort_order AS \"sortOrder\"
+             FROM loyalty_tier_rules
+             WHERE tenant_id = :tenant_id
+             ORDER BY sort_order ASC, min_lifetime_points ASC",
+            ['tenant_id' => $tenantId]
+        );
+    }
+
+    private function refreshMemberTier(string $tenantId, string $memberId): void {
+        $account = $this->accountForMember($tenantId, $memberId);
+        $tier = $this->tierForLifetimePoints($tenantId, (int)($account['lifetime_points'] ?? 0));
+        $this->execute(
+            'UPDATE loyalty_members SET tier = :tier, updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+            ['tier' => $tier, 'tenant_id' => $tenantId, 'id' => $memberId]
+        );
+    }
+
+    private function refreshAllMemberTiers(string $tenantId): void {
+        $rows = $this->fetchAll('SELECT id FROM loyalty_members WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
+        foreach ($rows as $row) {
+            $this->refreshMemberTier($tenantId, (string)$row['id']);
+        }
+    }
+
+    private function tierForLifetimePoints(string $tenantId, int $lifetimePoints): string {
+        foreach ($this->tierRules($tenantId) as $tier) {
+            $min = (int)($tier['minLifetimePoints'] ?? 0);
+            $max = $tier['maxLifetimePoints'] ?? null;
+            if ($lifetimePoints >= $min && ($max === null || $max === '' || $lifetimePoints <= (int)$max)) {
+                return (string)$tier['name'];
+            }
+        }
+
+        return 'Bronce';
+    }
+
+    private function ensureProgramConfiguration(string $tenantId, string $programId): void {
+        $schema = new LoyaltySchema($this->pdo);
+        $exists = (int)$this->scalar('SELECT COUNT(*) FROM loyalty_program_settings WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
+        if ($exists === 0) {
+            $this->execute(
+                'INSERT INTO loyalty_program_settings (tenant_id, program_id, settings)
+                 VALUES (:tenant_id, :program_id, :settings)',
+                ['tenant_id' => $tenantId, 'program_id' => $programId, 'settings' => json_encode($schema->defaultSettings())]
+            );
+        }
+        $tiers = (int)$this->scalar('SELECT COUNT(*) FROM loyalty_tier_rules WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
+        if ($tiers === 0) {
+            foreach ($schema->defaultTierRules() as $tier) {
+                $this->execute(
+                    'INSERT INTO loyalty_tier_rules
+                        (id, tenant_id, program_id, name, min_lifetime_points, max_lifetime_points, multiplier, benefits, sort_order)
+                     VALUES
+                        (:id, :tenant_id, :program_id, :name, :min_lifetime_points, :max_lifetime_points, :multiplier, :benefits, :sort_order)',
+                    [
+                        'id' => $this->id('tier'),
+                        'tenant_id' => $tenantId,
+                        'program_id' => $programId,
+                        'name' => $tier['name'],
+                        'min_lifetime_points' => $tier['minLifetimePoints'],
+                        'max_lifetime_points' => $tier['maxLifetimePoints'],
+                        'multiplier' => $tier['multiplier'],
+                        'benefits' => json_encode($tier['benefits']),
+                        'sort_order' => $tier['sortOrder'],
+                    ]
+                );
+            }
+        }
+    }
+
+    private function mergeSettings(array $current, array $incoming): array {
+        foreach ($incoming as $key => $value) {
+            if ($key === 'reason') {
+                continue;
+            }
+            if (is_array($value) && isset($current[$key]) && is_array($current[$key])) {
+                $current[$key] = $this->mergeSettings($current[$key], $value);
+            } else {
+                $current[$key] = $value;
+            }
+        }
+
+        return $current;
+    }
+
+    private function validateSettings(array $settings): void {
+        $earning = $settings['earning'] ?? [];
+        if ((float)($earning['pointsPerUnit'] ?? 0) <= 0 || (float)($earning['amountPerUnit'] ?? 0) <= 0) {
+            throw new \InvalidArgumentException('La formula debe tener puntos y monto mayores a cero.');
+        }
+        if (!in_array((string)($earning['roundingMode'] ?? 'floor'), ['floor', 'round', 'ceil'], true)) {
+            throw new \InvalidArgumentException('El redondeo debe ser hacia abajo, normal o hacia arriba.');
+        }
+    }
+
+    private function createWalletPass(string $tenantId, string $memberId, string $platform, string $accountId, array $payload): void {
+        $this->execute(
+            'INSERT INTO loyalty_wallet_passes
+                (id, tenant_id, member_id, platform, external_object_id, status, last_payload)
+             VALUES
+                (:id, :tenant_id, :member_id, :platform, :external_object_id, :status, :last_payload)',
+            [
+                'id' => $this->id('pass'),
+                'tenant_id' => $tenantId,
+                'member_id' => $memberId,
+                'platform' => $platform,
+                'external_object_id' => sprintf('%s.%s', $tenantId, $accountId),
+                'status' => 'ready-for-issuer',
+                'last_payload' => json_encode($payload),
+            ]
+        );
+    }
+
+    private function nextAccountId(string $tenantId): string {
+        $next = (int)$this->scalar(
+            "SELECT COALESCE(MAX(NULLIF(regexp_replace(account_id, '[^0-9]', '', 'g'), '')::integer), 1000) + 1
+             FROM loyalty_members
+             WHERE tenant_id = :tenant_id AND account_id LIKE 'FID-%'",
+            ['tenant_id' => $tenantId]
+        );
+
+        return 'FID-' . $next;
+    }
+
+    private function recordAudit(string $action, string $subjectType, ?string $subjectId, ?array $before, array $after, ?string $reason = null, ?string $userId = null): void {
+        $this->execute(
+            'INSERT INTO loyalty_audit_events
+                (id, tenant_id, actor_user_id, actor_type, action, subject_type, subject_id, reason, before_state, after_state)
+             VALUES
+                (:id, :tenant_id, :actor_user_id, :actor_type, :action, :subject_type, :subject_id, :reason, :before_state, :after_state)',
+            [
+                'id' => $this->id('audit'),
+                'tenant_id' => $this->tenantId(),
+                'actor_user_id' => $userId,
+                'actor_type' => str_starts_with((string)$userId, 'api:') ? 'api' : 'dashboard',
+                'action' => $action,
+                'subject_type' => $subjectType,
+                'subject_id' => $subjectId,
+                'reason' => $reason,
+                'before_state' => json_encode($before ?? new \stdClass()),
+                'after_state' => json_encode($after),
+            ]
+        );
+    }
+
+    private function recordRisk(string $severity, string $eventType, string $message, ?string $memberId = null, ?string $reference = null, array $metadata = []): void {
+        $this->execute(
+            'INSERT INTO loyalty_risk_events
+                (id, tenant_id, severity, event_type, status, member_id, reference, message, metadata)
+             VALUES
+                (:id, :tenant_id, :severity, :event_type, :status, :member_id, :reference, :message, :metadata)',
+            [
+                'id' => $this->id('risk'),
+                'tenant_id' => $this->tenantId(),
+                'severity' => $severity,
+                'event_type' => $eventType,
+                'status' => 'open',
+                'member_id' => $memberId,
+                'reference' => $reference,
+                'message' => $message,
+                'metadata' => json_encode($metadata),
+            ]
+        );
+    }
+
+    private function eventPage(string $table, array $filters): array {
+        $tenantId = $this->tenantId();
+        $limit = min(200, max(10, (int)($filters['limit'] ?? 50)));
+        $offset = max(0, (int)($filters['offset'] ?? 0));
+        [$from, $to] = $this->dateRange($filters);
+        $items = $this->fetchAll(
+            "SELECT *
+             FROM {$table}
+             WHERE tenant_id = :tenant_id
+               AND created_at::date BETWEEN :from::date AND :to::date
+             ORDER BY created_at DESC
+             LIMIT {$limit} OFFSET {$offset}",
+            ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to]
+        );
+        $total = (int)$this->scalar(
+            "SELECT COUNT(*)
+             FROM {$table}
+             WHERE tenant_id = :tenant_id
+               AND created_at::date BETWEEN :from::date AND :to::date",
+            ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to]
+        );
+
+        return ['items' => $items, 'total' => $total, 'limit' => $limit, 'offset' => $offset];
+    }
+
+    private function dateRange(array $filters): array {
+        $to = trim((string)($filters['to'] ?? date('Y-m-d')));
+        $from = trim((string)($filters['from'] ?? date('Y-m-d', strtotime('-30 days'))));
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) {
+            $from = date('Y-m-d', strtotime('-30 days'));
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
+            $to = date('Y-m-d');
+        }
+
+        return [$from, $to];
     }
 
     private function resolveMember(string $tenantId, array $payload): array {
@@ -1059,105 +2391,7 @@ final class LoyaltyRepository {
     }
 
     private function ensureSchema(): void {
-        if ($this->schemaExists()) {
-            return;
-        }
-
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_programs (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            name text NOT NULL,
-            status text NOT NULL DEFAULT \'active\',
-            points_per_currency numeric(12,4) NOT NULL DEFAULT 1,
-            currency_code text NOT NULL DEFAULT \'USD\',
-            wallet_issuer_name text,
-            wallet_program_name text,
-            brand_color text,
-            logo_url text,
-            metadata jsonb DEFAULT \'{}\'::jsonb,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_members (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            program_id text NOT NULL,
-            external_customer_id text,
-            account_id text NOT NULL,
-            account_name text NOT NULL,
-            email text,
-            phone text,
-            tier text NOT NULL DEFAULT \'Bronce\',
-            status text NOT NULL DEFAULT \'active\',
-            wallet_platform text NOT NULL DEFAULT \'none\',
-            metadata jsonb DEFAULT \'{}\'::jsonb,
-            last_activity_at timestamp without time zone,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            UNIQUE (tenant_id, account_id)
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_accounts (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            member_id text NOT NULL,
-            program_id text NOT NULL,
-            balance integer NOT NULL DEFAULT 0,
-            lifetime_points integer NOT NULL DEFAULT 0,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            UNIQUE (tenant_id, member_id)
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_ledger (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            member_id text NOT NULL,
-            program_id text NOT NULL,
-            entry_type text NOT NULL,
-            points integer NOT NULL,
-            balance_after integer NOT NULL,
-            reference text,
-            source text,
-            metadata jsonb DEFAULT \'{}\'::jsonb,
-            created_by_user_id text,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_rewards (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            program_id text,
-            name text NOT NULL,
-            description text,
-            points_cost integer NOT NULL,
-            stock integer NOT NULL DEFAULT 0,
-            status text NOT NULL DEFAULT \'active\',
-            image_url text,
-            metadata jsonb DEFAULT \'{}\'::jsonb,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_redemptions (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            member_id text NOT NULL,
-            reward_id text NOT NULL,
-            points_cost integer NOT NULL,
-            status text NOT NULL DEFAULT \'pending\',
-            metadata jsonb DEFAULT \'{}\'::jsonb,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-        )');
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_passes (
-            id text PRIMARY KEY,
-            tenant_id text NOT NULL,
-            member_id text NOT NULL,
-            platform text NOT NULL,
-            external_object_id text,
-            status text NOT NULL DEFAULT \'pending\',
-            last_payload jsonb DEFAULT \'{}\'::jsonb,
-            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-        )');
-        $this->pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_members_tenant_search_idx ON loyalty_members (tenant_id, lower(account_name), lower(email))');
-        $this->pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
+        (new LoyaltySchema($this->pdo))->ensure();
     }
 
     private function schemaExists(): bool {
@@ -1202,7 +2436,7 @@ final class LoyaltyRepository {
 
     private function normalizeRow(array $row): array {
         foreach ($row as $key => $value) {
-            if (is_string($value) && in_array($key, ['metadata', 'last_payload'], true)) {
+            if (is_string($value) && in_array($key, ['metadata', 'last_payload', 'settings', 'benefits', 'scopes', 'before_state', 'after_state', 'response_payload'], true)) {
                 $decoded = json_decode($value, true);
                 $row[$key] = is_array($decoded) ? $decoded : [];
             }
@@ -1215,6 +2449,39 @@ final class LoyaltyRepository {
         }
 
         return $row;
+    }
+
+    private function apiClientById(string $clientId): ?array {
+        $rows = $this->fetchAll(
+            'SELECT id, name, source, scopes, status, rate_limit_per_minute, last_used_at, created_at, updated_at, revoked_at
+             FROM loyalty_api_clients
+             WHERE tenant_id = :tenant_id AND id = :id
+             LIMIT 1',
+            ['tenant_id' => $this->tenantId(), 'id' => $clientId]
+        );
+
+        return $rows[0] ?? null;
+    }
+
+    private function humanizeKey(string $key): string {
+        $key = preg_replace('/([a-z])([A-Z])/', '$1 $2', $key) ?? $key;
+        $key = str_replace(['_', '-'], ' ', $key);
+
+        return mb_convert_case(trim($key), MB_CASE_TITLE, 'UTF-8');
+    }
+
+    private function csvValue($value): string {
+        if ($value === null) {
+            return '';
+        }
+        if (is_bool($value)) {
+            return $value ? 'Si' : 'No';
+        }
+        if (is_array($value) || is_object($value)) {
+            return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
+        }
+
+        return (string)$value;
     }
 
     private function tenantId(): string {

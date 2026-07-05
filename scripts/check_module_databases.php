@@ -73,6 +73,14 @@ const MODULE_OWNER_TABLES = [
         'loyalty_rewards',
         'loyalty_redemptions',
         'loyalty_wallet_passes',
+        'loyalty_program_settings',
+        'loyalty_tier_rules',
+        'loyalty_api_clients',
+        'loyalty_idempotency_keys',
+        'loyalty_audit_events',
+        'loyalty_risk_events',
+        'loyalty_point_expirations',
+        'loyalty_reversals',
     ],
 ];
 
@@ -126,6 +134,14 @@ const FDW_COMPATIBILITY_TABLES = [
     'loyalty_rewards',
     'loyalty_redemptions',
     'loyalty_wallet_passes',
+    'loyalty_program_settings',
+    'loyalty_tier_rules',
+    'loyalty_api_clients',
+    'loyalty_idempotency_keys',
+    'loyalty_audit_events',
+    'loyalty_risk_events',
+    'loyalty_point_expirations',
+    'loyalty_reversals',
 ];
 
 const LOCAL_RELKINDS = ['r', 'p'];

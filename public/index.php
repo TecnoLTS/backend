@@ -404,6 +404,10 @@ function is_public_api_request(string $uri, string $method): bool {
         return true;
     }
 
+    if (in_array($normalizedMethod, ['GET', 'HEAD', 'POST'], true) && str_starts_with($uri, '/api/loyalty/v1/')) {
+        return true;
+    }
+
     if ($normalizedMethod === 'GET' || $normalizedMethod === 'HEAD') {
         if (in_array($uri, [
             '/api/auth/verify',

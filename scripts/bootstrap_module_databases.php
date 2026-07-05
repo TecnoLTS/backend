@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/bootstrap_schema.php';
+require_once __DIR__ . '/../src/Modules/LoyaltyRewards/Infrastructure/LoyaltySchema.php';
 
 const MODULE_TABLES = [
     'identity-platform' => [
@@ -59,6 +60,14 @@ const MODULE_TABLES = [
         'loyalty_rewards',
         'loyalty_redemptions',
         'loyalty_wallet_passes',
+        'loyalty_program_settings',
+        'loyalty_tier_rules',
+        'loyalty_api_clients',
+        'loyalty_idempotency_keys',
+        'loyalty_audit_events',
+        'loyalty_risk_events',
+        'loyalty_point_expirations',
+        'loyalty_reversals',
     ],
 ];
 
@@ -104,6 +113,14 @@ const LEGACY_TABLES = [
     'loyalty_rewards',
     'loyalty_redemptions',
     'loyalty_wallet_passes',
+    'loyalty_program_settings',
+    'loyalty_tier_rules',
+    'loyalty_api_clients',
+    'loyalty_idempotency_keys',
+    'loyalty_audit_events',
+    'loyalty_risk_events',
+    'loyalty_point_expirations',
+    'loyalty_reversals',
 ];
 
 const MODULE_SKIPPED_CONSTRAINTS = [
@@ -292,101 +309,7 @@ function createMailerTables(PDO $pdo): void {
 }
 
 function createLoyaltyTables(PDO $pdo): void {
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_programs (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        name text NOT NULL,
-        status text NOT NULL DEFAULT \'active\',
-        points_per_currency numeric(12,4) NOT NULL DEFAULT 1,
-        currency_code text NOT NULL DEFAULT \'USD\',
-        wallet_issuer_name text,
-        wallet_program_name text,
-        brand_color text,
-        logo_url text,
-        metadata jsonb DEFAULT \'{}\'::jsonb,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_members (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        program_id text NOT NULL,
-        external_customer_id text,
-        account_id text NOT NULL,
-        account_name text NOT NULL,
-        email text,
-        phone text,
-        tier text NOT NULL DEFAULT \'Bronce\',
-        status text NOT NULL DEFAULT \'active\',
-        wallet_platform text NOT NULL DEFAULT \'none\',
-        metadata jsonb DEFAULT \'{}\'::jsonb,
-        last_activity_at timestamp without time zone,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        UNIQUE (tenant_id, account_id)
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_accounts (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        member_id text NOT NULL,
-        program_id text NOT NULL,
-        balance integer NOT NULL DEFAULT 0,
-        lifetime_points integer NOT NULL DEFAULT 0,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        UNIQUE (tenant_id, member_id)
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_point_ledger (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        member_id text NOT NULL,
-        program_id text NOT NULL,
-        entry_type text NOT NULL,
-        points integer NOT NULL,
-        balance_after integer NOT NULL,
-        reference text,
-        source text,
-        metadata jsonb DEFAULT \'{}\'::jsonb,
-        created_by_user_id text,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_rewards (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        program_id text,
-        name text NOT NULL,
-        description text,
-        points_cost integer NOT NULL,
-        stock integer NOT NULL DEFAULT 0,
-        status text NOT NULL DEFAULT \'active\',
-        image_url text,
-        metadata jsonb DEFAULT \'{}\'::jsonb,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_redemptions (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        member_id text NOT NULL,
-        reward_id text NOT NULL,
-        points_cost integer NOT NULL,
-        status text NOT NULL DEFAULT \'pending\',
-        metadata jsonb DEFAULT \'{}\'::jsonb,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-    )');
-    $pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_passes (
-        id text PRIMARY KEY,
-        tenant_id text NOT NULL,
-        member_id text NOT NULL,
-        platform text NOT NULL,
-        external_object_id text,
-        status text NOT NULL DEFAULT \'pending\',
-        last_payload jsonb DEFAULT \'{}\'::jsonb,
-        created_at timestamp without time zone DEFAULT NOW() NOT NULL,
-        updated_at timestamp without time zone DEFAULT NOW() NOT NULL
-    )');
-    $pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_members_tenant_search_idx ON loyalty_members (tenant_id, lower(account_name), lower(email))');
-    $pdo->exec('CREATE INDEX IF NOT EXISTS loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
+    (new \App\Modules\LoyaltyRewards\Infrastructure\LoyaltySchema($pdo))->ensure();
 }
 
 function dropRemoteSchema(PDO $pdo, string $schema): void {
