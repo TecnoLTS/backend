@@ -198,9 +198,20 @@ final class LoyaltyController {
     public function exportReport(string $reportKey): void {
         Auth::requireAdmin();
         try {
-            $export = $this->repository->reportCsv($reportKey, $this->queryFilters());
-            $filename = preg_replace('/[^a-zA-Z0-9._-]+/', '-', (string)($export['filename'] ?? 'fidepuntos-reporte.csv'));
-            header('Content-Type: text/csv; charset=utf-8');
+            $filters = $this->queryFilters();
+            $format = strtolower((string)($filters['format'] ?? 'xlsx'));
+            unset($filters['format']);
+
+            if ($format === 'csv') {
+                $export = $this->repository->reportCsv($reportKey, $filters);
+                $contentType = 'text/csv; charset=utf-8';
+            } else {
+                $export = $this->repository->reportExcel($reportKey, $filters);
+                $contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            }
+
+            $filename = preg_replace('/[^a-zA-Z0-9._-]+/', '-', (string)($export['filename'] ?? 'fidepuntos-reporte.xlsx'));
+            header('Content-Type: ' . $contentType);
             header('Content-Disposition: attachment; filename="' . $filename . '"');
             header('Cache-Control: no-store, no-cache, must-revalidate');
             echo (string)($export['content'] ?? '');
@@ -219,6 +230,15 @@ final class LoyaltyController {
     public function riskEvents(): void {
         Auth::requireAdmin();
         $this->respond(fn() => $this->repository->riskEvents($this->queryFilters()), 'LOYALTY_RISK_FAILED');
+    }
+
+    public function resolveRiskEvent(string $eventId): void {
+        $user = Auth::requireAdmin();
+        $payload = $this->jsonPayload();
+        $this->respond(
+            fn() => $this->repository->resolveRiskEvent($eventId, $payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            'LOYALTY_RISK_RESOLVE_FAILED'
+        );
     }
 
     public function apiClients(): void {

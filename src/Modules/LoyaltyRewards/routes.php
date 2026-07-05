@@ -24,6 +24,7 @@ return [
     ['method' => 'GET', 'path' => '/api/admin/loyalty/reports/{reportKey}/export', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@exportReport', 'capability' => 'loyalty.admin'],
     ['method' => 'GET', 'path' => '/api/admin/loyalty/audit-events', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@auditEvents', 'capability' => 'loyalty.admin'],
     ['method' => 'GET', 'path' => '/api/admin/loyalty/risk-events', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@riskEvents', 'capability' => 'loyalty.admin'],
+    ['method' => 'PATCH', 'path' => '/api/admin/loyalty/risk-events/{eventId}/resolve', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@resolveRiskEvent', 'capability' => 'loyalty.admin'],
     ['method' => 'GET', 'path' => '/api/admin/loyalty/api-clients', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@apiClients', 'capability' => 'loyalty.admin'],
     ['method' => 'POST', 'path' => '/api/admin/loyalty/api-clients', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@createApiClient', 'capability' => 'loyalty.admin'],
     ['method' => 'PATCH', 'path' => '/api/admin/loyalty/api-clients/{clientId}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@updateApiClient', 'capability' => 'loyalty.admin'],

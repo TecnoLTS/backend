@@ -297,6 +297,8 @@ final class LoyaltySchema {
         $this->addColumnIfMissing('loyalty_redemptions', 'created_by_user_id', 'text');
         $this->addColumnIfMissing('loyalty_members', 'blocked_reason', 'text');
         $this->addColumnIfMissing('loyalty_members', 'blocked_at', 'timestamp without time zone');
+        $this->addColumnIfMissing('loyalty_risk_events', 'resolved_by_user_id', 'text');
+        $this->addColumnIfMissing('loyalty_risk_events', 'resolution_note', 'text');
     }
 
     private function createIndexes(): void {

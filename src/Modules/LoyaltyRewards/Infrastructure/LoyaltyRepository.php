@@ -1205,6 +1205,8 @@ final class LoyaltyRepository {
             'label' => 'Dia',
             'created_at' => 'Fecha',
             'updated_at' => 'Actualizado',
+            'resolved_at' => 'Resuelto',
+            'revoked_at' => 'Revocado',
             'last_used_at' => 'Ultimo uso',
             'account_id' => 'Cuenta',
             'account_name' => 'Socio',
@@ -1374,14 +1376,20 @@ final class LoyaltyRepository {
     private function eventTypeLabel(string $value): string {
         return [
             'duplicate_invoice' => 'Factura duplicada',
+            'duplicate_reference' => 'Referencia duplicada',
             'negative_balance' => 'Saldo negativo',
+            'negative_balance_attempt' => 'Intento de saldo negativo',
             'missing_wallet' => 'Sin tarjeta digital',
+            'redemption_without_card' => 'Canje sin tarjeta digital',
             'daily_redemption_limit' => 'Limite diario de canjes',
             'daily_reward_limit' => 'Limite diario por premio',
+            'same_reward_daily_limit' => 'Limite diario del mismo premio',
             'out_of_stock' => 'Premio sin stock',
             'insufficient_points' => 'Puntos insuficientes',
             'blocked_member' => 'Socio bloqueado',
             'member_blocked' => 'Socio bloqueado',
+            'purchase_points_capped' => 'Compra limitada por reglas',
+            'daily_earning_limit' => 'Limite diario de acumulacion',
             'rule_update' => 'Cambio de reglas',
             'manual_adjustment' => 'Ajuste manual',
         ][$value] ?? $this->humanizeKey($value);
@@ -1440,6 +1448,13 @@ final class LoyaltyRepository {
             'walletPlatform' => 'Tarjeta',
             'source' => 'Canal',
             'channel' => 'Canal',
+            'entryType' => 'Movimiento',
+            'entry_type' => 'Movimiento',
+            'limit' => 'Limite',
+            'points' => 'Puntos',
+            'today' => 'Acumulado hoy',
+            'maximum' => 'Maximo permitido',
+            'calculated' => 'Calculado',
         ][$key] ?? $this->humanizeKey($key);
     }
 
@@ -1524,12 +1539,133 @@ final class LoyaltyRepository {
         ];
     }
 
+    public function reportExcel(string $reportKey, array $filters = []): array {
+        $report = $this->report($reportKey, $filters);
+        $title = (string)($report['title'] ?? $reportKey);
+        $periodFrom = (string)($report['period']['from'] ?? '');
+        $periodTo = (string)($report['period']['to'] ?? '');
+        $metrics = is_array($report['metrics'] ?? null) ? $report['metrics'] : [];
+        $rows = is_array($report['rows'] ?? null) ? $report['rows'] : [];
+
+        $sheetRows = [];
+        $rowIndex = 1;
+        $sheetRows[] = $this->xlsxRow($rowIndex++, [
+            ['value' => $title, 'style' => 1],
+        ]);
+        $sheetRows[] = $this->xlsxRow($rowIndex++, [
+            ['value' => 'Periodo', 'style' => 2],
+            ['value' => $periodFrom . ' a ' . $periodTo],
+        ]);
+        $rowIndex++;
+
+        if ($metrics !== []) {
+            $sheetRows[] = $this->xlsxRow($rowIndex++, [
+                ['value' => 'Indicadores', 'style' => 2],
+            ]);
+            $sheetRows[] = $this->xlsxRow($rowIndex++, [
+                ['value' => 'Indicador', 'style' => 2],
+                ['value' => 'Valor', 'style' => 2],
+            ]);
+            foreach ($metrics as $key => $value) {
+                $sheetRows[] = $this->xlsxRow($rowIndex++, [
+                    ['value' => $this->humanizeKey((string)$key)],
+                    ['value' => $value],
+                ]);
+            }
+            $rowIndex++;
+        }
+
+        $sheetRows[] = $this->xlsxRow($rowIndex++, [
+            ['value' => 'Detalle', 'style' => 2],
+        ]);
+        if ($rows === []) {
+            $sheetRows[] = $this->xlsxRow($rowIndex++, [
+                ['value' => 'Sin datos para el periodo seleccionado'],
+            ]);
+        } else {
+            $columns = array_keys((array)$rows[0]);
+            $sheetRows[] = $this->xlsxRow($rowIndex++, array_map(
+                fn($column) => ['value' => $this->humanizeKey((string)$column), 'style' => 2],
+                $columns
+            ));
+
+            foreach ($rows as $row) {
+                $row = (array)$row;
+                $sheetRows[] = $this->xlsxRow($rowIndex++, array_map(
+                    fn($column) => ['value' => $row[$column] ?? null],
+                    $columns
+                ));
+            }
+        }
+
+        $sheetXml = $this->xlsxWorksheet(implode('', $sheetRows));
+        $content = $this->buildXlsx($title, $sheetXml);
+
+        return [
+            'filename' => 'fidepuntos-' . preg_replace('/[^a-z0-9-]+/i', '-', $reportKey) . '-' . date('Ymd-His') . '.xlsx',
+            'content' => $content,
+        ];
+    }
+
     public function auditEvents(array $filters = []): array {
         return $this->eventPage('loyalty_audit_events', $filters);
     }
 
     public function riskEvents(array $filters = []): array {
         return $this->eventPage('loyalty_risk_events', $filters);
+    }
+
+    public function resolveRiskEvent(string $eventId, array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $eventId = trim($eventId);
+        $note = trim((string)($payload['note'] ?? $payload['reason'] ?? ''));
+        if ($eventId === '') {
+            throw new \InvalidArgumentException('El evento de riesgo es obligatorio.');
+        }
+        if ($note === '') {
+            throw new \InvalidArgumentException('Indica como se reviso o resolvio el evento.');
+        }
+
+        $before = $this->fetchAll(
+            'SELECT *
+             FROM loyalty_risk_events
+             WHERE tenant_id = :tenant_id AND id = :id
+             LIMIT 1',
+            ['tenant_id' => $tenantId, 'id' => $eventId]
+        )[0] ?? null;
+        if (!$before) {
+            throw new \RuntimeException('Evento de riesgo no encontrado.');
+        }
+        if (($before['status'] ?? '') === 'resolved') {
+            throw new \InvalidArgumentException('El evento ya esta resuelto.');
+        }
+
+        $this->execute(
+            'UPDATE loyalty_risk_events
+             SET status = :status,
+                 resolved_at = NOW(),
+                 resolved_by_user_id = :resolved_by_user_id,
+                 resolution_note = :resolution_note
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'status' => 'resolved',
+                'resolved_by_user_id' => $userId,
+                'resolution_note' => $note,
+                'tenant_id' => $tenantId,
+                'id' => $eventId,
+            ]
+        );
+
+        $after = $this->fetchAll(
+            'SELECT *
+             FROM loyalty_risk_events
+             WHERE tenant_id = :tenant_id AND id = :id
+             LIMIT 1',
+            ['tenant_id' => $tenantId, 'id' => $eventId]
+        )[0] ?? [];
+        $this->recordAudit('risk_event.resolved', 'risk_event', $eventId, $before, $after, $note, $userId);
+
+        return $after;
     }
 
     public function apiClients(): array {
@@ -2069,21 +2205,40 @@ final class LoyaltyRepository {
         $limit = min(200, max(10, (int)($filters['limit'] ?? 50)));
         $offset = max(0, (int)($filters['offset'] ?? 0));
         [$from, $to] = $this->dateRange($filters);
+        $where = [
+            'tenant_id = :tenant_id',
+            'created_at::date BETWEEN :from::date AND :to::date',
+        ];
+        $params = ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to];
+
+        if ($table === 'loyalty_risk_events') {
+            $status = strtolower(trim((string)($filters['status'] ?? 'all')));
+            if (in_array($status, ['open', 'resolved'], true)) {
+                $where[] = 'status = :status';
+                $params['status'] = $status;
+            }
+
+            $severity = strtolower(trim((string)($filters['severity'] ?? 'all')));
+            if (in_array($severity, ['critical', 'high', 'medium', 'low', 'info'], true)) {
+                $where[] = 'severity = :severity';
+                $params['severity'] = $severity;
+            }
+        }
+
+        $whereSql = implode(' AND ', $where);
         $items = $this->fetchAll(
             "SELECT *
              FROM {$table}
-             WHERE tenant_id = :tenant_id
-               AND created_at::date BETWEEN :from::date AND :to::date
+             WHERE {$whereSql}
              ORDER BY created_at DESC
              LIMIT {$limit} OFFSET {$offset}",
-            ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to]
+            $params
         );
         $total = (int)$this->scalar(
             "SELECT COUNT(*)
              FROM {$table}
-             WHERE tenant_id = :tenant_id
-               AND created_at::date BETWEEN :from::date AND :to::date",
-            ['tenant_id' => $tenantId, 'from' => $from, 'to' => $to]
+             WHERE {$whereSql}",
+            $params
         );
 
         return ['items' => $items, 'total' => $total, 'limit' => $limit, 'offset' => $offset];
@@ -2780,6 +2935,130 @@ final class LoyaltyRepository {
 
     private function writeCsvLine($handle, array $fields): void {
         fputcsv($handle, $fields, ',', '"', '');
+    }
+
+    private function excelEscape(string $value): string {
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE | ENT_XML1, 'UTF-8');
+    }
+
+    private function xlsxWorksheet(string $sheetRows): string {
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+            . '<sheetFormatPr defaultRowHeight="18"/>'
+            . '<cols>'
+            . '<col min="1" max="1" width="22" customWidth="1"/>'
+            . '<col min="2" max="2" width="26" customWidth="1"/>'
+            . '<col min="3" max="8" width="20" customWidth="1"/>'
+            . '<col min="9" max="20" width="34" customWidth="1"/>'
+            . '</cols>'
+            . '<sheetData>' . $sheetRows . '</sheetData>'
+            . '</worksheet>';
+    }
+
+    private function xlsxRow(int $rowIndex, array $cells): string {
+        $xml = '<row r="' . $rowIndex . '">';
+        foreach (array_values($cells) as $columnIndex => $cell) {
+            $value = is_array($cell) ? ($cell['value'] ?? null) : $cell;
+            $style = is_array($cell) ? (int)($cell['style'] ?? 0) : 0;
+            $xml .= $this->xlsxCell($rowIndex, $columnIndex, $value, $style);
+        }
+
+        return $xml . '</row>';
+    }
+
+    private function xlsxCell(int $rowIndex, int $columnIndex, $value, int $style = 0): string {
+        $reference = $this->xlsxColumnName($columnIndex) . $rowIndex;
+        $styleAttribute = $style > 0 ? ' s="' . $style . '"' : '';
+        if (is_int($value) || is_float($value)) {
+            return '<c r="' . $reference . '"' . $styleAttribute . '><v>' . $this->excelEscape((string)$value) . '</v></c>';
+        }
+
+        $text = $this->csvValue($value);
+        return '<c r="' . $reference . '" t="inlineStr"' . $styleAttribute . '><is><t>' . $this->excelEscape($text) . '</t></is></c>';
+    }
+
+    private function xlsxColumnName(int $index): string {
+        $name = '';
+        $index++;
+        while ($index > 0) {
+            $index--;
+            $name = chr(65 + ($index % 26)) . $name;
+            $index = intdiv($index, 26);
+        }
+
+        return $name;
+    }
+
+    private function buildXlsx(string $title, string $sheetXml): string {
+        $tmp = tempnam(sys_get_temp_dir(), 'loyalty-xlsx-');
+        if (!is_string($tmp)) {
+            throw new \RuntimeException('No se pudo preparar el archivo Excel.');
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($tmp, \ZipArchive::OVERWRITE) !== true) {
+            @unlink($tmp);
+            throw new \RuntimeException('No se pudo crear el archivo Excel.');
+        }
+
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+        $zip->addFromString('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            . '<Default Extension="xml" ContentType="application/xml"/>'
+            . '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+            . '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            . '</Types>');
+        $zip->addFromString('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            . '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            . '</Relationships>');
+        $zip->addFromString('docProps/app.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            . '<Application>Fidepuntos</Application></Properties>');
+        $zip->addFromString('docProps/core.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            . '<dc:title>' . $this->excelEscape($title) . '</dc:title><dc:creator>Fidepuntos</dc:creator>'
+            . '<dcterms:created xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:created>'
+            . '<dcterms:modified xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:modified>'
+            . '</cp:coreProperties>');
+        $zip->addFromString('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . '<sheets><sheet name="Reporte" sheetId="1" r:id="rId1"/></sheets></workbook>');
+        $zip->addFromString('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            . '</Relationships>');
+        $zip->addFromString('xl/styles.xml', $this->xlsxStyles());
+        $zip->addFromString('xl/worksheets/sheet1.xml', $sheetXml);
+        $zip->close();
+
+        $content = file_get_contents($tmp);
+        @unlink($tmp);
+        if (!is_string($content)) {
+            throw new \RuntimeException('No se pudo leer el archivo Excel.');
+        }
+
+        return $content;
+    }
+
+    private function xlsxStyles(): string {
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            . '<fonts count="2"><font><sz val="11"/><color rgb="FF0F172A"/><name val="Arial"/></font><font><b/><sz val="11"/><color rgb="FF0F172A"/><name val="Arial"/></font></fonts>'
+            . '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEAF4F1"/><bgColor indexed="64"/></patternFill></fill></fills>'
+            . '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFD9E7E2"/></left><right style="thin"><color rgb="FFD9E7E2"/></right><top style="thin"><color rgb="FFD9E7E2"/></top><bottom style="thin"><color rgb="FFD9E7E2"/></bottom><diagonal/></border></borders>'
+            . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            . '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1"/></cellXfs>'
+            . '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+            . '</styleSheet>';
     }
 
     private function csvValue($value): string {
