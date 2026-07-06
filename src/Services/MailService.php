@@ -142,6 +142,67 @@ class MailService {
         return $result;
     }
 
+    public static function sendHtml(
+        string $to,
+        string $subject,
+        string $htmlMessage,
+        ?string $plainMessage = null,
+        ?string $replyTo = null,
+        ?string $replyToName = null,
+        array $metadata = [],
+        ?string $storedBody = null
+    ): bool {
+        $outboxId = self::recordPending($to, $subject, $storedBody ?? $plainMessage ?? strip_tags($htmlMessage), [
+            ...$metadata,
+            'transport' => 'html',
+            'reply_to' => $replyTo,
+            'reply_to_name' => $replyToName,
+        ]);
+
+        $smtpHost = $_ENV['SMTP_HOST'] ?? null;
+
+        if ($smtpHost && class_exists(PHPMailer::class)) {
+            try {
+                $mail = self::buildMailer($to, $subject, $htmlMessage, $replyTo, $replyToName, true);
+                if (!$mail) {
+                    self::recordFailed($outboxId, 'No se pudo construir el mensaje SMTP.', ['transport' => 'smtp-html']);
+                    return false;
+                }
+                if ($plainMessage !== null && trim($plainMessage) !== '') {
+                    $mail->AltBody = $plainMessage;
+                }
+                $mail->send();
+                self::recordDelivered($outboxId, $mail->getLastMessageID(), ['transport' => 'smtp-html']);
+                return true;
+            } catch (Exception $e) {
+                error_log('SMTP HTML send failed: ' . $e->getMessage());
+                self::recordFailed($outboxId, $e->getMessage(), ['transport' => 'smtp-html']);
+                return false;
+            }
+        }
+
+        $fromAddress = $_ENV['MAIL_FROM_ADDRESS'] ?? 'no-reply@paramascotasec.com';
+        $fromName = $_ENV['MAIL_FROM_NAME'] ?? 'Para Mascotas EC';
+        $replyToHeader = ($replyTo && filter_var($replyTo, FILTER_VALIDATE_EMAIL)) ? $replyTo : $fromAddress;
+
+        $headers = [
+            'From: ' . $fromName . ' <' . $fromAddress . '>',
+            'Reply-To: ' . $replyToHeader,
+            'MIME-Version: 1.0',
+            'Content-Type: text/html; charset=UTF-8'
+        ];
+
+        $result = mail($to, $subject, $htmlMessage, implode("\r\n", $headers));
+        if (!$result) {
+            error_log('HTML mail() failed for: ' . $to);
+            self::recordFailed($outboxId, 'mail() returned false.', ['transport' => 'mail-html']);
+        } else {
+            self::recordDelivered($outboxId, null, ['transport' => 'mail-html']);
+        }
+
+        return $result;
+    }
+
     public static function sendWithAttachment(
         string $to,
         string $subject,

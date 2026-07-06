@@ -61,6 +61,18 @@ final class GoogleWalletService {
     public function pushPoints(string $accountId, string $accountName, int $points): array {
         $objectId = $this->config->objectId($accountId);
 
+        return $this->pushPointsToObject($objectId, $accountId, $accountName, $points);
+    }
+
+    /**
+     * Actualiza un objeto concreto ya existente. Se usa para pases legacy
+     * importados desde generadorCardWallet, cuyo objectId no sigue el formato
+     * canonico nuevo del backend.
+     *
+     * @return array{objectId: string, created: bool}
+     */
+    public function pushPointsToObject(string $objectId, string $accountId, string $accountName, int $points): array {
+
         $patch = $this->authorizedRequest('PATCH', '/loyaltyObject/' . rawurlencode($objectId), [
             'loyaltyPoints' => $this->loyaltyPointsBody($points),
         ], allow404: true);
@@ -72,6 +84,29 @@ final class GoogleWalletService {
         $this->authorizedRequest('POST', '/loyaltyObject', $this->loyaltyObjectBody($objectId, $accountId, $accountName, $points));
 
         return ['objectId' => $objectId, 'created' => true];
+    }
+
+    /** @return array<string, mixed> */
+    public function getObject(string $objectId): array {
+        $response = $this->authorizedRequest('GET', '/loyaltyObject/' . rawurlencode($objectId), null, allow404: true);
+        if ($response['status'] === 404) {
+            throw new \RuntimeException('El pase no existe en Google Wallet.');
+        }
+
+        return is_array($response['json']) ? $response['json'] : [];
+    }
+
+    public function pointsFromObject(string $objectId): int {
+        $object = $this->getObject($objectId);
+        $balance = $object['loyaltyPoints']['balance'] ?? [];
+        if (isset($balance['int'])) {
+            return (int)$balance['int'];
+        }
+        if (isset($balance['string'])) {
+            return (int)$balance['string'];
+        }
+
+        return 0;
     }
 
     /**
@@ -102,6 +137,10 @@ final class GoogleWalletService {
 
     public function objectId(string $accountId): string {
         return $this->config->objectId($accountId);
+    }
+
+    public function ownsObjectId(string $objectId): bool {
+        return str_starts_with($objectId, $this->config->issuerId() . '.');
     }
 
     private function loyaltyClassBody(): array {

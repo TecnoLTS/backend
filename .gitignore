@@ -29,5 +29,6 @@ storage/billing/xml/**/*.xml
 storage/billing/pdf/**/*.pdf
 
 # Keep directory structure
+!storage/wallet/.gitkeep
 !storage/sri/**/.gitkeep
 !storage/billing/**/.gitkeep

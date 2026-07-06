@@ -7,6 +7,7 @@ use App\Core\TenantContext;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
 use App\Modules\LoyaltyRewards\Infrastructure\Wallet\GoogleWalletFactory;
 use App\Modules\LoyaltyRewards\Infrastructure\Wallet\GoogleWalletService;
+use App\Services\MailService;
 use PDO;
 
 final class LoyaltyRepository {
@@ -335,10 +336,17 @@ final class LoyaltyRepository {
         if ($name === '') {
             throw new \InvalidArgumentException('El nombre del socio es obligatorio.');
         }
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new \InvalidArgumentException('El correo del socio es obligatorio y debe ser valido.');
+        }
+        $phone = trim((string)($payload['phone'] ?? ''));
+        if ($phone === '') {
+            throw new \InvalidArgumentException('El telefono del socio es obligatorio.');
+        }
 
         $accountId = trim((string)($payload['accountId'] ?? $payload['account_id'] ?? ''));
         if ($accountId === '') {
-            $accountId = $this->nextAccountId($tenantId);
+            throw new \InvalidArgumentException('La cuenta del socio es obligatoria.');
         }
         $this->assertUniqueMemberIdentity($tenantId, $accountId, $email);
 
@@ -364,7 +372,7 @@ final class LoyaltyRepository {
                     'account_id' => $accountId,
                     'account_name' => $name,
                     'email' => $email,
-                    'phone' => trim((string)($payload['phone'] ?? '')),
+                    'phone' => $phone,
                     'tier' => 'Bronce',
                     'status' => 'active',
                     'wallet_platform' => $walletPlatform,
@@ -1035,7 +1043,9 @@ final class LoyaltyRepository {
             throw new \RuntimeException('Socio no encontrado para generar pase.');
         }
 
-        return $this->issueGoogleWalletLink($member, $userId);
+        $sendEmail = filter_var($payload['sendEmail'] ?? true, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+
+        return $this->issueGoogleWalletLink($member, $userId, $sendEmail ?? true);
     }
 
     public function googleWalletLinkForAccount(string $accountId, array $client): array {
@@ -1045,7 +1055,7 @@ final class LoyaltyRepository {
         }
         $this->assertMemberCanOperate($member, 'generar tarjeta digital');
 
-        return $this->issueGoogleWalletLink($member, 'api:' . (string)($client['id'] ?? 'external'));
+        return $this->issueGoogleWalletLink($member, 'api:' . (string)($client['id'] ?? 'external'), false);
     }
 
     public function googleWalletNotify(array $payload, ?string $userId = null): array {
@@ -1087,7 +1097,7 @@ final class LoyaltyRepository {
         ];
     }
 
-    private function issueGoogleWalletLink(array $member, ?string $userId): array {
+    private function issueGoogleWalletLink(array $member, ?string $userId, bool $sendEmail = false): array {
         $service = $this->googleWalletServiceOrFail();
 
         $result = $service->buildSaveUrl(
@@ -1109,13 +1119,24 @@ final class LoyaltyRepository {
             );
         }
 
+        $emailResult = $sendEmail
+            ? $this->sendGoogleWalletEmail($member, $result['saveUrl'], $result['objectId'], (int)($member['points'] ?? 0))
+            : ['sent' => false, 'recipient' => null, 'reason' => 'email-disabled-for-request'];
+
         // Nunca auditar el saveUrl: el JWT firmado contiene PII del socio.
         $this->recordAudit(
             'wallet.google.link_generated',
             'member',
             (string)$member['id'],
             null,
-            ['objectId' => $result['objectId'], 'classId' => $result['classId'], 'points' => (int)($member['points'] ?? 0)],
+            [
+                'objectId' => $result['objectId'],
+                'classId' => $result['classId'],
+                'points' => (int)($member['points'] ?? 0),
+                'emailSent' => (bool)($emailResult['sent'] ?? false),
+                'emailRecipient' => $emailResult['recipient'] ?? null,
+                'emailReason' => $emailResult['reason'] ?? null,
+            ],
             null,
             $userId
         );
@@ -1131,6 +1152,92 @@ final class LoyaltyRepository {
                 'name' => (string)($member['account_name'] ?? ''),
             ],
             'points' => (int)($member['points'] ?? 0),
+            'email' => $emailResult,
+        ];
+    }
+
+    /**
+     * Envia el boton "Agregar a Google Wallet" al correo del socio. El saveUrl
+     * se manda al destinatario pero se almacena redaccion en outbox.
+     *
+     * @return array{sent: bool, recipient: ?string, reason?: string}
+     */
+    private function sendGoogleWalletEmail(array $member, string $saveUrl, string $objectId, int $points): array {
+        $recipient = mb_strtolower(trim((string)($member['email'] ?? '')));
+        if ($recipient === '' || !filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
+            return ['sent' => false, 'recipient' => null, 'reason' => 'member-email-missing'];
+        }
+
+        $program = $this->program($this->tenantId());
+        $programName = trim((string)($program['wallet_program_name'] ?? $program['name'] ?? 'Programa de fidelizacion'));
+        $memberName = trim((string)($member['account_name'] ?? $member['name'] ?? 'Socio'));
+        $accountId = trim((string)($member['account_id'] ?? ''));
+        $subject = 'Agrega tu tarjeta de recompensas a Google Wallet';
+        $safeProgram = htmlspecialchars($programName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeMember = htmlspecialchars($memberName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeAccount = htmlspecialchars($accountId, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeUrl = htmlspecialchars($saveUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safePoints = number_format($points, 0, ',', '.');
+
+        $html = <<<HTML
+<!doctype html>
+<html lang="es">
+  <body style="margin:0;padding:0;background:#f4f7f6;font-family:Arial,sans-serif;color:#142724;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7f6;padding:28px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #dce9e4;border-radius:14px;overflow:hidden;">
+            <tr>
+              <td style="background:#173d39;color:#ffffff;padding:24px;">
+                <div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.78;">{$safeProgram}</div>
+                <h1 style="margin:8px 0 0;font-size:24px;line-height:1.2;">Tu tarjeta de recompensas esta lista</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px;">
+                <p style="margin:0 0 14px;font-size:16px;line-height:1.5;">Hola {$safeMember},</p>
+                <p style="margin:0 0 18px;font-size:16px;line-height:1.5;">Agrega tu tarjeta a Google Wallet para consultar y usar tus puntos desde el telefono.</p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 20px;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;">
+                  <tr>
+                    <td style="padding:14px;">
+                      <div style="font-size:12px;color:#506a65;font-weight:700;">Cuenta</div>
+                      <div style="font-size:18px;font-weight:800;">{$safeAccount}</div>
+                    </td>
+                    <td style="padding:14px;">
+                      <div style="font-size:12px;color:#506a65;font-weight:700;">Saldo actual</div>
+                      <div style="font-size:18px;font-weight:800;">{$safePoints} pts</div>
+                    </td>
+                  </tr>
+                </table>
+                <p style="text-align:center;margin:24px 0;">
+                  <a href="{$safeUrl}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
+                </p>
+                <p style="margin:18px 0 0;color:#506a65;font-size:13px;line-height:1.5;">Si el boton no abre, copia y pega este enlace en el navegador de tu telefono Android.</p>
+                <p style="word-break:break-all;color:#506a65;font-size:12px;line-height:1.45;">{$safeUrl}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+HTML;
+
+        $plain = "Hola {$memberName},\n\nAgrega tu tarjeta de recompensas de {$programName} a Google Wallet.\nCuenta: {$accountId}\nSaldo actual: {$points} pts\n\nEnlace: {$saveUrl}\n";
+        $stored = "Invitacion Google Wallet enviada. Cuenta: {$accountId}. Saldo: {$points} pts. Enlace firmado omitido.";
+        $sent = MailService::sendHtml($recipient, $subject, $html, $plain, null, null, [
+            'module' => 'loyalty-points',
+            'template' => 'google-wallet-invite',
+            'member_id' => (string)($member['id'] ?? ''),
+            'account_id' => $accountId,
+            'object_id' => $objectId,
+        ], $stored);
+
+        return [
+            'sent' => $sent,
+            'recipient' => $recipient,
+            'reason' => $sent ? 'sent' : 'mail-transport-failed',
         ];
     }
 
@@ -1216,6 +1323,19 @@ final class LoyaltyRepository {
         );
     }
 
+    private function googleWalletObjectIdForMember(string $memberId, string $accountId, GoogleWalletService $service): string {
+        $existing = $this->fetchAll(
+            'SELECT external_object_id FROM loyalty_wallet_passes
+             WHERE tenant_id = :tenant_id AND member_id = :member_id AND platform = \'google\' LIMIT 1',
+            ['tenant_id' => $this->tenantId(), 'member_id' => $memberId]
+        );
+        $objectId = trim((string)($existing[0]['external_object_id'] ?? ''));
+
+        return $objectId !== '' && $service->ownsObjectId($objectId)
+            ? $objectId
+            : $service->objectId($accountId);
+    }
+
     /**
      * Sincroniza el balance al pase de Google despues de una mutacion de
      * puntos. Best-effort: se llama SIEMPRE despues del commit y jamas
@@ -1231,8 +1351,14 @@ final class LoyaltyRepository {
             if ($service === null) {
                 return; // integracion no configurada: silencio total
             }
+            $objectId = $this->googleWalletObjectIdForMember(
+                (string)$member['id'],
+                (string)$member['account_id'],
+                $service
+            );
 
-            $result = $service->pushPoints(
+            $result = $service->pushPointsToObject(
+                $objectId,
                 (string)$member['account_id'],
                 (string)($member['account_name'] ?? $member['account_id']),
                 $balanceAfter
@@ -1246,9 +1372,14 @@ final class LoyaltyRepository {
         } catch (\Throwable $e) {
             try {
                 if ($service !== null) {
+                    $objectId = $this->googleWalletObjectIdForMember(
+                        (string)$member['id'],
+                        (string)$member['account_id'],
+                        $service
+                    );
                     $this->upsertGoogleWalletPass(
                         (string)$member['id'],
-                        $service->objectId((string)$member['account_id']),
+                        $objectId,
                         'sync-error',
                         ['points' => $balanceAfter, 'error' => mb_substr($e->getMessage(), 0, 500), 'failedAt' => date('c')]
                     );
@@ -1920,7 +2051,7 @@ final class LoyaltyRepository {
         }
         $rawKey = 'fp_' . bin2hex(random_bytes(24));
         $clientId = $this->id('api_client');
-        $scopes = is_array($payload['scopes'] ?? null) ? $payload['scopes'] : ['program:read', 'members:read', 'members:write', 'purchases:write', 'purchases:reverse', 'redemptions:write', 'rewards:read', 'reports:read'];
+        $scopes = is_array($payload['scopes'] ?? null) ? $payload['scopes'] : ['program:read', 'members:read', 'members:write', 'purchases:write', 'purchases:reverse', 'redemptions:write', 'rewards:read', 'reports:read', 'wallet:link'];
         $this->execute(
             'INSERT INTO loyalty_api_clients (id, tenant_id, name, source, key_hash, scopes, status, rate_limit_per_minute)
              VALUES (:id, :tenant_id, :name, :source, :key_hash, :scopes, :status, :rate_limit_per_minute)',
