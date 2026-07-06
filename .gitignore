@@ -13,6 +13,9 @@ logs/
 db/backup.sql
 db/backups/
 
+# Google Wallet service account (nunca subir)
+storage/wallet/*.json
+
 # SRI certificates and sensitive files
 storage/sri/certs/*.p12
 storage/sri/certs/*.key

@@ -5,6 +5,8 @@ namespace App\Modules\LoyaltyRewards\Infrastructure;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
+use App\Modules\LoyaltyRewards\Infrastructure\Wallet\GoogleWalletFactory;
+use App\Modules\LoyaltyRewards\Infrastructure\Wallet\GoogleWalletService;
 use PDO;
 
 final class LoyaltyRepository {
@@ -460,7 +462,11 @@ final class LoyaltyRepository {
 
         return [
             'program' => $program,
-            'settings' => $rows[0]['settings'] ?? (new LoyaltySchema($this->pdo))->defaultSettings(),
+            // Merge sobre defaults: tenants con fila previa tambien ven secciones nuevas (p.ej. googleWallet).
+            'settings' => $this->mergeSettings(
+                (new LoyaltySchema($this->pdo))->defaultSettings(),
+                is_array($rows[0]['settings'] ?? null) ? $rows[0]['settings'] : []
+            ),
             'updatedAt' => $rows[0]['updated_at'] ?? null,
             'updatedByUserId' => $rows[0]['updated_by_user_id'] ?? null,
         ];
@@ -624,6 +630,8 @@ final class LoyaltyRepository {
             throw $e;
         }
 
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
+
         return [
             'member' => $this->memberById((string)$member['id']),
             'pointsAdjusted' => $points,
@@ -704,6 +712,8 @@ final class LoyaltyRepository {
             $this->pdo->rollBack();
             throw $e;
         }
+
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
 
         return [
             'member' => $this->memberById($member['id']),
@@ -809,6 +819,8 @@ final class LoyaltyRepository {
             $this->pdo->rollBack();
             throw $e;
         }
+
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
 
         return [
             'member' => $this->memberById((string)$member['id']),
@@ -921,6 +933,8 @@ final class LoyaltyRepository {
             throw $e;
         }
 
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
+
         return [
             'redemption' => $this->redemptionById($redemptionId),
             'member' => $this->memberById($memberId),
@@ -969,7 +983,7 @@ final class LoyaltyRepository {
                             'tenant_id' => $tenantId,
                             'member_id' => $memberId,
                             'platform' => $platform,
-                            'external_object_id' => sprintf('%s.%s', $tenantId, $member['account_id'] ?? $memberId),
+                            'external_object_id' => $this->walletExternalObjectId($platform, (string)($member['account_id'] ?? ''), $memberId),
                             'last_payload' => json_encode(['updatedFrom' => 'dashboard']),
                         ]
                     );
@@ -984,7 +998,7 @@ final class LoyaltyRepository {
                             'tenant_id' => $tenantId,
                             'member_id' => $memberId,
                             'platform' => $platform,
-                            'external_object_id' => sprintf('%s.%s', $tenantId, $member['account_id'] ?? $memberId),
+                            'external_object_id' => $this->walletExternalObjectId($platform, (string)($member['account_id'] ?? ''), $memberId),
                             'status' => 'ready-for-issuer',
                             'last_payload' => json_encode(['updatedFrom' => 'dashboard']),
                         ]
@@ -1015,23 +1029,242 @@ final class LoyaltyRepository {
         ];
     }
 
-    public function googleWalletLinkPlan(array $payload): array {
-        $memberId = trim((string)($payload['memberId'] ?? $payload['member_id'] ?? ''));
-        $member = $memberId !== '' ? $this->memberById($memberId) : null;
+    public function googleWalletLink(array $payload, ?string $userId = null): array {
+        $member = $this->memberFromPayload($payload);
         if (!$member) {
             throw new \RuntimeException('Socio no encontrado para generar pase.');
         }
 
+        return $this->issueGoogleWalletLink($member, $userId);
+    }
+
+    public function googleWalletLinkForAccount(string $accountId, array $client): array {
+        $member = $this->memberFromPayload(['accountId' => $accountId]);
+        if (!$member) {
+            throw new \RuntimeException('Socio no encontrado.');
+        }
+        $this->assertMemberCanOperate($member, 'generar tarjeta digital');
+
+        return $this->issueGoogleWalletLink($member, 'api:' . (string)($client['id'] ?? 'external'));
+    }
+
+    public function googleWalletNotify(array $payload, ?string $userId = null): array {
+        $body = trim((string)($payload['body'] ?? $payload['message'] ?? ''));
+        if ($body === '') {
+            throw new \InvalidArgumentException('Escribe un mensaje para la notificacion.');
+        }
+
+        $member = $this->memberFromPayload($payload);
+        if (!$member) {
+            throw new \RuntimeException('Socio no encontrado.');
+        }
+
+        $service = $this->googleWalletServiceOrFail();
+        $header = trim((string)($payload['header'] ?? $payload['title'] ?? ''));
+        if ($header === '') {
+            $walletSettings = $this->settings()['settings']['googleWallet'] ?? [];
+            $header = trim((string)($walletSettings['issuerName'] ?? '')) ?: 'Notificacion';
+        }
+        $header = mb_substr($header, 0, 100);
+        $body = mb_substr($body, 0, 300);
+
+        $result = $service->addMessage((string)$member['account_id'], $header, $body);
+
+        $this->recordAudit(
+            'wallet.google.message_sent',
+            'member',
+            (string)$member['id'],
+            null,
+            ['objectId' => $result['objectId'], 'messageId' => $result['messageId'], 'header' => $header],
+            null,
+            $userId
+        );
+
         return [
-            'configured' => false,
-            'status' => 'requires-wallet-issuer',
-            'member' => $member,
-            'todo' => [
-                'Configure ISSUER_ID y service-account.json en la herramienta demo.',
-                'Promueva la firma JWT a servicio backend cuando el issuer de Google Wallet este aprobado.',
-            ],
-            'script' => 'backend/tools/loyalty-google-wallet-demo/generate-google-wallet-link.js',
+            'sent' => true,
+            'objectId' => $result['objectId'],
+            'messageId' => $result['messageId'],
         ];
+    }
+
+    private function issueGoogleWalletLink(array $member, ?string $userId): array {
+        $service = $this->googleWalletServiceOrFail();
+
+        $result = $service->buildSaveUrl(
+            (string)$member['account_id'],
+            (string)($member['account_name'] ?? $member['account_id']),
+            (int)($member['points'] ?? 0)
+        );
+
+        $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'link-generated', [
+            'points' => (int)($member['points'] ?? 0),
+            'classId' => $result['classId'],
+            'generatedAt' => date('c'),
+        ]);
+
+        if (($member['wallet_platform'] ?? 'none') !== 'google') {
+            $this->execute(
+                'UPDATE loyalty_members SET wallet_platform = \'google\', updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $this->tenantId(), 'id' => (string)$member['id']]
+            );
+        }
+
+        // Nunca auditar el saveUrl: el JWT firmado contiene PII del socio.
+        $this->recordAudit(
+            'wallet.google.link_generated',
+            'member',
+            (string)$member['id'],
+            null,
+            ['objectId' => $result['objectId'], 'classId' => $result['classId'], 'points' => (int)($member['points'] ?? 0)],
+            null,
+            $userId
+        );
+
+        return [
+            'configured' => true,
+            'saveUrl' => $result['saveUrl'],
+            'objectId' => $result['objectId'],
+            'classId' => $result['classId'],
+            'member' => [
+                'id' => (string)$member['id'],
+                'accountId' => (string)$member['account_id'],
+                'name' => (string)($member['account_name'] ?? ''),
+            ],
+            'points' => (int)($member['points'] ?? 0),
+        ];
+    }
+
+    /**
+     * ObjectId para registrar en loyalty_wallet_passes: canonico de Google si
+     * hay issuer configurado; formato legacy local si no. Nunca se deriva
+     * leyendo la columna: siempre se recomputa (la columna es espejo).
+     */
+    private function walletExternalObjectId(string $platform, string $accountId, string $fallbackMemberId): string {
+        $tenantId = $this->tenantId();
+        if ($platform === 'google') {
+            $config = GoogleWalletFactory::config($tenantId, $this->settings()['settings'], $this->program($tenantId));
+            if ($config->issuerId() !== '') {
+                return $config->objectId($accountId !== '' ? $accountId : $fallbackMemberId);
+            }
+        }
+
+        return sprintf('%s.%s', $tenantId, $accountId !== '' ? $accountId : $fallbackMemberId);
+    }
+
+    private function googleWalletServiceOrNull(): ?GoogleWalletService {
+        $tenantId = $this->tenantId();
+        $settings = $this->settings()['settings'];
+        $program = $this->program($tenantId);
+
+        return GoogleWalletFactory::make($tenantId, $settings, $program);
+    }
+
+    private function googleWalletServiceOrFail(): GoogleWalletService {
+        $tenantId = $this->tenantId();
+        $settings = $this->settings()['settings'];
+        $program = $this->program($tenantId);
+
+        $config = GoogleWalletFactory::config($tenantId, $settings, $program);
+        if (!$config->isConfigured()) {
+            throw new \InvalidArgumentException('Google Wallet no esta configurado. Faltan: ' . implode(', ', $config->missing()) . '.');
+        }
+
+        return GoogleWalletFactory::fromConfig($config);
+    }
+
+    private function upsertGoogleWalletPass(string $memberId, string $objectId, string $status, array $payloadMeta): void {
+        $tenantId = $this->tenantId();
+        $existing = $this->fetchAll(
+            'SELECT id, external_object_id, last_payload FROM loyalty_wallet_passes
+             WHERE tenant_id = :tenant_id AND member_id = :member_id AND platform = \'google\' LIMIT 1',
+            ['tenant_id' => $tenantId, 'member_id' => $memberId]
+        );
+
+        if ($existing !== []) {
+            $row = $existing[0];
+            $previousObjectId = (string)($row['external_object_id'] ?? '');
+            if ($previousObjectId !== '' && $previousObjectId !== $objectId) {
+                $payloadMeta['legacyExternalObjectId'] = $previousObjectId;
+            }
+            $this->execute(
+                'UPDATE loyalty_wallet_passes
+                 SET status = :status, external_object_id = :external_object_id, last_payload = :last_payload, updated_at = NOW()
+                 WHERE id = :id',
+                [
+                    'id' => (string)$row['id'],
+                    'status' => $status,
+                    'external_object_id' => $objectId,
+                    'last_payload' => json_encode($payloadMeta, JSON_UNESCAPED_UNICODE),
+                ]
+            );
+            return;
+        }
+
+        $this->execute(
+            'INSERT INTO loyalty_wallet_passes
+                (id, tenant_id, member_id, platform, external_object_id, status, last_payload)
+             VALUES
+                (:id, :tenant_id, :member_id, \'google\', :external_object_id, :status, :last_payload)',
+            [
+                'id' => $this->id('pass'),
+                'tenant_id' => $tenantId,
+                'member_id' => $memberId,
+                'external_object_id' => $objectId,
+                'status' => $status,
+                'last_payload' => json_encode($payloadMeta, JSON_UNESCAPED_UNICODE),
+            ]
+        );
+    }
+
+    /**
+     * Sincroniza el balance al pase de Google despues de una mutacion de
+     * puntos. Best-effort: se llama SIEMPRE despues del commit y jamas
+     * propaga errores (la operacion de puntos ya es definitiva).
+     */
+    private function syncGoogleWalletBestEffort(array $member, int $balanceAfter): void {
+        $service = null;
+        try {
+            if (($member['wallet_platform'] ?? 'none') !== 'google') {
+                return;
+            }
+            $service = $this->googleWalletServiceOrNull();
+            if ($service === null) {
+                return; // integracion no configurada: silencio total
+            }
+
+            $result = $service->pushPoints(
+                (string)$member['account_id'],
+                (string)($member['account_name'] ?? $member['account_id']),
+                $balanceAfter
+            );
+
+            $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'synced', [
+                'points' => $balanceAfter,
+                'syncedAt' => date('c'),
+                'created' => $result['created'],
+            ]);
+        } catch (\Throwable $e) {
+            try {
+                if ($service !== null) {
+                    $this->upsertGoogleWalletPass(
+                        (string)$member['id'],
+                        $service->objectId((string)$member['account_id']),
+                        'sync-error',
+                        ['points' => $balanceAfter, 'error' => mb_substr($e->getMessage(), 0, 500), 'failedAt' => date('c')]
+                    );
+                }
+                $this->recordRisk(
+                    'medium',
+                    'wallet_sync_failed',
+                    'Fallo la sincronizacion de puntos con Google Wallet.',
+                    (string)($member['id'] ?? ''),
+                    null,
+                    ['balance' => $balanceAfter, 'error' => mb_substr($e->getMessage(), 0, 500)]
+                );
+            } catch (\Throwable) {
+                // nunca romper la operacion de puntos por un fallo del espejo wallet
+            }
+        }
     }
 
     public function report(string $reportKey, array $filters = []): array {
@@ -2013,7 +2246,7 @@ final class LoyaltyRepository {
              WHERE tenant_id = :tenant_id
                AND member_id = :member_id
                AND platform IN ('google', 'apple')
-               AND status IN ('ready-for-issuer', 'issued')",
+               AND status IN ('ready-for-issuer', 'issued', 'link-generated', 'synced', 'sync-error')",
             ['tenant_id' => $this->tenantId(), 'member_id' => $memberId]
         );
 
@@ -2128,6 +2361,25 @@ final class LoyaltyRepository {
         if (!in_array((string)($earning['roundingMode'] ?? 'floor'), ['floor', 'round', 'ceil'], true)) {
             throw new \InvalidArgumentException('El redondeo debe ser hacia abajo, normal o hacia arriba.');
         }
+
+        $wallet = is_array($settings['googleWallet'] ?? null) ? $settings['googleWallet'] : [];
+        if (filter_var($wallet['enabled'] ?? false, FILTER_VALIDATE_BOOL)) {
+            $classSuffix = trim((string)($wallet['classSuffix'] ?? ''));
+            if ($classSuffix === '' || !preg_match('/^[A-Za-z0-9._-]+$/', $classSuffix)) {
+                throw new \InvalidArgumentException('googleWallet.classSuffix es obligatorio y solo admite letras, numeros, punto, guion y guion bajo.');
+            }
+            if (!str_starts_with(trim((string)($wallet['logoUrl'] ?? '')), 'https://')) {
+                throw new \InvalidArgumentException('googleWallet.logoUrl debe ser una URL https publica (Google exige logo para la clase).');
+            }
+            if (!preg_match('/^#[0-9a-fA-F]{6}$/', trim((string)($wallet['hexBackgroundColor'] ?? '')))) {
+                throw new \InvalidArgumentException('googleWallet.hexBackgroundColor debe ser un color hex de 6 digitos, por ejemplo #0F6E56.');
+            }
+            foreach ((array)($wallet['origins'] ?? []) as $origin) {
+                if (!str_starts_with(trim((string)$origin), 'https://')) {
+                    throw new \InvalidArgumentException('googleWallet.origins solo admite origenes https.');
+                }
+            }
+        }
     }
 
     private function createWalletPass(string $tenantId, string $memberId, string $platform, string $accountId, array $payload): void {
@@ -2141,7 +2393,7 @@ final class LoyaltyRepository {
                 'tenant_id' => $tenantId,
                 'member_id' => $memberId,
                 'platform' => $platform,
-                'external_object_id' => sprintf('%s.%s', $tenantId, $accountId),
+                'external_object_id' => $this->walletExternalObjectId($platform, $accountId, $memberId),
                 'status' => 'ready-for-issuer',
                 'last_payload' => json_encode($payload),
             ]

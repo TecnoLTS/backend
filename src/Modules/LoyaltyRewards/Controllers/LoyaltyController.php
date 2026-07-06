@@ -141,9 +141,29 @@ final class LoyaltyController {
     }
 
     public function googleWalletLink(): void {
-        Auth::requireAdmin();
+        $user = Auth::requireAdmin();
         $payload = $this->jsonPayload();
-        $this->respond(fn() => $this->repository->googleWalletLinkPlan($payload), 'LOYALTY_GOOGLE_WALLET_LINK_FAILED');
+        $this->respond(
+            fn() => $this->repository->googleWalletLink($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            'LOYALTY_GOOGLE_WALLET_LINK_FAILED'
+        );
+    }
+
+    public function googleWalletNotify(): void {
+        $user = Auth::requireAdmin();
+        $payload = $this->jsonPayload();
+        $this->respond(
+            fn() => $this->repository->googleWalletNotify($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            'LOYALTY_WALLET_NOTIFY_FAILED'
+        );
+    }
+
+    public function externalGoogleWalletLink(string $accountId): void {
+        $client = $this->externalClient('wallet:link');
+        $this->respond(
+            fn() => $this->repository->googleWalletLinkForAccount($accountId, $client),
+            'LOYALTY_EXTERNAL_WALLET_LINK_FAILED'
+        );
     }
 
     public function settings(): void {

@@ -58,6 +58,16 @@ final class LoyaltySchema {
                 'emailEnabled' => false,
                 'webhooksEnabled' => false,
             ],
+            'googleWallet' => [
+                'enabled' => false,
+                'classSuffix' => '',
+                'issuerName' => 'TecnoLTS',
+                'programName' => 'Programa de fidelizacion',
+                'hexBackgroundColor' => '#0f766e',
+                'logoUrl' => '',
+                'pointsLabel' => 'Puntos',
+                'origins' => [],
+            ],
         ];
     }
 
