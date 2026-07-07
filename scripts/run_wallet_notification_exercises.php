@@ -34,5 +34,16 @@ $tableExists = static function (PDO $pdo, string $table): bool {
 $assert('tabla loyalty_wallet_campaigns existe', $tableExists($pdo, 'loyalty_wallet_campaigns'));
 $assert('tabla loyalty_wallet_campaign_recipients existe', $tableExists($pdo, 'loyalty_wallet_campaign_recipients'));
 
+$preview = $repository->previewNotificationAudience(['audience_type' => 'all']);
+$assert('preview all devuelve entero >= 0', isset($preview['recipients']) && is_int($preview['recipients']) && $preview['recipients'] >= 0);
+
+$segment = $repository->previewNotificationAudience([
+    'audience_type' => 'segment',
+    'tier' => 'Oro',
+    'minBalance' => 100,
+]);
+$assert('preview segment devuelve entero >= 0', isset($segment['recipients']) && is_int($segment['recipients']) && $segment['recipients'] >= 0);
+$assert('segment <= all', $segment['recipients'] <= $preview['recipients']);
+
 $failed = array_keys(array_filter($checks, static fn($v) => !$v));
 exit($failed === [] ? 0 : 1);

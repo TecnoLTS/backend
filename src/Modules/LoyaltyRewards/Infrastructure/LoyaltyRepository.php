@@ -3853,4 +3853,71 @@ HTML;
     private function id(string $prefix): string {
         return $prefix . '_' . bin2hex(random_bytes(8));
     }
+
+    /**
+     * Construye FROM+WHERE de socios elegibles (con pase Google guardado) segun el
+     * filtro de audiencia masiva. Reusado por preview y por la materializacion.
+     *
+     * @return array{0: string, 1: array<string, mixed>}
+     */
+    private function notificationAudienceQuery(array $filter): array {
+        $tenantId = $this->tenantId();
+        $params = ['tenant_id' => $tenantId];
+
+        $sql = "FROM loyalty_members m
+                JOIN loyalty_wallet_passes p
+                  ON p.member_id = m.id AND p.tenant_id = m.tenant_id
+                 AND p.platform = 'google' AND p.external_object_id IS NOT NULL
+                LEFT JOIN loyalty_point_accounts a
+                  ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                WHERE m.tenant_id = :tenant_id";
+
+        $type = (string)($filter['audience_type'] ?? 'segment');
+
+        // Estado: por defecto solo activos; 'segment' puede pedir otro estado explicito.
+        $status = $type === 'segment' ? (string)($filter['status'] ?? 'active') : 'active';
+        if ($status !== 'all') {
+            $sql .= ' AND m.status = :status';
+            $params['status'] = $status;
+        }
+
+        if ($type === 'segment') {
+            $tier = (string)($filter['tier'] ?? 'all');
+            if ($tier !== 'all' && $tier !== '') {
+                $sql .= ' AND m.tier = :tier';
+                $params['tier'] = $tier;
+            }
+            $query = trim((string)($filter['query'] ?? ''));
+            if ($query !== '') {
+                $sql .= ' AND (m.account_name ILIKE :q OR m.account_id ILIKE :q OR m.email ILIKE :q)';
+                $params['q'] = '%' . $query . '%';
+            }
+            if (isset($filter['purchasedWithinDays']) && (int)$filter['purchasedWithinDays'] > 0) {
+                $sql .= ' AND m.last_activity_at >= NOW() - make_interval(days => :purchased_days)';
+                $params['purchased_days'] = (int)$filter['purchasedWithinDays'];
+            }
+            if (isset($filter['inactiveForDays']) && (int)$filter['inactiveForDays'] > 0) {
+                $sql .= ' AND (m.last_activity_at IS NULL OR m.last_activity_at <= NOW() - make_interval(days => :inactive_days))';
+                $params['inactive_days'] = (int)$filter['inactiveForDays'];
+            }
+            if (isset($filter['minBalance']) && $filter['minBalance'] !== '' && $filter['minBalance'] !== null) {
+                $sql .= ' AND COALESCE(a.balance, 0) >= :min_balance';
+                $params['min_balance'] = (int)$filter['minBalance'];
+            }
+            if (isset($filter['maxBalance']) && $filter['maxBalance'] !== '' && $filter['maxBalance'] !== null) {
+                $sql .= ' AND COALESCE(a.balance, 0) <= :max_balance';
+                $params['max_balance'] = (int)$filter['maxBalance'];
+            }
+        }
+
+        return [$sql, $params];
+    }
+
+    /** @return array{recipients: int} */
+    public function previewNotificationAudience(array $filter): array {
+        [$fromWhere, $params] = $this->notificationAudienceQuery($filter);
+        $count = (int)$this->scalar('SELECT COUNT(DISTINCT m.id) ' . $fromWhere, $params);
+
+        return ['recipients' => $count];
+    }
 }
