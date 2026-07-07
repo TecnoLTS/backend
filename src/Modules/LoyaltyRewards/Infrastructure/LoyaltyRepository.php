@@ -19,14 +19,23 @@ final class LoyaltyRepository {
         $this->ensureDemoData($this->tenantId());
     }
 
-    public function dashboard(): array {
+    public function dashboard(?string $month = null): array {
         $tenantId = $this->tenantId();
         $program = $this->program($tenantId);
+        $month = $this->normalizeDashboardMonth($month);
+        $dateScope = $this->dashboardDateScope($month);
 
         $metrics = [
             'activeMembers' => (int)$this->scalar(
                 'SELECT COUNT(*) FROM loyalty_members WHERE tenant_id = :tenant_id AND status = :status',
                 ['tenant_id' => $tenantId, 'status' => 'active']
+            ),
+            'digitalMembers' => (int)$this->scalar(
+                "SELECT COUNT(*) FROM loyalty_members
+                 WHERE tenant_id = :tenant_id
+                   AND status = 'active'
+                   AND wallet_platform IN ('google', 'apple')",
+                ['tenant_id' => $tenantId]
             ),
             'issuedPoints' => (int)$this->scalar(
                 "SELECT COALESCE(SUM(points), 0) FROM loyalty_point_ledger WHERE tenant_id = :tenant_id AND points > 0",
@@ -49,30 +58,12 @@ final class LoyaltyRepository {
         return [
             'program' => $program,
             'metrics' => $metrics,
-            'topCustomers' => $this->fetchAll(
-                "SELECT m.id, m.account_name AS name, m.email, m.tier, m.wallet_platform AS wallet_platform,
-                        COALESCE(a.balance, 0) AS points, m.last_activity_at
-                 FROM loyalty_members m
-                 LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
-                 WHERE m.tenant_id = :tenant_id
-                 ORDER BY COALESCE(a.balance, 0) DESC, m.last_activity_at DESC NULLS LAST
-                 LIMIT 8",
-                ['tenant_id' => $tenantId]
-            ),
-            'recentConsumptions' => $this->fetchAll(
-                "SELECT l.id, l.member_id, m.account_name AS customer, l.reference AS invoice_number,
-                        l.points, l.metadata, l.created_at
-                 FROM loyalty_point_ledger l
-                 JOIN loyalty_members m ON m.id = l.member_id AND m.tenant_id = l.tenant_id
-                 WHERE l.tenant_id = :tenant_id AND l.entry_type = 'purchase'
-                 ORDER BY l.created_at DESC
-                LIMIT 12",
-                ['tenant_id' => $tenantId]
-            ),
+            'topCustomers' => $this->dashboardTopCustomers($tenantId, $dateScope),
+            'recentConsumptions' => $this->recentConsumptions($tenantId, $dateScope),
             'walletSummary' => $this->walletSummary($tenantId),
-            'recentRedemptions' => $this->recentRedemptions($tenantId),
+            'recentRedemptions' => $this->recentRedemptions($tenantId, $dateScope),
             'recommendedActions' => $this->recommendedActions($tenantId),
-            'analytics' => $this->dashboardAnalytics($tenantId, $metrics),
+            'analytics' => $this->dashboardAnalytics($tenantId, $metrics, $dateScope),
         ];
     }
 
@@ -91,14 +82,19 @@ final class LoyaltyRepository {
         $offset = max(0, (int)($filters['offset'] ?? 0));
         [$where, $params] = $this->customerWhere($tenantId, $filters);
         $orderBy = $this->customerOrderBy((string)($filters['sort'] ?? 'recent'));
+        $countTotal = !in_array(strtolower((string)($filters['count'] ?? '1')), ['0', 'false', 'no'], true);
+        $queryLimit = $countTotal ? $limit : $limit + 1;
 
-        $total = (int)$this->scalar(
-            "SELECT COUNT(*)
-             FROM loyalty_members m
-             LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
-             WHERE {$where}",
-            $params
-        );
+        $total = null;
+        if ($countTotal) {
+            $total = (int)$this->scalar(
+                "SELECT COUNT(*)
+                 FROM loyalty_members m
+                 LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                 WHERE {$where}",
+                $params
+            );
+        }
 
         $items = $this->fetchAll(
             "SELECT m.id, m.account_name AS name, m.account_id, m.email, m.phone, m.tier, m.status,
@@ -107,16 +103,23 @@ final class LoyaltyRepository {
              LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
              WHERE {$where}
              ORDER BY {$orderBy}
-             LIMIT {$limit} OFFSET {$offset}",
+             LIMIT {$queryLimit} OFFSET {$offset}",
             $params
         );
+        $hasMore = $countTotal
+            ? ($offset + $limit) < (int)$total
+            : count($items) > $limit;
+        if (!$countTotal && $hasMore) {
+            $items = array_slice($items, 0, $limit);
+        }
+        $total = $countTotal ? (int)$total : $offset + count($items) + ($hasMore ? 1 : 0);
 
         return [
             'items' => $items,
             'total' => $total,
             'limit' => $limit,
             'offset' => $offset,
-            'hasMore' => ($offset + $limit) < $total,
+            'hasMore' => $hasMore,
         ];
     }
 
@@ -396,6 +399,7 @@ final class LoyaltyRepository {
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
+            $this->throwMemberWriteException($e);
             throw $e;
         }
 
@@ -411,6 +415,12 @@ final class LoyaltyRepository {
         $tenantId = $this->tenantId();
         $name = trim((string)($payload['name'] ?? $payload['accountName'] ?? $payload['account_name'] ?? $member['account_name']));
         $email = mb_strtolower(trim((string)($payload['email'] ?? $member['email'] ?? '')));
+        if ($name === '') {
+            throw new \InvalidArgumentException('El nombre del socio es obligatorio.');
+        }
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new \InvalidArgumentException('El correo del socio es obligatorio y debe ser valido.');
+        }
         $status = strtolower(trim((string)($payload['status'] ?? $member['status'])));
         if (!in_array($status, ['active', 'inactive', 'blocked'], true)) {
             throw new \InvalidArgumentException('El estado debe ser activo, inactivo o bloqueado.');
@@ -418,6 +428,7 @@ final class LoyaltyRepository {
         if ($status === 'blocked' && trim((string)($payload['reason'] ?? $payload['blockedReason'] ?? '')) === '') {
             throw new \InvalidArgumentException('Indica el motivo para bloquear al socio.');
         }
+        $this->assertUniqueMemberIdentity($tenantId, (string)$member['account_id'], $email, $memberId);
 
         $before = $member;
         $this->pdo->beginTransaction();
@@ -450,6 +461,7 @@ final class LoyaltyRepository {
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
+            $this->throwMemberWriteException($e);
             throw $e;
         }
 
@@ -1058,6 +1070,37 @@ final class LoyaltyRepository {
         return $this->issueGoogleWalletLink($member, 'api:' . (string)($client['id'] ?? 'external'), false);
     }
 
+    public function googleWalletSaveUrlFromQrToken(string $token): string {
+        $payload = $this->decodeGoogleWalletQrToken($token);
+        $tenantId = (string)($payload['tenantId'] ?? '');
+        $accountId = (string)($payload['accountId'] ?? '');
+
+        if ($tenantId === '' || !hash_equals($this->tenantId(), $tenantId) || $accountId === '') {
+            throw new \InvalidArgumentException('El QR de la tarjeta no pertenece a este programa.');
+        }
+
+        $member = $this->memberFromPayload(['accountId' => $accountId]);
+        if (!$member) {
+            throw new \InvalidArgumentException('Socio no encontrado para abrir la tarjeta.');
+        }
+        $this->assertMemberCanOperate($member, 'abrir la tarjeta digital');
+
+        $service = $this->googleWalletServiceOrFail();
+        $result = $service->buildSaveUrl(
+            (string)$member['account_id'],
+            (string)($member['account_name'] ?? $member['account_id']),
+            (int)($member['points'] ?? 0)
+        );
+
+        $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'qr-opened', [
+            'points' => (int)($member['points'] ?? 0),
+            'classId' => $result['classId'],
+            'openedAt' => date('c'),
+        ]);
+
+        return (string)$result['saveUrl'];
+    }
+
     public function googleWalletNotify(array $payload, ?string $userId = null): array {
         $body = trim((string)($payload['body'] ?? $payload['message'] ?? ''));
         if ($body === '') {
@@ -1144,6 +1187,7 @@ final class LoyaltyRepository {
         return [
             'configured' => true,
             'saveUrl' => $result['saveUrl'],
+            'qrPath' => '/api/l/w/' . $this->googleWalletQrToken($member),
             'objectId' => $result['objectId'],
             'classId' => $result['classId'],
             'member' => [
@@ -1158,7 +1202,7 @@ final class LoyaltyRepository {
 
     /**
      * Envia el boton "Agregar a Google Wallet" al correo del socio. El saveUrl
-     * se manda al destinatario pero se almacena redaccion en outbox.
+     * no se muestra como URL larga en el HTML y se almacena redaccion en outbox.
      *
      * @return array{sent: bool, recipient: ?string, reason?: string}
      */
@@ -1209,11 +1253,14 @@ final class LoyaltyRepository {
                     </td>
                   </tr>
                 </table>
-                <p style="text-align:center;margin:24px 0;">
-                  <a href="{$safeUrl}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
-                </p>
-                <p style="margin:18px 0 0;color:#506a65;font-size:13px;line-height:1.5;">Si el boton no abre, copia y pega este enlace en el navegador de tu telefono Android.</p>
-                <p style="word-break:break-all;color:#506a65;font-size:12px;line-height:1.45;">{$safeUrl}</p>
+                <table role="presentation" cellspacing="0" cellpadding="0" align="center" style="margin:24px auto 0;">
+                  <tr>
+                    <td align="center" bgcolor="#0f766e" style="border-radius:10px;">
+                      <a href="{$safeUrl}" target="_blank" style="display:inline-block;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;line-height:18px;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, intenta tocar el boton desde Chrome en tu telefono Android.</p>
               </td>
             </tr>
           </table>
@@ -1239,6 +1286,65 @@ HTML;
             'recipient' => $recipient,
             'reason' => $sent ? 'sent' : 'mail-transport-failed',
         ];
+    }
+
+    private function googleWalletQrToken(array $member): string {
+        $accountId = trim((string)($member['account_id'] ?? ''));
+        if ($accountId === '') {
+            throw new \InvalidArgumentException('El socio no tiene cuenta para generar el QR.');
+        }
+
+        $expiresAt = time() + 86400;
+        $expiresAtBase36 = base_convert((string)$expiresAt, 10, 36);
+        $payload = 'v1.' . $accountId . '.' . $expiresAtBase36;
+        $signature = substr(hash_hmac('sha256', $this->tenantId() . '|' . $accountId . '|' . $expiresAtBase36, $this->googleWalletQrSecret(), true), 0, 8);
+
+        return $payload . '.' . $this->base64UrlEncode($signature);
+    }
+
+    private function decodeGoogleWalletQrToken(string $token): array {
+        $token = trim($token);
+        $parts = explode('.', $token);
+        if (count($parts) !== 4 || $parts[0] !== 'v1') {
+            throw new \InvalidArgumentException('El QR de la tarjeta no es valido.');
+        }
+
+        [, $accountId, $expiresAtBase36, $signature] = $parts;
+        if ($accountId === '' || $expiresAtBase36 === '' || !ctype_alnum($expiresAtBase36)) {
+            throw new \InvalidArgumentException('El QR de la tarjeta no es valido.');
+        }
+
+        $expectedSignature = $this->base64UrlEncode(substr(hash_hmac('sha256', $this->tenantId() . '|' . $accountId . '|' . $expiresAtBase36, $this->googleWalletQrSecret(), true), 0, 8));
+        if (!hash_equals($expectedSignature, $signature)) {
+            throw new \InvalidArgumentException('El QR de la tarjeta no es valido.');
+        }
+
+        $expiresAt = (int)base_convert(strtolower($expiresAtBase36), 36, 10);
+        if ((int)$expiresAt <= time()) {
+            throw new \InvalidArgumentException('El QR de la tarjeta expiro. Genera uno nuevo.');
+        }
+
+        return [
+            'tenantId' => $this->tenantId(),
+            'accountId' => $accountId,
+            'exp' => $expiresAt,
+        ];
+    }
+
+    private function googleWalletQrSecret(): string {
+        $secret = trim((string)($_ENV['LOYALTY_WALLET_QR_SECRET'] ?? ''));
+        if ($secret === '') {
+            $secret = trim((string)($_ENV['JWT_SECRET'] ?? ''));
+        }
+        if ($secret === '') {
+            throw new \RuntimeException('Configura LOYALTY_WALLET_QR_SECRET o JWT_SECRET para firmar QR de Google Wallet.');
+        }
+
+        return $secret;
+    }
+
+    private function base64UrlEncode(string $value): string {
+        return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
     }
 
     /**
@@ -2284,14 +2390,60 @@ HTML;
         }
     }
 
-    private function assertUniqueMemberIdentity(string $tenantId, string $accountId, string $email): void {
-        $exists = (int)$this->scalar(
-            'SELECT COUNT(*) FROM loyalty_members
-             WHERE tenant_id = :tenant_id AND (account_id = :account_id OR (:email <> \'\' AND lower(email) = :email))',
-            ['tenant_id' => $tenantId, 'account_id' => $accountId, 'email' => $email]
+    private function assertUniqueMemberIdentity(string $tenantId, string $accountId, string $email, ?string $excludeMemberId = null): void {
+        $rows = $this->fetchAll(
+            'SELECT id, account_id, account_name, email
+             FROM loyalty_members
+             WHERE tenant_id = :tenant_id
+               AND id <> COALESCE(:exclude_member_id, \'\')
+               AND (account_id = :account_id OR (:email <> \'\' AND lower(email) = :email))
+             LIMIT 3',
+            [
+                'tenant_id' => $tenantId,
+                'exclude_member_id' => $excludeMemberId,
+                'account_id' => $accountId,
+                'email' => $email,
+            ]
         );
-        if ($exists > 0) {
-            throw new \InvalidArgumentException('Ya existe un socio con esa cuenta o correo.');
+
+        if (!$rows) {
+            return;
+        }
+
+        $messages = [];
+        foreach ($rows as $row) {
+            $owner = $this->memberConflictOwnerLabel($row);
+            if ((string)($row['account_id'] ?? '') === $accountId) {
+                $messages['account'] = "La cuenta {$accountId} ya esta asignada a {$owner}.";
+            }
+            if ($email !== '' && mb_strtolower((string)($row['email'] ?? '')) === $email) {
+                $messages['email'] = "El correo {$email} ya esta registrado en {$owner}.";
+            }
+        }
+
+        throw new \InvalidArgumentException(implode(' ', array_values($messages ?: ['Ya existe un socio con esa cuenta o correo.'])));
+    }
+
+    private function memberConflictOwnerLabel(array $row): string {
+        $name = trim((string)($row['account_name'] ?? ''));
+        $accountId = trim((string)($row['account_id'] ?? ''));
+
+        if ($name !== '' && $accountId !== '') {
+            return "{$name} ({$accountId})";
+        }
+        if ($name !== '') {
+            return $name;
+        }
+        if ($accountId !== '') {
+            return $accountId;
+        }
+
+        return 'otro socio';
+    }
+
+    private function throwMemberWriteException(\Throwable $e): void {
+        if ($e instanceof \PDOException && $e->getCode() === '23505') {
+            throw new \InvalidArgumentException('No se pudo guardar el socio porque la cuenta ya esta asignada a otro cliente.');
         }
     }
 
@@ -2770,6 +2922,41 @@ HTML;
         return $rows[0] ?? [];
     }
 
+    private function dashboardTopCustomers(string $tenantId, ?array $dateScope): array {
+        if ($dateScope === null) {
+            return $this->fetchAll(
+                "SELECT m.id, m.account_id, m.account_name AS name, m.email, m.tier, m.wallet_platform AS wallet_platform,
+                        COALESCE(a.balance, 0) AS points, m.last_activity_at
+                 FROM loyalty_members m
+                 LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+                 WHERE m.tenant_id = :tenant_id
+                 ORDER BY COALESCE(a.balance, 0) DESC, m.last_activity_at DESC NULLS LAST
+                 LIMIT 20",
+                ['tenant_id' => $tenantId]
+            );
+        }
+
+        return $this->fetchAll(
+            "SELECT m.id, m.account_id, m.account_name AS name, m.email, m.tier, m.wallet_platform AS wallet_platform,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN l.entry_type = 'purchase' THEN l.points
+                            WHEN l.entry_type = 'redemption' THEN ABS(l.points)
+                            ELSE 0
+                        END
+                    ), 0) AS points,
+                    m.last_activity_at
+             FROM loyalty_members m
+             JOIN loyalty_point_ledger l ON l.member_id = m.id AND l.tenant_id = m.tenant_id
+             WHERE m.tenant_id = :tenant_id
+               AND l.created_at::date BETWEEN :from::date AND :to::date
+             GROUP BY m.id, m.account_id, m.account_name, m.email, m.tier, m.wallet_platform, m.last_activity_at
+             ORDER BY points DESC, m.last_activity_at DESC NULLS LAST
+             LIMIT 20",
+            ['tenant_id' => $tenantId, 'from' => $dateScope['start'], 'to' => $dateScope['end']]
+        );
+    }
+
     private function walletSummary(string $tenantId): array {
         $rows = $this->fetchAll(
             "SELECT wallet_platform AS platform, COUNT(*) AS total
@@ -2787,17 +2974,50 @@ HTML;
         return $summary;
     }
 
-    private function recentRedemptions(string $tenantId): array {
+    private function recentConsumptions(string $tenantId, ?array $dateScope): array {
+        $where = 'l.tenant_id = :tenant_id AND l.entry_type = \'purchase\'';
+        $params = ['tenant_id' => $tenantId];
+        $limit = 12;
+        if ($dateScope !== null) {
+            $where .= ' AND l.created_at::date BETWEEN :from::date AND :to::date';
+            $params['from'] = $dateScope['start'];
+            $params['to'] = $dateScope['end'];
+            $limit = 50;
+        }
+
+        return $this->fetchAll(
+            "SELECT l.id, l.member_id, m.account_name AS customer, l.reference AS invoice_number,
+                    l.points, l.metadata, l.created_at
+             FROM loyalty_point_ledger l
+             JOIN loyalty_members m ON m.id = l.member_id AND m.tenant_id = l.tenant_id
+             WHERE {$where}
+             ORDER BY l.created_at DESC
+             LIMIT {$limit}",
+            $params
+        );
+    }
+
+    private function recentRedemptions(string $tenantId, ?array $dateScope = null): array {
+        $where = 'r.tenant_id = :tenant_id';
+        $params = ['tenant_id' => $tenantId];
+        $limit = 10;
+        if ($dateScope !== null) {
+            $where .= ' AND r.created_at::date BETWEEN :from::date AND :to::date';
+            $params['from'] = $dateScope['start'];
+            $params['to'] = $dateScope['end'];
+            $limit = 50;
+        }
+
         return $this->fetchAll(
             "SELECT r.id, r.member_id, m.account_name AS customer, r.reward_id, w.name AS reward,
                     r.points_cost, r.status, r.metadata, r.created_at
              FROM loyalty_redemptions r
              JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
              JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
-             WHERE r.tenant_id = :tenant_id
+             WHERE {$where}
              ORDER BY r.created_at DESC
-             LIMIT 10",
-            ['tenant_id' => $tenantId]
+             LIMIT {$limit}",
+            $params
         );
     }
 
@@ -2839,15 +3059,9 @@ HTML;
         ];
     }
 
-    private function dashboardAnalytics(string $tenantId, array $metrics): array {
+    private function dashboardAnalytics(string $tenantId, array $metrics, ?array $dateScope): array {
         $activeMembers = max(0, (int)($metrics['activeMembers'] ?? 0));
-        $withDigitalCard = (int)$this->scalar(
-            "SELECT COUNT(*) FROM loyalty_members
-             WHERE tenant_id = :tenant_id
-               AND status = 'active'
-               AND wallet_platform IN ('google', 'apple')",
-            ['tenant_id' => $tenantId]
-        );
+        $withDigitalCard = min($activeMembers, max(0, (int)($metrics['digitalMembers'] ?? 0)));
         $recentBuyers = (int)$this->scalar(
             "SELECT COUNT(DISTINCT member_id)
              FROM loyalty_point_ledger
@@ -2869,7 +3083,7 @@ HTML;
         );
 
         return [
-            'activityTrend' => $this->activityTrend($tenantId),
+            'activityTrend' => $this->activityTrend($tenantId, $dateScope),
             'tierSummary' => $this->tierSummary($tenantId),
             'operationalFunnel' => [
                 [
@@ -2903,13 +3117,187 @@ HTML;
                 'digitalCardRate' => $this->percentage($withDigitalCard, $activeMembers),
                 'redemptionRate' => $this->percentage($recentRedeemers, max(1, $recentBuyers)),
             ],
+            'periodMetrics' => $this->periodMetrics($tenantId, $metrics, $dateScope),
         ];
     }
 
-    private function activityTrend(string $tenantId): array {
+    private function periodMetrics(string $tenantId, array $baseMetrics, ?array $dateScope): array {
+        if ($dateScope !== null) {
+            return $this->periodMetricsForWindow($tenantId, $dateScope);
+        }
+
+        $row = $this->fetchAll(
+            "SELECT
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '6 days') AS active_7,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '6 days') AS digital_7,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at >= CURRENT_DATE - INTERVAL '6 days'), 0) AS issued_7,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at >= CURRENT_DATE - INTERVAL '6 days') AS redemptions_7,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at >= CURRENT_DATE - INTERVAL '6 days'), 0) AS average_ticket_7,
+
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '13 days') AS active_14,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '13 days') AS digital_14,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at >= CURRENT_DATE - INTERVAL '13 days'), 0) AS issued_14,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at >= CURRENT_DATE - INTERVAL '13 days') AS redemptions_14,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at >= CURRENT_DATE - INTERVAL '13 days'), 0) AS average_ticket_14,
+
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '29 days') AS active_30,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at >= CURRENT_DATE - INTERVAL '29 days') AS digital_30,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at >= CURRENT_DATE - INTERVAL '29 days'), 0) AS issued_30,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at >= CURRENT_DATE - INTERVAL '29 days') AS redemptions_30,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at >= CURRENT_DATE - INTERVAL '29 days'), 0) AS average_ticket_30,
+
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0), 0) AS issued_all,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption') AS redemptions_all,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount')), 0) AS average_ticket_all
+             FROM loyalty_point_ledger l
+             JOIN loyalty_members m ON m.id = l.member_id AND m.tenant_id = l.tenant_id
+             WHERE l.tenant_id = :tenant_id",
+            ['tenant_id' => $tenantId]
+        )[0] ?? [];
+
+        return [
+            '7' => $this->metricRow($row, '7', null, null),
+            '14' => $this->metricRow($row, '14', null, null),
+            '30' => $this->metricRow($row, '30', null, null),
+            'all' => $this->metricRow($row, 'all', (int)($baseMetrics['activeMembers'] ?? 0), (int)($baseMetrics['digitalMembers'] ?? 0)),
+        ];
+    }
+
+    private function periodMetricsForWindow(string $tenantId, array $dateScope): array {
+        $monthStart = new \DateTimeImmutable((string)$dateScope['start']);
+        $monthEnd = new \DateTimeImmutable((string)$dateScope['end']);
+        $start7 = $this->maxDate($monthStart, $monthEnd->modify('-6 days'))->format('Y-m-d');
+        $start14 = $this->maxDate($monthStart, $monthEnd->modify('-13 days'))->format('Y-m-d');
+        $start30 = $this->maxDate($monthStart, $monthEnd->modify('-29 days'))->format('Y-m-d');
+        $end = $monthEnd->format('Y-m-d');
+
+        $row = $this->fetchAll(
+            "SELECT
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_7::date AND :end::date) AS active_7,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_7::date AND :end::date) AS digital_7,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at::date BETWEEN :start_7::date AND :end::date), 0) AS issued_7,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at::date BETWEEN :start_7::date AND :end::date) AS redemptions_7,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at::date BETWEEN :start_7::date AND :end::date), 0) AS average_ticket_7,
+
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_14::date AND :end::date) AS active_14,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_14::date AND :end::date) AS digital_14,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at::date BETWEEN :start_14::date AND :end::date), 0) AS issued_14,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at::date BETWEEN :start_14::date AND :end::date) AS redemptions_14,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at::date BETWEEN :start_14::date AND :end::date), 0) AS average_ticket_14,
+
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_30::date AND :end::date) AS active_30,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :start_30::date AND :end::date) AS digital_30,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at::date BETWEEN :start_30::date AND :end::date), 0) AS issued_30,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at::date BETWEEN :start_30::date AND :end::date) AS redemptions_30,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at::date BETWEEN :start_30::date AND :end::date), 0) AS average_ticket_30,
+
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :month_start::date AND :end::date) AS active_all,
+                COUNT(DISTINCT l.member_id) FILTER (WHERE m.status = 'active' AND m.wallet_platform IN ('google', 'apple') AND l.entry_type IN ('purchase', 'redemption') AND l.created_at::date BETWEEN :month_start::date AND :end::date) AS digital_all,
+                COALESCE(SUM(l.points) FILTER (WHERE l.entry_type = 'purchase' AND l.points > 0 AND l.created_at::date BETWEEN :month_start::date AND :end::date), 0) AS issued_all,
+                COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption' AND l.created_at::date BETWEEN :month_start::date AND :end::date) AS redemptions_all,
+                COALESCE(AVG((l.metadata->>'invoiceAmount')::numeric) FILTER (WHERE l.entry_type = 'purchase' AND jsonb_exists(l.metadata, 'invoiceAmount') AND l.created_at::date BETWEEN :month_start::date AND :end::date), 0) AS average_ticket_all
+             FROM loyalty_point_ledger l
+             JOIN loyalty_members m ON m.id = l.member_id AND m.tenant_id = l.tenant_id
+             WHERE l.tenant_id = :tenant_id
+               AND l.created_at::date BETWEEN :month_start::date AND :end::date",
+            [
+                'tenant_id' => $tenantId,
+                'month_start' => $monthStart->format('Y-m-d'),
+                'start_7' => $start7,
+                'start_14' => $start14,
+                'start_30' => $start30,
+                'end' => $end,
+            ]
+        )[0] ?? [];
+
+        return [
+            '7' => $this->metricRow($row, '7', null, null),
+            '14' => $this->metricRow($row, '14', null, null),
+            '30' => $this->metricRow($row, '30', null, null),
+            'all' => $this->metricRow($row, 'all', null, null),
+        ];
+    }
+
+    private function metricRow(array $row, string $suffix, ?int $activeMembers, ?int $digitalMembers): array {
+        $active = $activeMembers ?? (int)($row["active_{$suffix}"] ?? 0);
+        $digital = $digitalMembers ?? (int)($row["digital_{$suffix}"] ?? 0);
+
+        return [
+            'activeMembers' => $active,
+            'digitalMembers' => min($active, max(0, $digital)),
+            'issuedPoints' => (int)($row["issued_{$suffix}"] ?? 0),
+            'monthlyRedemptions' => (int)($row["redemptions_{$suffix}"] ?? 0),
+            'averageTicket' => (float)($row["average_ticket_{$suffix}"] ?? 0),
+        ];
+    }
+
+    private function normalizeDashboardMonth(?string $month): ?string {
+        $month = trim((string)$month);
+        if ($month === '' || preg_match('/^\d{4}-\d{2}$/', $month) !== 1) {
+            return null;
+        }
+
+        [$year, $monthNumber] = array_map('intval', explode('-', $month));
+        if (!checkdate($monthNumber, 1, $year)) {
+            return null;
+        }
+
+        $selected = new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $monthNumber));
+        $current = new \DateTimeImmutable('first day of this month');
+        if ($selected > $current) {
+            return $current->format('Y-m');
+        }
+
+        return $selected->format('Y-m');
+    }
+
+    private function dashboardDateScope(?string $month): ?array {
+        if ($month === null) {
+            return null;
+        }
+
+        $start = new \DateTimeImmutable("{$month}-01");
+        $lastDay = $start->modify('last day of this month');
+        $today = new \DateTimeImmutable('today');
+        $end = $lastDay > $today ? $today : $lastDay;
+
+        return [
+            'month' => $start->format('Y-m'),
+            'start' => $start->format('Y-m-d'),
+            'end' => $end->format('Y-m-d'),
+        ];
+    }
+
+    private function maxDate(\DateTimeImmutable $left, \DateTimeImmutable $right): \DateTimeImmutable {
+        return $left > $right ? $left : $right;
+    }
+
+    private function activityTrend(string $tenantId, ?array $dateScope = null): array {
+        if ($dateScope !== null) {
+            return $this->fetchAll(
+                "WITH days AS (
+                    SELECT generate_series(:from::date, :to::date, INTERVAL '1 day')::date AS day
+                 )
+                 SELECT
+                    to_char(days.day, 'YYYY-MM-DD') AS date,
+                    to_char(days.day, 'DD Mon') AS label,
+                    COALESCE(SUM(CASE WHEN l.entry_type = 'purchase' THEN l.points ELSE 0 END), 0) AS points_issued,
+                    ABS(COALESCE(SUM(CASE WHEN l.entry_type = 'redemption' THEN l.points ELSE 0 END), 0)) AS points_redeemed,
+                    COUNT(l.id) FILTER (WHERE l.entry_type = 'purchase') AS purchases,
+                    COUNT(l.id) FILTER (WHERE l.entry_type = 'redemption') AS redemptions
+                  FROM days
+                  LEFT JOIN loyalty_point_ledger l
+                    ON l.tenant_id = :tenant_id
+                   AND l.created_at::date = days.day
+                  GROUP BY days.day
+                  ORDER BY days.day",
+                ['tenant_id' => $tenantId, 'from' => $dateScope['start'], 'to' => $dateScope['end']]
+            );
+        }
+
         return $this->fetchAll(
             "WITH days AS (
-                SELECT generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, INTERVAL '1 day')::date AS day
+                SELECT generate_series(CURRENT_DATE - INTERVAL '29 days', CURRENT_DATE, INTERVAL '1 day')::date AS day
              )
              SELECT
                 to_char(days.day, 'YYYY-MM-DD') AS date,
@@ -2944,7 +3332,7 @@ HTML;
             return 0.0;
         }
 
-        return round(($value / $total) * 100, 1);
+        return round(min(100, max(0, ($value / $total) * 100)), 1);
     }
 
     private function accountForMember(string $tenantId, string $memberId): array {

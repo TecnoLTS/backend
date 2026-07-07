@@ -312,8 +312,15 @@ final class LoyaltySchema {
     }
 
     private function createIndexes(): void {
+        $this->createOptionalExtension('pg_trgm');
         $this->createIndexIfMissing('loyalty_members_tenant_search_idx', 'CREATE INDEX loyalty_members_tenant_search_idx ON loyalty_members (tenant_id, lower(account_name), lower(email), lower(account_id), lower(COALESCE(phone, \'\')))');
         $this->createIndexIfMissing('loyalty_members_tenant_status_idx', 'CREATE INDEX loyalty_members_tenant_status_idx ON loyalty_members (tenant_id, status, tier, wallet_platform)');
+        $this->createOptionalIndexIfMissing('loyalty_members_tenant_account_id_idx', 'CREATE INDEX loyalty_members_tenant_account_id_idx ON loyalty_members (tenant_id, account_id)');
+        $this->createOptionalIndexIfMissing('loyalty_members_tenant_lower_email_idx', 'CREATE INDEX loyalty_members_tenant_lower_email_idx ON loyalty_members (tenant_id, lower(email))');
+        $this->createOptionalIndexIfMissing('loyalty_members_account_name_trgm_idx', 'CREATE INDEX loyalty_members_account_name_trgm_idx ON loyalty_members USING gin (lower(account_name) gin_trgm_ops)');
+        $this->createOptionalIndexIfMissing('loyalty_members_email_trgm_idx', 'CREATE INDEX loyalty_members_email_trgm_idx ON loyalty_members USING gin (lower(email) gin_trgm_ops)');
+        $this->createOptionalIndexIfMissing('loyalty_members_account_id_trgm_idx', 'CREATE INDEX loyalty_members_account_id_trgm_idx ON loyalty_members USING gin (lower(account_id) gin_trgm_ops)');
+        $this->createOptionalIndexIfMissing('loyalty_members_phone_trgm_idx', 'CREATE INDEX loyalty_members_phone_trgm_idx ON loyalty_members USING gin (lower(COALESCE(phone, \'\')) gin_trgm_ops)');
         $this->createIndexIfMissing('loyalty_ledger_tenant_created_idx', 'CREATE INDEX loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_ledger_reference_idx', 'CREATE INDEX loyalty_ledger_reference_idx ON loyalty_point_ledger (tenant_id, source, reference)');
         $this->createIndexIfMissing('loyalty_redemptions_member_day_idx', 'CREATE INDEX loyalty_redemptions_member_day_idx ON loyalty_redemptions (tenant_id, member_id, created_at DESC)');
@@ -363,5 +370,21 @@ final class LoyaltySchema {
         }
 
         $this->pdo->exec($sql);
+    }
+
+    private function createOptionalExtension(string $extension): void {
+        try {
+            $this->pdo->exec("CREATE EXTENSION IF NOT EXISTS {$extension}");
+        } catch (\Throwable) {
+            // Optional search acceleration; deployments without extension privileges still run.
+        }
+    }
+
+    private function createOptionalIndexIfMissing(string $indexName, string $sql): void {
+        try {
+            $this->createIndexIfMissing($indexName, $sql);
+        } catch (\Throwable) {
+            // Optional index that depends on extension availability or DB privileges.
+        }
     }
 }

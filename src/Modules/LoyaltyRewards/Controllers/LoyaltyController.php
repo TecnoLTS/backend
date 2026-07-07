@@ -15,7 +15,8 @@ final class LoyaltyController {
 
     public function dashboard(): void {
         Auth::requireAdmin();
-        $this->respond(fn() => $this->repository->dashboard(), 'LOYALTY_DASHBOARD_FAILED');
+        $month = isset($_GET['month']) ? trim((string)$_GET['month']) : null;
+        $this->respond(fn() => $this->repository->dashboard($month), 'LOYALTY_DASHBOARD_FAILED');
     }
 
     public function customers(): void {
@@ -26,6 +27,7 @@ final class LoyaltyController {
             'tier' => isset($_GET['tier']) ? trim((string)$_GET['tier']) : 'all',
             'status' => isset($_GET['status']) ? trim((string)$_GET['status']) : 'all',
             'sort' => isset($_GET['sort']) ? trim((string)$_GET['sort']) : 'recent',
+            'count' => isset($_GET['count']) ? trim((string)$_GET['count']) : '1',
             'limit' => isset($_GET['limit']) ? (int)$_GET['limit'] : 25,
             'offset' => isset($_GET['offset']) ? (int)$_GET['offset'] : 0,
         ];
@@ -164,6 +166,18 @@ final class LoyaltyController {
             fn() => $this->repository->googleWalletLinkForAccount($accountId, $client),
             'LOYALTY_EXTERNAL_WALLET_LINK_FAILED'
         );
+    }
+
+    public function publicGoogleWalletRedirect(string $token): void {
+        try {
+            $saveUrl = $this->repository->googleWalletSaveUrlFromQrToken($token);
+            Response::noStore();
+            header('Location: ' . $saveUrl, true, 302);
+        } catch (\InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 422, 'LOYALTY_WALLET_QR_INVALID');
+        } catch (\Throwable $e) {
+            Response::error('No se pudo abrir la tarjeta digital.', 500, 'LOYALTY_WALLET_QR_FAILED');
+        }
     }
 
     public function settings(): void {

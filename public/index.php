@@ -408,6 +408,10 @@ function is_public_api_request(string $uri, string $method): bool {
         return true;
     }
 
+    if (in_array($normalizedMethod, ['GET', 'HEAD'], true) && str_starts_with($uri, '/api/l/w/')) {
+        return true;
+    }
+
     if ($normalizedMethod === 'GET' || $normalizedMethod === 'HEAD') {
         if (in_array($uri, [
             '/api/auth/verify',
