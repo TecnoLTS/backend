@@ -298,6 +298,38 @@ final class LoyaltySchema {
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
             UNIQUE (tenant_id, original_reference)
         )');
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_campaigns (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            created_by_user_id text,
+            title text NOT NULL DEFAULT \'\',
+            body text NOT NULL,
+            audience_type text NOT NULL,
+            audience_filter jsonb DEFAULT \'{}\'::jsonb NOT NULL,
+            status text NOT NULL DEFAULT \'pending\',
+            total_recipients integer NOT NULL DEFAULT 0,
+            sent_count integer NOT NULL DEFAULT 0,
+            failed_count integer NOT NULL DEFAULT 0,
+            skipped_count integer NOT NULL DEFAULT 0,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            started_at timestamp without time zone,
+            finished_at timestamp without time zone
+        )');
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_campaign_recipients (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            campaign_id text NOT NULL,
+            member_id text NOT NULL,
+            account_id text NOT NULL,
+            status text NOT NULL DEFAULT \'pending\',
+            attempts integer NOT NULL DEFAULT 0,
+            message_id text,
+            last_error text,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            UNIQUE (campaign_id, member_id)
+        )');
+        $this->pdo->exec('CREATE INDEX IF NOT EXISTS idx_wallet_campaign_recipients_pending
+            ON loyalty_wallet_campaign_recipients (tenant_id, status)');
     }
 
     private function addCompatibilityColumns(): void {
