@@ -77,6 +77,41 @@ final class WalletNotificationProcessor {
         return $tally;
     }
 
+    /**
+     * Drena destinatarios pendientes de todos los tenants (o uno) resolviendo el
+     * servicio por tenant con el resolver dado. Usado por el worker CLI.
+     *
+     * @param callable(string):(?WalletMessenger) $serviceResolver
+     * @return array{processed:int,sent:int,skipped:int,failed:int}
+     */
+    public function drainPending(int $limit, ?string $tenantId, callable $serviceResolver, int $throttleMs = 0): array {
+        $sql = "SELECT DISTINCT campaign_id, tenant_id
+                FROM loyalty_wallet_campaign_recipients
+                WHERE status = 'pending'" . ($tenantId ? ' AND tenant_id = :tenant_id' : '') .
+                ' ORDER BY campaign_id ASC LIMIT ' . max(1, $limit);
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($tenantId ? ['tenant_id' => $tenantId] : []);
+        $campaigns = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $tally = ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0];
+        $servicesByTenant = [];
+        foreach ($campaigns as $c) {
+            $t = (string)$c['tenant_id'];
+            if (!array_key_exists($t, $servicesByTenant)) {
+                $servicesByTenant[$t] = $serviceResolver($t);
+            }
+            $service = $servicesByTenant[$t];
+            if ($service === null) {
+                continue;
+            }
+            $part = $this->drainCampaign((string)$c['campaign_id'], $service, $throttleMs);
+            foreach ($tally as $k => $_) {
+                $tally[$k] += $part[$k];
+            }
+        }
+        return $tally;
+    }
+
     private function updateRecipient(string $id, string $status, int $attempts, ?string $messageId, ?string $error): void {
         $stmt = $this->pdo->prepare(
             'UPDATE loyalty_wallet_campaign_recipients

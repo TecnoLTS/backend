@@ -111,5 +111,33 @@ if ($previewAll >= 1) {
     $assert('sent_count coincide', (int)$after['sent_count'] === $previewAll);
 }
 
+// A7: drainPending drena cross-campaña/tenant resolviendo el servicio por tenant.
+// Reusa $fakeService (declarado arriba) y $processor si A5 lo dejo definido; si no,
+// se recrea aqui (mismo WalletNotificationProcessor, mismo $pdo).
+$processor = $processor ?? new WalletNotificationProcessor($pdo);
+
+// Primero se drena con el doble fake cualquier residuo 'pending' de campañas previas
+// (p.ej. el envio inline de la campaña individual arriba, que en este entorno sin
+// salida de red a Google queda 'pending'), para que el conteo de abajo sea exacto.
+$processor->drainPending(1000, 'fidepuntos', static fn(string $t): WalletMessenger => $fakeService);
+
+$previewAllForDrain = $repository->previewNotificationAudience(['audience_type' => 'all'])['recipients'];
+if ($previewAllForDrain >= 1) {
+    $worker = $repository->createNotificationCampaign([
+        'audience_type' => 'all',
+        'title' => 'Worker',
+        'body' => 'via drainPending',
+    ], 'exercise-user');
+    $assert('campaña worker queda pending', ($worker['status'] ?? '') === 'pending');
+    $assert('campaña worker total = preview all', (int)$worker['total_recipients'] === $previewAllForDrain);
+
+    $drainTally = $processor->drainPending(50, 'fidepuntos', static fn(string $t): WalletMessenger => $fakeService);
+    $assert('drainPending envio todos los pendientes', $drainTally['sent'] === $previewAllForDrain);
+
+    $workerAfter = $repository->getNotificationCampaign($worker['id']);
+    $assert('campaña worker quedo completed', ($workerAfter['status'] ?? '') === 'completed');
+    $assert('sent_count de worker coincide', (int)$workerAfter['sent_count'] === $previewAllForDrain);
+}
+
 $failed = array_keys(array_filter($checks, static fn($v) => !$v));
 exit($failed === [] ? 0 : 1);
