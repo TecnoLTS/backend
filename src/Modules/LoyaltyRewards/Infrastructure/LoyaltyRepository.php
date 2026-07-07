@@ -3961,6 +3961,10 @@ HTML;
             }
         }
 
+        // Fail-fast: resolver el servicio del tenant ANTES de escribir filas, para
+        // no dejar una campaña individual huerfana si falta la config de Wallet.
+        $individualService = $type === 'individual' ? $this->googleWalletServiceOrFail() : null;
+
         $campaignId = 'wcmp_' . bin2hex(random_bytes(8));
         $this->execute(
             'INSERT INTO loyalty_wallet_campaigns
@@ -3994,8 +3998,7 @@ HTML;
 
         // Individual: enviar inline con el servicio del tenant.
         if ($type === 'individual') {
-            $processor = new WalletNotificationProcessor($this->pdo);
-            $processor->drainCampaign($campaignId, $this->googleWalletServiceOrFail());
+            (new WalletNotificationProcessor($this->pdo))->drainCampaign($campaignId, $individualService);
         }
 
         return $this->getNotificationCampaign($campaignId);
