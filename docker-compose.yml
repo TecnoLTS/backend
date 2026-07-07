@@ -169,6 +169,50 @@ services:
       db_internal:
       backend_egress:
 
+  wallet-notify-worker:
+    image: backend-api
+    container_name: backend-wallet-notify-worker
+    restart: unless-stopped
+    logging: *default-logging
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    env_file:
+      - ./entorno/.env
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        while true; do
+          php /var/www/html/scripts/process_wallet_notifications.php \
+            --limit=${WALLET_NOTIFY_BATCH_SIZE:-100} || true;
+          sleep ${WALLET_NOTIFY_INTERVAL_SECONDS:-60};
+        done
+    volumes:
+      - ./storage:/var/www/html/storage:rw
+      - ./public/uploads:/var/www/html/public/uploads:rw
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      TZ: America/Guayaquil
+      DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
+      PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE:-ecommerce}
+      DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      LOYALTY_WALLET_NOTIFY_THROTTLE_MS: ${LOYALTY_WALLET_NOTIFY_THROTTLE_MS:-250}
+    depends_on:
+      - api
+    networks:
+      db_internal:
+      backend_egress:
+
   http:
     image: nginxinc/nginx-unprivileged:1.31-alpine
     container_name: backend-http

@@ -168,16 +168,84 @@ final class LoyaltyController {
         );
     }
 
-    public function publicGoogleWalletRedirect(string $token): void {
+    public function publicGoogleWalletLanding(string $token): void {
         try {
-            $saveUrl = $this->repository->googleWalletSaveUrlFromQrToken($token);
+            $landing = $this->repository->googleWalletQrLanding($token);
             Response::noStore();
-            header('Location: ' . $saveUrl, true, 302);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderWalletLandingPage($landing);
         } catch (\InvalidArgumentException $e) {
-            Response::error($e->getMessage(), 422, 'LOYALTY_WALLET_QR_INVALID');
+            $this->respondWalletLandingError($e->getMessage(), 422);
         } catch (\Throwable $e) {
-            Response::error('No se pudo abrir la tarjeta digital.', 500, 'LOYALTY_WALLET_QR_FAILED');
+            $this->respondWalletLandingError('No se pudo abrir la tarjeta digital.', 500);
         }
+    }
+
+    /** @param array{saveUrl: string, memberName: string, accountId: string, points: int, programName: string} $data */
+    private function renderWalletLandingPage(array $data): string {
+        $program = htmlspecialchars((string)$data['programName'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $member = htmlspecialchars((string)$data['memberName'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $account = htmlspecialchars((string)$data['accountId'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $points = number_format((int)$data['points'], 0, ',', '.');
+        $url = htmlspecialchars((string)$data['saveUrl'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        return <<<HTML
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Agregar tarjeta a Google Wallet</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#142724;">
+  <div style="max-width:460px;margin:0 auto;padding:28px 16px;">
+    <div style="background:#ffffff;border:1px solid #dce9e4;border-radius:16px;overflow:hidden;">
+      <div style="background:#173d39;color:#ffffff;padding:24px;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.78;">{$program}</div>
+        <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;">Tu tarjeta de recompensas esta lista</h1>
+      </div>
+      <div style="padding:24px;">
+        <p style="margin:0 0 18px;font-size:16px;line-height:1.5;">Hola {$member}, agrega tu tarjeta a Google Wallet para ver y usar tus puntos desde el telefono.</p>
+        <div style="display:flex;gap:12px;margin:0 0 22px;">
+          <div style="flex:1;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;padding:12px;">
+            <div style="font-size:12px;color:#506a65;font-weight:700;">Cuenta</div>
+            <div style="font-size:17px;font-weight:800;">{$account}</div>
+          </div>
+          <div style="flex:1;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;padding:12px;">
+            <div style="font-size:12px;color:#506a65;font-weight:700;">Saldo actual</div>
+            <div style="font-size:17px;font-weight:800;">{$points} pts</div>
+          </div>
+        </div>
+        <a href="{$url}" style="display:block;text-align:center;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;font-size:16px;padding:16px 22px;border-radius:12px;">Agregar a Google Wallet</a>
+        <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, toca el boton desde Chrome en tu telefono Android.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+HTML;
+    }
+
+    private function respondWalletLandingError(string $message, int $status): void {
+        $safe = htmlspecialchars($message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        Response::noStore();
+        http_response_code($status);
+        header('Content-Type: text/html; charset=UTF-8');
+        echo <<<HTML
+<!doctype html>
+<html lang="es">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tarjeta no disponible</title></head>
+<body style="margin:0;padding:0;background:#f4f7f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#142724;">
+  <div style="max-width:460px;margin:0 auto;padding:40px 16px;text-align:center;">
+    <div style="background:#ffffff;border:1px solid #dce9e4;border-radius:16px;padding:32px 24px;">
+      <h1 style="margin:0 0 10px;font-size:20px;">No pudimos abrir la tarjeta</h1>
+      <p style="margin:0;color:#506a65;font-size:15px;line-height:1.5;">{$safe}</p>
+    </div>
+  </div>
+</body>
+</html>
+HTML;
     }
 
     public function settings(): void {

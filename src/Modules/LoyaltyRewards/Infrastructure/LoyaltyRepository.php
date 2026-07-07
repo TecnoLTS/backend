@@ -1070,7 +1070,13 @@ final class LoyaltyRepository {
         return $this->issueGoogleWalletLink($member, 'api:' . (string)($client['id'] ?? 'external'), false);
     }
 
-    public function googleWalletSaveUrlFromQrToken(string $token): string {
+    /**
+     * Resuelve el token del QR corto a los datos de la pagina de aterrizaje:
+     * el saveUrl de Google mas los datos de display del socio para el boton.
+     *
+     * @return array{saveUrl: string, memberName: string, accountId: string, points: int, programName: string}
+     */
+    public function googleWalletQrLanding(string $token): array {
         $payload = $this->decodeGoogleWalletQrToken($token);
         $tenantId = (string)($payload['tenantId'] ?? '');
         $accountId = (string)($payload['accountId'] ?? '');
@@ -1098,7 +1104,17 @@ final class LoyaltyRepository {
             'openedAt' => date('c'),
         ]);
 
-        return (string)$result['saveUrl'];
+        $walletSettings = $this->settings()['settings']['googleWallet'] ?? [];
+        $programName = trim((string)($walletSettings['programName'] ?? $walletSettings['issuerName'] ?? ''))
+            ?: 'tu programa de fidelizacion';
+
+        return [
+            'saveUrl' => (string)$result['saveUrl'],
+            'memberName' => (string)($member['account_name'] ?? $member['account_id']),
+            'accountId' => (string)$member['account_id'],
+            'points' => (int)($member['points'] ?? 0),
+            'programName' => $programName,
+        ];
     }
 
     public function googleWalletNotify(array $payload, ?string $userId = null): array {

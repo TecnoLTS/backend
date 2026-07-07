@@ -423,11 +423,12 @@ deploy_backend() {
       DB_ADMIN_PASSWORD="${db_admin_password}" \
       RUN_DB_SETUP="${run_db_setup}" \
       RUN_DB_BOOTSTRAP="${run_db_setup}" \
-      docker compose --env-file "${env_file}" up -d --force-recreate --remove-orphans api http sri-worker
+      docker compose --env-file "${env_file}" up -d --force-recreate --remove-orphans api http sri-worker wallet-notify-worker
   )
   wait_for_container_state backend-api
   wait_for_container_state backend-http
   wait_for_container_state backend-sri-worker
+  wait_for_container_state backend-wallet-notify-worker
   assert_backend_mode "${env_file}"
   compose_cmd "${env_file}" ps
   echo "Backend Paramascotasec (${mode}) listo"
