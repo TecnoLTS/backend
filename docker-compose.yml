@@ -189,8 +189,8 @@ services:
       - |
         while true; do
           php /var/www/html/scripts/process_wallet_notifications.php \
-            --limit=${WALLET_NOTIFY_BATCH_SIZE:-100} || true;
-          sleep ${WALLET_NOTIFY_INTERVAL_SECONDS:-60};
+            --limit=${WALLET_NOTIFY_BATCH_SIZE} || true;
+          sleep ${WALLET_NOTIFY_INTERVAL_SECONDS};
         done
     volumes:
       - ./storage:/var/www/html/storage:rw
@@ -206,7 +206,6 @@ services:
       DB_DATABASE: ${DB_DATABASE:-ecommerce}
       DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
       DB_PASSWORD: ${DB_PASSWORD:-}
-      LOYALTY_WALLET_NOTIFY_THROTTLE_MS: ${LOYALTY_WALLET_NOTIFY_THROTTLE_MS:-250}
     depends_on:
       - api
     networks:
