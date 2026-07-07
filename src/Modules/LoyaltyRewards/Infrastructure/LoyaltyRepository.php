@@ -2336,13 +2336,8 @@ HTML;
 
     private function memberFromPayload(array $payload): ?array {
         $tenantId = $this->tenantId();
-        $memberId = trim((string)($payload['memberId'] ?? $payload['member_id'] ?? ''));
-        if ($memberId !== '') {
-            return $this->memberById($memberId);
-        }
 
-        $accountId = trim((string)($payload['accountId'] ?? $payload['account_id'] ?? ''));
-        if ($accountId !== '') {
+        $byAccountId = function (string $accountId) use ($tenantId): ?array {
             $rows = $this->fetchAll(
                 'SELECT m.*, COALESCE(a.balance, 0) AS points
                  FROM loyalty_members m
@@ -2352,6 +2347,19 @@ HTML;
                 ['tenant_id' => $tenantId, 'account_id' => $accountId]
             );
             return $rows[0] ?? null;
+        };
+
+        $memberId = trim((string)($payload['memberId'] ?? $payload['member_id'] ?? ''));
+        if ($memberId !== '') {
+            // El identificador puede ser el id interno (member_xxx) o el id visible
+            // del socio (account_id, p. ej. CLI-00848, que es lo que el operador ve
+            // en la tarjeta y en el QR). Se aceptan ambos.
+            return $this->memberById($memberId) ?? $byAccountId($memberId);
+        }
+
+        $accountId = trim((string)($payload['accountId'] ?? $payload['account_id'] ?? ''));
+        if ($accountId !== '') {
+            return $byAccountId($accountId);
         }
 
         $email = mb_strtolower(trim((string)($payload['customerEmail'] ?? $payload['email'] ?? '')));
