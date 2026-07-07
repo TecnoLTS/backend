@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\LoyaltyRewards\Infrastructure;
 
-use App\Modules\LoyaltyRewards\Infrastructure\Wallet\GoogleWalletService;
+use App\Modules\LoyaltyRewards\Infrastructure\Wallet\WalletMessenger;
 use PDO;
 
 /**
@@ -22,7 +22,7 @@ final class WalletNotificationProcessor {
      * 404 de Google (pase no guardado) -> 'skipped'. Error recuperable -> 'failed'
      * al agotar intentos, si no se deja 'pending' para reintento.
      */
-    public function sendRecipient(GoogleWalletService $service, array $recipient, string $header, string $body): string {
+    public function sendRecipient(WalletMessenger $service, array $recipient, string $header, string $body): string {
         $attempts = (int)$recipient['attempts'] + 1;
         try {
             $result = $service->addMessage((string)$recipient['account_id'], $header, $body);
@@ -45,7 +45,7 @@ final class WalletNotificationProcessor {
     }
 
     /** Drena los destinatarios pendientes de UNA campaña con un servicio ya resuelto. */
-    public function drainCampaign(string $campaignId, GoogleWalletService $service, int $throttleMs = 0): array {
+    public function drainCampaign(string $campaignId, WalletMessenger $service, int $throttleMs = 0): array {
         $campaign = $this->campaignRow($campaignId);
         if ($campaign === null) {
             return ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0];

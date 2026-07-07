@@ -7,6 +7,8 @@ require_once __DIR__ . '/../vendor/autoload.php';
 use App\Core\TenantContext;
 use App\Core\Database;
 use App\Modules\LoyaltyRewards\Infrastructure\LoyaltyRepository;
+use App\Modules\LoyaltyRewards\Infrastructure\WalletNotificationProcessor;
+use App\Modules\LoyaltyRewards\Infrastructure\Wallet\WalletMessenger;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
 use Dotenv\Dotenv;
 
@@ -79,6 +81,34 @@ if (!empty($campaign['id'])) {
     $list = $repository->listNotificationCampaigns(['limit' => 10]);
     $assert('listNotificationCampaigns trae items', isset($list['items']) && count($list['items']) >= 1);
     $assert('la campaña creada aparece en la lista', (bool)array_filter($list['items'], static fn($c) => ($c['id'] ?? '') === $campaign['id']));
+}
+
+// Doble minimo: implementa el puerto WalletMessenger sin depender de las
+// credenciales reales de Google (evita llamadas HTTP en el ejercicio).
+$fakeService = new class implements WalletMessenger {
+    public function addMessage(string $accountId, string $header, string $body): array {
+        return ['objectId' => 'obj_' . $accountId, 'messageId' => 'msg_fake'];
+    }
+};
+
+$previewAll = $repository->previewNotificationAudience(['audience_type' => 'all'])['recipients'];
+if ($previewAll >= 1) {
+    $massive = $repository->createNotificationCampaign([
+        'audience_type' => 'all',
+        'title' => 'Masivo',
+        'body' => 'Promo de prueba masiva',
+    ], 'exercise-user');
+    $assert('campaña masiva queda pending', ($massive['status'] ?? '') === 'pending');
+    $assert('campaña masiva total = preview all', (int)$massive['total_recipients'] === $previewAll);
+
+    $processor = new WalletNotificationProcessor($pdo);
+    $tally = $processor->drainCampaign($massive['id'], $fakeService);
+    $assert('drenado proceso todos', $tally['processed'] === $previewAll);
+    $assert('drenado marco enviados', $tally['sent'] === $previewAll);
+
+    $after = $repository->getNotificationCampaign($massive['id']);
+    $assert('campaña masiva quedo completed', ($after['status'] ?? '') === 'completed');
+    $assert('sent_count coincide', (int)$after['sent_count'] === $previewAll);
 }
 
 $failed = array_keys(array_filter($checks, static fn($v) => !$v));

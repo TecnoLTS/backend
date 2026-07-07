@@ -12,7 +12,7 @@ use Firebase\JWT\JWT;
  * TenantContext: recibe toda la configuracion por constructor para poder
  * usarse igual desde HTTP y desde scripts CLI.
  */
-final class GoogleWalletService {
+final class GoogleWalletService implements WalletMessenger {
     public const API_BASE = 'https://walletobjects.googleapis.com/walletobjects/v1';
     public const SAVE_URL_BASE = 'https://pay.google.com/gp/v/save/';
 
