@@ -3920,4 +3920,163 @@ HTML;
 
         return ['recipients' => $count];
     }
+
+    /**
+     * Crea una campaña de notificacion. Individual se envia inline (feedback
+     * inmediato); masivo (all/segment) queda 'pending' para el worker.
+     */
+    public function createNotificationCampaign(array $payload, ?string $userId = null): array {
+        $tenantId = $this->tenantId();
+        $type = (string)($payload['audience_type'] ?? '');
+        if (!in_array($type, ['individual', 'all', 'segment'], true)) {
+            throw new \InvalidArgumentException('Audiencia invalida.');
+        }
+
+        $body = trim((string)($payload['body'] ?? ''));
+        if ($body === '') {
+            throw new \InvalidArgumentException('Escribe un mensaje para la notificacion.');
+        }
+        $body = mb_substr($body, 0, 300);
+
+        $title = mb_substr(trim((string)($payload['title'] ?? '')), 0, 100);
+        if ($title === '') {
+            $walletSettings = $this->settings()['settings']['googleWallet'] ?? [];
+            $title = (string)($walletSettings['issuerName'] ?? '') ?: 'Notificacion';
+        }
+
+        // Resolver destinatarios.
+        if ($type === 'individual') {
+            $member = $this->memberFromPayload($payload);
+            if (!$member) {
+                throw new \RuntimeException('Socio no encontrado.');
+            }
+            $recipients = [['member_id' => (string)$member['id'], 'account_id' => (string)$member['account_id']]];
+            $filter = ['audience_type' => 'individual', 'memberId' => (string)$member['id']];
+        } else {
+            $filter = $this->sanitizeAudienceFilter($payload, $type);
+            [$fromWhere, $params] = $this->notificationAudienceQuery($filter);
+            $recipients = $this->fetchAll('SELECT DISTINCT m.id AS member_id, m.account_id ' . $fromWhere . ' ORDER BY m.id ASC', $params);
+            if ($recipients === []) {
+                throw new \RuntimeException('El segmento no tiene socios con tarjeta guardada.');
+            }
+        }
+
+        $campaignId = 'wcmp_' . bin2hex(random_bytes(8));
+        $this->execute(
+            'INSERT INTO loyalty_wallet_campaigns
+                (id, tenant_id, created_by_user_id, title, body, audience_type, audience_filter, status, total_recipients)
+             VALUES (:id, :tenant_id, :user, :title, :body, :type, :filter, :status, :total)',
+            [
+                'id' => $campaignId, 'tenant_id' => $tenantId, 'user' => $userId,
+                'title' => $title, 'body' => $body, 'type' => $type,
+                'filter' => json_encode($filter, JSON_UNESCAPED_UNICODE),
+                'status' => 'pending', 'total' => count($recipients),
+            ]
+        );
+
+        foreach ($recipients as $r) {
+            $this->execute(
+                'INSERT INTO loyalty_wallet_campaign_recipients (id, tenant_id, campaign_id, member_id, account_id, status)
+                 VALUES (:id, :tenant_id, :campaign_id, :member_id, :account_id, :status)
+                 ON CONFLICT (campaign_id, member_id) DO NOTHING',
+                [
+                    'id' => 'wrcp_' . bin2hex(random_bytes(8)), 'tenant_id' => $tenantId,
+                    'campaign_id' => $campaignId, 'member_id' => (string)$r['member_id'],
+                    'account_id' => (string)$r['account_id'], 'status' => 'pending',
+                ]
+            );
+        }
+
+        $this->recordAudit(
+            'wallet.google.campaign_created', 'campaign', $campaignId, null,
+            ['audienceType' => $type, 'totalRecipients' => count($recipients)], null, $userId
+        );
+
+        // Individual: enviar inline con el servicio del tenant.
+        if ($type === 'individual') {
+            $processor = new WalletNotificationProcessor($this->pdo);
+            $processor->drainCampaign($campaignId, $this->googleWalletServiceOrFail());
+        }
+
+        return $this->getNotificationCampaign($campaignId);
+    }
+
+    /** @return array<string, mixed> */
+    private function sanitizeAudienceFilter(array $payload, string $type): array {
+        $filter = ['audience_type' => $type];
+        if ($type !== 'segment') {
+            return $filter;
+        }
+        foreach (['tier', 'status', 'query'] as $key) {
+            if (isset($payload[$key])) {
+                $filter[$key] = (string)$payload[$key];
+            }
+        }
+        foreach (['purchasedWithinDays', 'inactiveForDays', 'minBalance', 'maxBalance'] as $key) {
+            if (isset($payload[$key]) && $payload[$key] !== '' && $payload[$key] !== null) {
+                $filter[$key] = (int)$payload[$key];
+            }
+        }
+        return $filter;
+    }
+
+    /** @return array{items: array<int, array<string, mixed>>, total: int} */
+    public function listNotificationCampaigns(array $filters = []): array {
+        $tenantId = $this->tenantId();
+        $limit = max(1, min(100, (int)($filters['limit'] ?? 25)));
+        $offset = max(0, (int)($filters['offset'] ?? 0));
+
+        $rows = $this->fetchAll(
+            'SELECT id, tenant_id, created_by_user_id, title, body, audience_type, audience_filter,
+                    status, total_recipients, sent_count, failed_count, skipped_count,
+                    created_at, started_at, finished_at
+             FROM loyalty_wallet_campaigns
+             WHERE tenant_id = :tenant_id
+             ORDER BY created_at DESC
+             LIMIT ' . $limit . ' OFFSET ' . $offset,
+            ['tenant_id' => $tenantId]
+        );
+        $total = (int)$this->scalar('SELECT COUNT(*) FROM loyalty_wallet_campaigns WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
+
+        return ['items' => array_map(fn($row) => $this->mapCampaign($row), $rows), 'total' => $total];
+    }
+
+    /** @return array<string, mixed> */
+    public function getNotificationCampaign(string $campaignId): array {
+        $rows = $this->fetchAll(
+            'SELECT id, tenant_id, created_by_user_id, title, body, audience_type, audience_filter,
+                    status, total_recipients, sent_count, failed_count, skipped_count,
+                    created_at, started_at, finished_at
+             FROM loyalty_wallet_campaigns
+             WHERE tenant_id = :tenant_id AND id = :id LIMIT 1',
+            ['tenant_id' => $this->tenantId(), 'id' => $campaignId]
+        );
+        if ($rows === []) {
+            throw new \RuntimeException('Campaña no encontrada.');
+        }
+        return $this->mapCampaign($rows[0]);
+    }
+
+    /** @return array<string, mixed> */
+    private function mapCampaign(array $row): array {
+        $filter = $row['audience_filter'] ?? [];
+        if (is_string($filter)) {
+            $filter = json_decode($filter, true) ?: [];
+        }
+        return [
+            'id' => (string)$row['id'],
+            'title' => (string)$row['title'],
+            'body' => (string)$row['body'],
+            'audience_type' => (string)$row['audience_type'],
+            'audience_filter' => is_array($filter) ? $filter : [],
+            'status' => (string)$row['status'],
+            'total_recipients' => (int)$row['total_recipients'],
+            'sent_count' => (int)$row['sent_count'],
+            'failed_count' => (int)$row['failed_count'],
+            'skipped_count' => (int)$row['skipped_count'],
+            'created_at' => $row['created_at'] ?? null,
+            'started_at' => $row['started_at'] ?? null,
+            'finished_at' => $row['finished_at'] ?? null,
+        ];
+    }
 }
