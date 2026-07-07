@@ -308,6 +308,36 @@ final class LoyaltyController {
         );
     }
 
+    public function notificationsPreview(): void {
+        Auth::requireAdmin();
+        $payload = $this->jsonPayload();
+        $this->respond(fn() => $this->repository->previewNotificationAudience($payload), 'LOYALTY_NOTIFICATION_PREVIEW_FAILED');
+    }
+
+    public function createNotificationCampaign(): void {
+        $user = Auth::requireAdmin();
+        $payload = $this->jsonPayload();
+        $this->respond(
+            fn() => $this->repository->createNotificationCampaign($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            'LOYALTY_NOTIFICATION_CREATE_FAILED',
+            201
+        );
+    }
+
+    public function notifications(): void {
+        Auth::requireAdmin();
+        $filters = [
+            'limit' => isset($_GET['limit']) ? (int)$_GET['limit'] : 25,
+            'offset' => isset($_GET['offset']) ? (int)$_GET['offset'] : 0,
+        ];
+        $this->respond(fn() => $this->repository->listNotificationCampaigns($filters), 'LOYALTY_NOTIFICATIONS_FAILED');
+    }
+
+    public function notificationDetail(string $campaignId): void {
+        Auth::requireAdmin();
+        $this->respond(fn() => $this->repository->getNotificationCampaign($campaignId), 'LOYALTY_NOTIFICATION_DETAIL_FAILED');
+    }
+
     public function externalHealth(): void {
         Response::json(['status' => 'ok', 'module' => 'loyalty-rewards']);
     }
