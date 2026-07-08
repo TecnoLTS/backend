@@ -24,7 +24,7 @@ final class GoogleWalletService implements WalletMessenger {
     ) {}
 
     /** @return array{saveUrl: string, objectId: string, classId: string} */
-    public function buildSaveUrl(string $accountId, string $accountName, int $points): array {
+    public function buildSaveUrl(string $accountId, string $accountName, int $points, ?string $portalUrl = null): array {
         $objectId = $this->config->objectId($accountId);
 
         $claims = [
@@ -34,7 +34,7 @@ final class GoogleWalletService implements WalletMessenger {
             'iat' => time(),
             'payload' => [
                 'loyaltyClasses' => [$this->loyaltyClassBody()],
-                'loyaltyObjects' => [$this->loyaltyObjectBody($objectId, $accountId, $accountName, $points)],
+                'loyaltyObjects' => [$this->loyaltyObjectBody($objectId, $accountId, $accountName, $points, $portalUrl)],
             ],
         ];
 
@@ -58,10 +58,10 @@ final class GoogleWalletService implements WalletMessenger {
      *
      * @return array{objectId: string, created: bool}
      */
-    public function pushPoints(string $accountId, string $accountName, int $points): array {
+    public function pushPoints(string $accountId, string $accountName, int $points, ?string $portalUrl = null): array {
         $objectId = $this->config->objectId($accountId);
 
-        return $this->pushPointsToObject($objectId, $accountId, $accountName, $points);
+        return $this->pushPointsToObject($objectId, $accountId, $accountName, $points, $portalUrl);
     }
 
     /**
@@ -71,17 +71,21 @@ final class GoogleWalletService implements WalletMessenger {
      *
      * @return array{objectId: string, created: bool}
      */
-    public function pushPointsToObject(string $objectId, string $accountId, string $accountName, int $points): array {
-
-        $patch = $this->authorizedRequest('PATCH', '/loyaltyObject/' . rawurlencode($objectId), [
+    public function pushPointsToObject(string $objectId, string $accountId, string $accountName, int $points, ?string $portalUrl = null): array {
+        $patchBody = [
             'loyaltyPoints' => $this->loyaltyPointsBody($points),
-        ], allow404: true);
+        ];
+        if ($portalUrl !== null && trim($portalUrl) !== '') {
+            $patchBody['linksModuleData'] = $this->linksModuleData($portalUrl);
+        }
+
+        $patch = $this->authorizedRequest('PATCH', '/loyaltyObject/' . rawurlencode($objectId), $patchBody, allow404: true);
 
         if ($patch['status'] !== 404) {
             return ['objectId' => $objectId, 'created' => false];
         }
 
-        $this->authorizedRequest('POST', '/loyaltyObject', $this->loyaltyObjectBody($objectId, $accountId, $accountName, $points));
+        $this->authorizedRequest('POST', '/loyaltyObject', $this->loyaltyObjectBody($objectId, $accountId, $accountName, $points, $portalUrl));
 
         return ['objectId' => $objectId, 'created' => true];
     }
@@ -154,8 +158,8 @@ final class GoogleWalletService implements WalletMessenger {
         ];
     }
 
-    private function loyaltyObjectBody(string $objectId, string $accountId, string $accountName, int $points): array {
-        return [
+    private function loyaltyObjectBody(string $objectId, string $accountId, string $accountName, int $points, ?string $portalUrl = null): array {
+        $body = [
             'id' => $objectId,
             'classId' => $this->config->classId(),
             'state' => 'ACTIVE',
@@ -168,12 +172,28 @@ final class GoogleWalletService implements WalletMessenger {
                 'alternateText' => $accountId,
             ],
         ];
+        if ($portalUrl !== null && trim($portalUrl) !== '') {
+            $body['linksModuleData'] = $this->linksModuleData($portalUrl);
+        }
+
+        return $body;
     }
 
     private function loyaltyPointsBody(int $points): array {
         return [
             'label' => $this->config->pointsLabel(),
             'balance' => ['string' => (string)$points],
+        ];
+    }
+
+    private function linksModuleData(string $portalUrl): array {
+        return [
+            'uris' => [
+                [
+                    'uri' => $portalUrl,
+                    'description' => 'Ver premios',
+                ],
+            ],
         ];
     }
 

@@ -167,6 +167,9 @@ final class LoyaltySchema {
             points_cost integer NOT NULL,
             stock integer NOT NULL DEFAULT 0,
             status text NOT NULL DEFAULT \'active\',
+            claim_mode text NOT NULL DEFAULT \'staff_only\',
+            claim_instructions text,
+            claim_delivery_options jsonb DEFAULT \'[]\'::jsonb,
             image_url text,
             metadata jsonb DEFAULT \'{}\'::jsonb,
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
@@ -179,6 +182,14 @@ final class LoyaltySchema {
             reward_id text NOT NULL,
             points_cost integer NOT NULL,
             status text NOT NULL DEFAULT \'pending\',
+            source text NOT NULL DEFAULT \'dashboard\',
+            fulfillment_type text,
+            validation_code_hash text,
+            code_expires_at timestamp without time zone,
+            expires_at timestamp without time zone,
+            resolved_at timestamp without time zone,
+            resolved_by_user_id text,
+            resolution_note text,
             metadata jsonb DEFAULT \'{}\'::jsonb,
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
             updated_at timestamp without time zone DEFAULT NOW() NOT NULL
@@ -336,7 +347,18 @@ final class LoyaltySchema {
         $this->addColumnIfMissing('loyalty_point_ledger', 'source_reference', 'text');
         $this->addColumnIfMissing('loyalty_point_ledger', 'reversed_at', 'timestamp without time zone');
         $this->addColumnIfMissing('loyalty_point_ledger', 'expires_at', 'timestamp without time zone');
+        $this->addColumnIfMissing('loyalty_rewards', 'claim_mode', 'text NOT NULL DEFAULT \'staff_only\'');
+        $this->addColumnIfMissing('loyalty_rewards', 'claim_instructions', 'text');
+        $this->addColumnIfMissing('loyalty_rewards', 'claim_delivery_options', 'jsonb DEFAULT \'[]\'::jsonb');
         $this->addColumnIfMissing('loyalty_redemptions', 'created_by_user_id', 'text');
+        $this->addColumnIfMissing('loyalty_redemptions', 'source', 'text NOT NULL DEFAULT \'dashboard\'');
+        $this->addColumnIfMissing('loyalty_redemptions', 'fulfillment_type', 'text');
+        $this->addColumnIfMissing('loyalty_redemptions', 'validation_code_hash', 'text');
+        $this->addColumnIfMissing('loyalty_redemptions', 'code_expires_at', 'timestamp without time zone');
+        $this->addColumnIfMissing('loyalty_redemptions', 'expires_at', 'timestamp without time zone');
+        $this->addColumnIfMissing('loyalty_redemptions', 'resolved_at', 'timestamp without time zone');
+        $this->addColumnIfMissing('loyalty_redemptions', 'resolved_by_user_id', 'text');
+        $this->addColumnIfMissing('loyalty_redemptions', 'resolution_note', 'text');
         $this->addColumnIfMissing('loyalty_members', 'blocked_reason', 'text');
         $this->addColumnIfMissing('loyalty_members', 'blocked_at', 'timestamp without time zone');
         $this->addColumnIfMissing('loyalty_risk_events', 'resolved_by_user_id', 'text');
@@ -356,6 +378,9 @@ final class LoyaltySchema {
         $this->createIndexIfMissing('loyalty_ledger_tenant_created_idx', 'CREATE INDEX loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_ledger_reference_idx', 'CREATE INDEX loyalty_ledger_reference_idx ON loyalty_point_ledger (tenant_id, source, reference)');
         $this->createIndexIfMissing('loyalty_redemptions_member_day_idx', 'CREATE INDEX loyalty_redemptions_member_day_idx ON loyalty_redemptions (tenant_id, member_id, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_rewards_claim_mode_idx', 'CREATE INDEX loyalty_rewards_claim_mode_idx ON loyalty_rewards (tenant_id, claim_mode, status)');
+        $this->createIndexIfMissing('loyalty_redemptions_claim_queue_idx', 'CREATE INDEX loyalty_redemptions_claim_queue_idx ON loyalty_redemptions (tenant_id, source, status, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_redemptions_expiry_idx', 'CREATE INDEX loyalty_redemptions_expiry_idx ON loyalty_redemptions (tenant_id, expires_at) WHERE expires_at IS NOT NULL');
         $this->createIndexIfMissing('loyalty_api_clients_hash_idx', 'CREATE INDEX loyalty_api_clients_hash_idx ON loyalty_api_clients (tenant_id, key_hash)');
         $this->createIndexIfMissing('loyalty_audit_tenant_created_idx', 'CREATE INDEX loyalty_audit_tenant_created_idx ON loyalty_audit_events (tenant_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_risk_tenant_created_idx', 'CREATE INDEX loyalty_risk_tenant_created_idx ON loyalty_risk_events (tenant_id, created_at DESC)');

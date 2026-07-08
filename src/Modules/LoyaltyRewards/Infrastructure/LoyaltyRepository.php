@@ -11,6 +11,17 @@ use App\Services\MailService;
 use PDO;
 
 final class LoyaltyRepository {
+    private const CLAIM_MODE_STAFF_ONLY = 'staff_only';
+    private const CLAIM_MODE_IN_STORE = 'in_store';
+    private const CLAIM_MODE_MANAGED = 'managed';
+    private const CUSTOMER_PORTAL_SOURCE = 'customer_portal';
+    private const CLAIM_STATUS_PENDING_REVIEW = 'pending_review';
+    private const CLAIM_STATUS_READY_FOR_PICKUP = 'ready_for_pickup';
+    private const CLAIM_STATUS_APPROVED = 'approved';
+    private const CLAIM_STATUS_DELIVERED = 'delivered';
+    private const CLAIM_STATUS_CANCELLED = 'cancelled';
+    private const CLAIM_STATUS_EXPIRED = 'expired';
+
     private PDO $pdo;
 
     public function __construct(?PDO $pdo = null) {
@@ -181,7 +192,8 @@ final class LoyaltyRepository {
         }
 
         return $this->fetchAll(
-            "SELECT id, name, description, points_cost, stock, status, image_url, metadata, created_at, updated_at,
+            "SELECT id, name, description, points_cost, stock, status, claim_mode, claim_instructions,
+                    claim_delivery_options, image_url, metadata, created_at, updated_at,
                     (SELECT COUNT(*) FROM loyalty_redemptions r WHERE r.tenant_id = loyalty_rewards.tenant_id AND r.reward_id = loyalty_rewards.id) AS redemption_count
              FROM loyalty_rewards
              WHERE " . implode(' AND ', $where) . "
@@ -197,6 +209,7 @@ final class LoyaltyRepository {
         if ($name === '' || $pointsCost <= 0) {
             throw new \InvalidArgumentException('Nombre y costo en puntos son obligatorios.');
         }
+        $claim = $this->normalizeRewardClaimPayload($payload);
 
         $reward = [
             'id' => $this->id('reward'),
@@ -206,6 +219,9 @@ final class LoyaltyRepository {
             'points_cost' => $pointsCost,
             'stock' => max(0, (int)($payload['stock'] ?? 0)),
             'status' => trim((string)($payload['status'] ?? 'active')) ?: 'active',
+            'claim_mode' => $claim['claim_mode'],
+            'claim_instructions' => $claim['claim_instructions'],
+            'claim_delivery_options' => json_encode($claim['claim_delivery_options'], JSON_UNESCAPED_UNICODE),
             'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? '')),
             'metadata' => json_encode($payload['metadata'] ?? new \stdClass()),
         ];
@@ -214,8 +230,10 @@ final class LoyaltyRepository {
         }
 
         $stmt = $this->pdo->prepare(
-            'INSERT INTO loyalty_rewards (id, tenant_id, name, description, points_cost, stock, status, image_url, metadata)
-             VALUES (:id, :tenant_id, :name, :description, :points_cost, :stock, :status, :image_url, :metadata)'
+            'INSERT INTO loyalty_rewards
+                (id, tenant_id, name, description, points_cost, stock, status, claim_mode, claim_instructions, claim_delivery_options, image_url, metadata)
+             VALUES
+                (:id, :tenant_id, :name, :description, :points_cost, :stock, :status, :claim_mode, :claim_instructions, :claim_delivery_options, :image_url, :metadata)'
         );
         $stmt->execute($reward);
         $created = $this->rewardById($reward['id']);
@@ -274,6 +292,7 @@ final class LoyaltyRepository {
         if (($before['status'] ?? '') === 'deleted' && $status !== 'deleted') {
             throw new \InvalidArgumentException('Un premio eliminado no puede reactivarse.');
         }
+        $claim = $this->normalizeRewardClaimPayload($payload, $before);
 
         $this->execute(
             'UPDATE loyalty_rewards
@@ -282,6 +301,9 @@ final class LoyaltyRepository {
                  points_cost = :points_cost,
                  stock = :stock,
                  status = :status,
+                 claim_mode = :claim_mode,
+                 claim_instructions = :claim_instructions,
+                 claim_delivery_options = :claim_delivery_options,
                  image_url = :image_url,
                  updated_at = NOW()
              WHERE tenant_id = :tenant_id AND id = :id',
@@ -291,6 +313,9 @@ final class LoyaltyRepository {
                 'points_cost' => $pointsCost,
                 'stock' => $stock,
                 'status' => $status,
+                'claim_mode' => $claim['claim_mode'],
+                'claim_instructions' => $claim['claim_instructions'],
+                'claim_delivery_options' => json_encode($claim['claim_delivery_options'], JSON_UNESCAPED_UNICODE),
                 'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? $before['image_url'] ?? '')),
                 'tenant_id' => $this->tenantId(),
                 'id' => $rewardId,
@@ -964,6 +989,291 @@ final class LoyaltyRepository {
         ];
     }
 
+    public function publicRewardsPortal(string $token): array {
+        $this->expireCustomerPortalReservations();
+        $member = $this->memberFromPortalToken($token);
+        $program = $this->program($this->tenantId());
+
+        return [
+            'token' => $token,
+            'portalUrl' => $this->rewardsPortalUrlForMember($member),
+            'publicPath' => $this->publicGatewayPath($this->rewardsPortalPathForMember($member)),
+            'program' => $program,
+            'member' => $member,
+            'rewards' => $this->portalRewardsForMember($member),
+            'claims' => $this->portalClaimsForMember((string)$member['id']),
+            'support' => $this->portalSupport(),
+        ];
+    }
+
+    public function createPortalClaim(string $token, array $payload): array {
+        $this->expireCustomerPortalReservations();
+        $member = $this->memberFromPortalToken($token);
+        $tenantId = $this->tenantId();
+        $rewardId = trim((string)($payload['rewardId'] ?? $payload['reward_id'] ?? ''));
+        if ($rewardId === '') {
+            throw new \InvalidArgumentException('Selecciona un premio.');
+        }
+
+        $reward = $this->rewardById($rewardId);
+        if (!$reward) {
+            throw new \RuntimeException('Premio no encontrado.');
+        }
+        $claimMode = $this->normalizeClaimMode((string)($reward['claim_mode'] ?? self::CLAIM_MODE_STAFF_ONLY));
+        if ($claimMode === self::CLAIM_MODE_STAFF_ONLY) {
+            throw new \InvalidArgumentException('Este premio solo puede canjearlo el equipo del local.');
+        }
+        if (($reward['status'] ?? '') !== 'active') {
+            throw new \InvalidArgumentException('El premio no esta activo.');
+        }
+        if ((int)($reward['stock'] ?? 0) <= 0) {
+            throw new \InvalidArgumentException('El premio no tiene stock disponible.');
+        }
+
+        $settings = $this->settings()['settings'];
+        $this->assertRedemptionLimits($tenantId, (string)$member['id'], $rewardId, $settings);
+
+        $account = $this->accountForMember($tenantId, (string)$member['id']);
+        $pointsCost = (int)($reward['points_cost'] ?? 0);
+        if ((int)$account['balance'] < $pointsCost) {
+            throw new \InvalidArgumentException('No tienes puntos suficientes para este premio.');
+        }
+
+        $deliveryOptions = $this->normalizeDeliveryOptions($reward['claim_delivery_options'] ?? []);
+        $fulfillmentType = $this->portalFulfillmentType($claimMode, $payload, $deliveryOptions);
+        $claimCode = $claimMode === self::CLAIM_MODE_IN_STORE ? $this->claimCode() : null;
+        $expiresAt = $claimMode === self::CLAIM_MODE_IN_STORE
+            ? $this->futureTimestamp(15 * 60)
+            : $this->futureTimestamp(7 * 24 * 60 * 60);
+        $status = $claimMode === self::CLAIM_MODE_IN_STORE
+            ? self::CLAIM_STATUS_READY_FOR_PICKUP
+            : self::CLAIM_STATUS_PENDING_REVIEW;
+        $metadata = [
+            'claimMode' => $claimMode,
+            'rewardName' => $reward['name'],
+            'memberName' => $member['name'] ?? $member['account_name'] ?? '',
+            'contactName' => trim((string)($payload['contactName'] ?? $payload['contact_name'] ?? $member['account_name'] ?? '')),
+            'contactPhone' => trim((string)($payload['contactPhone'] ?? $payload['contact_phone'] ?? $member['phone'] ?? '')),
+            'contactEmail' => trim((string)($payload['contactEmail'] ?? $payload['contact_email'] ?? $member['email'] ?? '')),
+            'deliveryAddress' => trim((string)($payload['deliveryAddress'] ?? $payload['delivery_address'] ?? '')),
+            'notes' => mb_substr(trim((string)($payload['notes'] ?? $payload['note'] ?? '')), 0, 500),
+            'createdFrom' => 'wallet-portal',
+        ];
+
+        $redemptionId = $this->reservePortalRedemption(
+            $member,
+            $reward,
+            $status,
+            $fulfillmentType,
+            $metadata,
+            $expiresAt,
+            $claimCode
+        );
+        $redemption = $this->redemptionById($redemptionId);
+        if ($claimCode !== null) {
+            $redemption['claimCode'] = $claimCode;
+        }
+
+        return [
+            'redemption' => $redemption,
+            'member' => $this->memberById((string)$member['id']),
+            'reward' => $this->rewardById($rewardId),
+            'claimCode' => $claimCode,
+        ];
+    }
+
+    public function cancelPortalClaim(string $token, string $redemptionId, array $payload = []): array {
+        $this->expireCustomerPortalReservations();
+        $member = $this->memberFromPortalToken($token);
+        $redemption = $this->redemptionById($redemptionId);
+        if (!$redemption || (string)($redemption['member_id'] ?? '') !== (string)$member['id']) {
+            throw new \RuntimeException('Solicitud no encontrada.');
+        }
+        if (!in_array((string)($redemption['status'] ?? ''), [self::CLAIM_STATUS_PENDING_REVIEW, self::CLAIM_STATUS_READY_FOR_PICKUP], true)) {
+            throw new \InvalidArgumentException('Esta solicitud ya no se puede cancelar desde el portal.');
+        }
+
+        return $this->releaseRedemptionReservation(
+            $redemptionId,
+            self::CLAIM_STATUS_CANCELLED,
+            trim((string)($payload['reason'] ?? 'Cancelado por el cliente desde Wallet.')),
+            'customer:' . (string)$member['id']
+        );
+    }
+
+    public function redemptionClaims(array $filters = []): array {
+        $this->expireCustomerPortalReservations();
+        $tenantId = $this->tenantId();
+        $limit = min(100, max(10, (int)($filters['limit'] ?? 50)));
+        $offset = max(0, (int)($filters['offset'] ?? 0));
+        $status = strtolower(trim((string)($filters['status'] ?? 'open')));
+        $where = ['r.tenant_id = :tenant_id', 'r.source = :source'];
+        $params = ['tenant_id' => $tenantId, 'source' => self::CUSTOMER_PORTAL_SOURCE];
+        if ($status !== 'all') {
+            if ($status === 'open') {
+                $where[] = "r.status IN ('pending_review', 'ready_for_pickup', 'approved')";
+            } elseif (in_array($status, [
+                self::CLAIM_STATUS_PENDING_REVIEW,
+                self::CLAIM_STATUS_READY_FOR_PICKUP,
+                self::CLAIM_STATUS_APPROVED,
+                self::CLAIM_STATUS_DELIVERED,
+                self::CLAIM_STATUS_CANCELLED,
+                self::CLAIM_STATUS_EXPIRED,
+            ], true)) {
+                $where[] = 'r.status = :status';
+                $params['status'] = $status;
+            }
+        }
+
+        $sqlWhere = implode(' AND ', $where);
+        $items = $this->fetchAll(
+            "SELECT r.id, r.member_id, m.account_id, m.account_name AS customer, m.email, m.phone,
+                    r.reward_id, w.name AS reward, w.claim_mode, r.points_cost, r.status, r.source,
+                    r.fulfillment_type, r.code_expires_at, r.expires_at, r.resolved_at,
+                    r.resolved_by_user_id, r.resolution_note, r.metadata, r.created_at, r.updated_at
+             FROM loyalty_redemptions r
+             JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
+             JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
+             WHERE {$sqlWhere}
+             ORDER BY
+               CASE r.status
+                 WHEN 'ready_for_pickup' THEN 1
+                 WHEN 'pending_review' THEN 2
+                 WHEN 'approved' THEN 3
+                 ELSE 4
+               END,
+               r.created_at DESC
+             LIMIT {$limit} OFFSET {$offset}",
+            $params
+        );
+        $total = (int)$this->scalar(
+            "SELECT COUNT(*)
+             FROM loyalty_redemptions r
+             WHERE {$sqlWhere}",
+            $params
+        );
+
+        return [
+            'items' => $items,
+            'total' => $total,
+            'limit' => $limit,
+            'offset' => $offset,
+            'hasMore' => ($offset + $limit) < $total,
+            'summary' => $this->redemptionClaimsSummary($tenantId),
+        ];
+    }
+
+    public function approveRedemptionClaim(string $redemptionId, array $payload = [], ?string $userId = null): array {
+        $this->expireCustomerPortalReservations();
+        $before = $this->redemptionById($redemptionId);
+        if (!$before) {
+            throw new \RuntimeException('Solicitud no encontrada.');
+        }
+        if ((string)($before['status'] ?? '') !== self::CLAIM_STATUS_PENDING_REVIEW) {
+            throw new \InvalidArgumentException('Solo las solicitudes pendientes pueden aprobarse.');
+        }
+
+        $note = trim((string)($payload['note'] ?? $payload['reason'] ?? 'Solicitud aprobada por gestor.'));
+        $this->execute(
+            'UPDATE loyalty_redemptions
+             SET status = :status,
+                 expires_at = NULL,
+                 resolved_at = NOW(),
+                 resolved_by_user_id = :resolved_by_user_id,
+                 resolution_note = :resolution_note,
+                 updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'status' => self::CLAIM_STATUS_APPROVED,
+                'resolved_by_user_id' => $userId,
+                'resolution_note' => $note,
+                'tenant_id' => $this->tenantId(),
+                'id' => $redemptionId,
+            ]
+        );
+        $after = $this->redemptionById($redemptionId);
+        $this->recordAudit('redemption_claim.approved', 'redemption', $redemptionId, $before, $after, $note, $userId);
+
+        return $after;
+    }
+
+    public function validateInStoreClaimCode(array $payload, ?string $userId = null): array {
+        $this->expireCustomerPortalReservations();
+        $code = preg_replace('/\D+/', '', (string)($payload['code'] ?? '')) ?? '';
+        if (strlen($code) !== 6) {
+            throw new \InvalidArgumentException('Ingresa el codigo de 6 digitos.');
+        }
+
+        $rows = $this->fetchAll(
+            "SELECT id, validation_code_hash
+             FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id
+               AND source = :source
+               AND status = :status
+               AND validation_code_hash IS NOT NULL
+               AND code_expires_at >= NOW()
+             ORDER BY created_at DESC
+             LIMIT 100",
+            [
+                'tenant_id' => $this->tenantId(),
+                'source' => self::CUSTOMER_PORTAL_SOURCE,
+                'status' => self::CLAIM_STATUS_READY_FOR_PICKUP,
+            ]
+        );
+        foreach ($rows as $row) {
+            if (hash_equals((string)($row['validation_code_hash'] ?? ''), $this->claimCodeHash($code))) {
+                return $this->deliverRedemptionClaim((string)$row['id'], ['note' => 'Codigo validado en local.'], $userId);
+            }
+        }
+
+        throw new \InvalidArgumentException('Codigo invalido o expirado.');
+    }
+
+    public function deliverRedemptionClaim(string $redemptionId, array $payload = [], ?string $userId = null): array {
+        $this->expireCustomerPortalReservations();
+        $before = $this->redemptionById($redemptionId);
+        if (!$before) {
+            throw new \RuntimeException('Solicitud no encontrada.');
+        }
+        if (!in_array((string)($before['status'] ?? ''), [self::CLAIM_STATUS_READY_FOR_PICKUP, self::CLAIM_STATUS_APPROVED], true)) {
+            throw new \InvalidArgumentException('Esta solicitud no esta lista para entrega.');
+        }
+        if ((string)($before['status'] ?? '') === self::CLAIM_STATUS_READY_FOR_PICKUP && !empty($before['code_expires_at']) && strtotime((string)$before['code_expires_at']) < time()) {
+            $this->releaseRedemptionReservation($redemptionId, self::CLAIM_STATUS_EXPIRED, 'Codigo expirado antes de entrega.', 'system');
+            throw new \InvalidArgumentException('El codigo de entrega expiro.');
+        }
+
+        $note = trim((string)($payload['note'] ?? $payload['reason'] ?? 'Premio entregado.'));
+        $this->execute(
+            'UPDATE loyalty_redemptions
+             SET status = :status,
+                 expires_at = NULL,
+                 resolved_at = NOW(),
+                 resolved_by_user_id = :resolved_by_user_id,
+                 resolution_note = :resolution_note,
+                 updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'status' => self::CLAIM_STATUS_DELIVERED,
+                'resolved_by_user_id' => $userId,
+                'resolution_note' => $note,
+                'tenant_id' => $this->tenantId(),
+                'id' => $redemptionId,
+            ]
+        );
+        $after = $this->redemptionById($redemptionId);
+        $this->recordAudit('redemption_claim.delivered', 'redemption', $redemptionId, $before, $after, $note, $userId);
+
+        return $after;
+    }
+
+    public function cancelRedemptionClaim(string $redemptionId, array $payload = [], ?string $userId = null): array {
+        $this->expireCustomerPortalReservations();
+        $reason = trim((string)($payload['reason'] ?? 'Solicitud cancelada por gestor.'));
+
+        return $this->releaseRedemptionReservation($redemptionId, self::CLAIM_STATUS_CANCELLED, $reason, $userId);
+    }
+
     public function updateWallet(string $memberId, array $payload): array {
         $tenantId = $this->tenantId();
         $platform = strtolower(trim((string)($payload['platform'] ?? 'none')));
@@ -1095,7 +1405,8 @@ final class LoyaltyRepository {
         $result = $service->buildSaveUrl(
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
-            (int)($member['points'] ?? 0)
+            (int)($member['points'] ?? 0),
+            $this->rewardsPortalUrlForMember($member)
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'qr-opened', [
@@ -1110,6 +1421,7 @@ final class LoyaltyRepository {
 
         return [
             'saveUrl' => (string)$result['saveUrl'],
+            'portalUrl' => $this->rewardsPortalUrlForMember($member),
             'memberName' => (string)($member['account_name'] ?? $member['account_id']),
             'accountId' => (string)$member['account_id'],
             'points' => (int)($member['points'] ?? 0),
@@ -1162,7 +1474,8 @@ final class LoyaltyRepository {
         $result = $service->buildSaveUrl(
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
-            (int)($member['points'] ?? 0)
+            (int)($member['points'] ?? 0),
+            $this->rewardsPortalUrlForMember($member)
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'link-generated', [
@@ -1483,7 +1796,8 @@ HTML;
                 $objectId,
                 (string)$member['account_id'],
                 (string)($member['account_name'] ?? $member['account_id']),
-                $balanceAfter
+                $balanceAfter,
+                $this->rewardsPortalUrlForMember($member)
             );
 
             $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'synced', [
@@ -2529,7 +2843,10 @@ HTML;
         $maxSameReward = max(1, (int)($redemption['maximumSameRewardPerMemberPerDay'] ?? 1));
         $dailyTotal = (int)$this->scalar(
             "SELECT COUNT(*) FROM loyalty_redemptions
-             WHERE tenant_id = :tenant_id AND member_id = :member_id AND status = 'approved' AND created_at::date = CURRENT_DATE",
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND status IN ('approved', 'pending_review', 'ready_for_pickup', 'delivered')
+               AND created_at::date = CURRENT_DATE",
             ['tenant_id' => $tenantId, 'member_id' => $memberId]
         );
         if ($dailyTotal >= $maxDaily) {
@@ -2538,7 +2855,11 @@ HTML;
         }
         $sameReward = (int)$this->scalar(
             "SELECT COUNT(*) FROM loyalty_redemptions
-             WHERE tenant_id = :tenant_id AND member_id = :member_id AND reward_id = :reward_id AND status = 'approved' AND created_at::date = CURRENT_DATE",
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND reward_id = :reward_id
+               AND status IN ('approved', 'pending_review', 'ready_for_pickup', 'delivered')
+               AND created_at::date = CURRENT_DATE",
             ['tenant_id' => $tenantId, 'member_id' => $memberId, 'reward_id' => $rewardId]
         );
         if ($sameReward >= $maxSameReward) {
@@ -2558,6 +2879,521 @@ HTML;
         );
 
         return $passes > 0;
+    }
+
+    private function reservePortalRedemption(
+        array $member,
+        array $reward,
+        string $status,
+        string $fulfillmentType,
+        array $metadata,
+        string $expiresAt,
+        ?string $claimCode
+    ): string {
+        $tenantId = $this->tenantId();
+        $memberId = (string)$member['id'];
+        $rewardId = (string)$reward['id'];
+        $program = $this->program($tenantId);
+        $this->accountForMember($tenantId, $memberId);
+        $redemptionId = $this->id('redemption');
+        $pointsCost = (int)($reward['points_cost'] ?? 0);
+        $this->pdo->beginTransaction();
+        try {
+            $account = $this->accountForMemberForUpdate($tenantId, $memberId);
+            $lockedReward = $this->rewardForUpdate($rewardId);
+            if (($lockedReward['status'] ?? '') !== 'active') {
+                throw new \InvalidArgumentException('El premio no esta activo.');
+            }
+            if ((int)($lockedReward['stock'] ?? 0) <= 0) {
+                throw new \InvalidArgumentException('El premio no tiene stock disponible.');
+            }
+            if ((int)$account['balance'] < $pointsCost) {
+                throw new \InvalidArgumentException('No tienes puntos suficientes para este premio.');
+            }
+
+            $balanceAfter = (int)$account['balance'] - $pointsCost;
+            $this->execute(
+                'UPDATE loyalty_point_accounts SET balance = :balance, updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND member_id = :member_id',
+                ['balance' => $balanceAfter, 'tenant_id' => $tenantId, 'member_id' => $memberId]
+            );
+            $this->execute(
+                'UPDATE loyalty_rewards SET stock = GREATEST(stock - 1, 0), updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $tenantId, 'id' => $rewardId]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_redemptions
+                    (id, tenant_id, member_id, reward_id, points_cost, status, source, fulfillment_type,
+                     validation_code_hash, code_expires_at, expires_at, metadata, created_by_user_id)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :reward_id, :points_cost, :status, :source, :fulfillment_type,
+                     :validation_code_hash, :code_expires_at, :expires_at, :metadata, :created_by_user_id)',
+                [
+                    'id' => $redemptionId,
+                    'tenant_id' => $tenantId,
+                    'member_id' => $memberId,
+                    'reward_id' => $rewardId,
+                    'points_cost' => $pointsCost,
+                    'status' => $status,
+                    'source' => self::CUSTOMER_PORTAL_SOURCE,
+                    'fulfillment_type' => $fulfillmentType,
+                    'validation_code_hash' => $claimCode !== null ? $this->claimCodeHash($claimCode) : null,
+                    'code_expires_at' => $claimCode !== null ? $expiresAt : null,
+                    'expires_at' => $expiresAt,
+                    'metadata' => json_encode($metadata, JSON_UNESCAPED_UNICODE),
+                    'created_by_user_id' => 'customer:' . $memberId,
+                ]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_point_ledger
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
+                [
+                    'id' => $this->id('ledger'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $memberId,
+                    'program_id' => $program['id'],
+                    'entry_type' => 'redemption',
+                    'points' => -$pointsCost,
+                    'balance_after' => $balanceAfter,
+                    'reference' => $redemptionId,
+                    'source' => self::CUSTOMER_PORTAL_SOURCE,
+                    'source_reference' => $redemptionId,
+                    'metadata' => json_encode(['rewardId' => $rewardId, 'rewardName' => $reward['name'], 'reserved' => true], JSON_UNESCAPED_UNICODE),
+                    'created_by_user_id' => 'customer:' . $memberId,
+                ]
+            );
+            $this->execute(
+                'UPDATE loyalty_members SET last_activity_at = NOW(), updated_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $tenantId, 'id' => $memberId]
+            );
+            $this->recordAudit('redemption_claim.reserved', 'redemption', $redemptionId, null, [
+                'memberId' => $memberId,
+                'rewardId' => $rewardId,
+                'status' => $status,
+                'fulfillmentType' => $fulfillmentType,
+                'pointsCost' => $pointsCost,
+                'balanceAfter' => $balanceAfter,
+            ], null, 'customer:' . $memberId);
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
+
+        return $redemptionId;
+    }
+
+    private function releaseRedemptionReservation(string $redemptionId, string $nextStatus, string $reason, ?string $userId): array {
+        $before = $this->redemptionById($redemptionId);
+        if (!$before) {
+            throw new \RuntimeException('Solicitud no encontrada.');
+        }
+        if ((string)($before['source'] ?? '') !== self::CUSTOMER_PORTAL_SOURCE) {
+            throw new \InvalidArgumentException('Solo se pueden revertir solicitudes del portal Wallet.');
+        }
+        if (!in_array((string)($before['status'] ?? ''), [
+            self::CLAIM_STATUS_PENDING_REVIEW,
+            self::CLAIM_STATUS_READY_FOR_PICKUP,
+            self::CLAIM_STATUS_APPROVED,
+        ], true)) {
+            throw new \InvalidArgumentException('Esta solicitud ya fue cerrada.');
+        }
+
+        $tenantId = $this->tenantId();
+        $memberId = (string)$before['member_id'];
+        $rewardId = (string)$before['reward_id'];
+        $points = (int)$before['points_cost'];
+        $program = $this->program($tenantId);
+        $member = $this->memberById($memberId);
+        if (!$member) {
+            throw new \RuntimeException('Socio no encontrado.');
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $account = $this->accountForMemberForUpdate($tenantId, $memberId);
+            $balanceAfter = (int)$account['balance'] + $points;
+            $this->execute(
+                'UPDATE loyalty_point_accounts SET balance = :balance, updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND member_id = :member_id',
+                ['balance' => $balanceAfter, 'tenant_id' => $tenantId, 'member_id' => $memberId]
+            );
+            $this->execute(
+                'UPDATE loyalty_rewards SET stock = stock + 1, updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $tenantId, 'id' => $rewardId]
+            );
+            $this->execute(
+                'UPDATE loyalty_redemptions
+                 SET status = :status,
+                     expires_at = NULL,
+                     resolved_at = NOW(),
+                     resolved_by_user_id = :resolved_by_user_id,
+                     resolution_note = :resolution_note,
+                     updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND id = :id',
+                [
+                    'status' => $nextStatus,
+                    'resolved_by_user_id' => $userId,
+                    'resolution_note' => $reason,
+                    'tenant_id' => $tenantId,
+                    'id' => $redemptionId,
+                ]
+            );
+            $this->execute(
+                'INSERT INTO loyalty_point_ledger
+                    (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
+                 VALUES
+                    (:id, :tenant_id, :member_id, :program_id, :entry_type, :points, :balance_after, :reference, :source, :source_reference, :metadata, :created_by_user_id)',
+                [
+                    'id' => $this->id('ledger'),
+                    'tenant_id' => $tenantId,
+                    'member_id' => $memberId,
+                    'program_id' => $program['id'],
+                    'entry_type' => 'redemption_reversal',
+                    'points' => $points,
+                    'balance_after' => $balanceAfter,
+                    'reference' => $redemptionId,
+                    'source' => self::CUSTOMER_PORTAL_SOURCE,
+                    'source_reference' => $redemptionId,
+                    'metadata' => json_encode(['reason' => $reason, 'status' => $nextStatus], JSON_UNESCAPED_UNICODE),
+                    'created_by_user_id' => $userId,
+                ]
+            );
+            $after = $this->redemptionById($redemptionId);
+            $this->recordAudit('redemption_claim.' . $nextStatus, 'redemption', $redemptionId, $before, $after, $reason, $userId);
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        $this->syncGoogleWalletBestEffort($member, $balanceAfter);
+
+        return [
+            'redemption' => $this->redemptionById($redemptionId),
+            'member' => $this->memberById($memberId),
+            'reward' => $this->rewardById($rewardId),
+            'balanceAfter' => $balanceAfter,
+            'pointsRestored' => $points,
+        ];
+    }
+
+    private function expireCustomerPortalReservations(): void {
+        $rows = $this->fetchAll(
+            "SELECT id
+             FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id
+               AND source = :source
+               AND status IN ('pending_review', 'ready_for_pickup')
+               AND expires_at IS NOT NULL
+               AND expires_at < NOW()
+             ORDER BY expires_at ASC
+             LIMIT 50",
+            ['tenant_id' => $this->tenantId(), 'source' => self::CUSTOMER_PORTAL_SOURCE]
+        );
+        foreach ($rows as $row) {
+            try {
+                $this->releaseRedemptionReservation((string)$row['id'], self::CLAIM_STATUS_EXPIRED, 'Reserva expirada automaticamente.', 'system');
+            } catch (\Throwable $e) {
+                $this->recordRisk('medium', 'redemption_claim_expire_failed', 'No se pudo expirar una reserva de premio.', null, (string)($row['id'] ?? ''), [
+                    'error' => mb_substr($e->getMessage(), 0, 500),
+                ]);
+            }
+        }
+    }
+
+    private function portalRewardsForMember(array $member): array {
+        $rewards = $this->fetchAll(
+            "SELECT id, name, description, points_cost, stock, status, claim_mode, claim_instructions,
+                    claim_delivery_options, image_url, metadata, created_at, updated_at
+             FROM loyalty_rewards
+             WHERE tenant_id = :tenant_id
+               AND status = 'active'
+               AND claim_mode IN ('in_store', 'managed')
+             ORDER BY stock DESC, points_cost ASC, name ASC",
+            ['tenant_id' => $this->tenantId()]
+        );
+
+        return array_map(function (array $reward) use ($member): array {
+            $reward['claim_mode'] = $this->normalizeClaimMode((string)($reward['claim_mode'] ?? self::CLAIM_MODE_STAFF_ONLY));
+            $reward['claim_delivery_options'] = $this->normalizeDeliveryOptions($reward['claim_delivery_options'] ?? []);
+            $reward['canClaim'] = true;
+            $reward['blockReason'] = null;
+            if ((int)($reward['stock'] ?? 0) <= 0) {
+                $reward['canClaim'] = false;
+                $reward['blockReason'] = 'Sin stock disponible.';
+            } elseif ((int)($member['points'] ?? 0) < (int)($reward['points_cost'] ?? 0)) {
+                $reward['canClaim'] = false;
+                $reward['blockReason'] = 'Puntos insuficientes.';
+            }
+
+            return $reward;
+        }, $rewards);
+    }
+
+    private function portalClaimsForMember(string $memberId): array {
+        return $this->fetchAll(
+            "SELECT r.id, r.reward_id, w.name AS reward, w.claim_mode, r.points_cost, r.status,
+                    r.fulfillment_type, r.code_expires_at, r.expires_at, r.resolved_at,
+                    r.resolution_note, r.metadata, r.created_at, r.updated_at
+             FROM loyalty_redemptions r
+             JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
+             WHERE r.tenant_id = :tenant_id
+               AND r.member_id = :member_id
+               AND r.source = :source
+             ORDER BY r.created_at DESC
+             LIMIT 12",
+            ['tenant_id' => $this->tenantId(), 'member_id' => $memberId, 'source' => self::CUSTOMER_PORTAL_SOURCE]
+        );
+    }
+
+    private function redemptionClaimsSummary(string $tenantId): array {
+        $rows = $this->fetchAll(
+            "SELECT status, COUNT(*) AS total
+             FROM loyalty_redemptions
+             WHERE tenant_id = :tenant_id AND source = :source
+             GROUP BY status",
+            ['tenant_id' => $tenantId, 'source' => self::CUSTOMER_PORTAL_SOURCE]
+        );
+        $summary = [
+            self::CLAIM_STATUS_PENDING_REVIEW => 0,
+            self::CLAIM_STATUS_READY_FOR_PICKUP => 0,
+            self::CLAIM_STATUS_APPROVED => 0,
+            self::CLAIM_STATUS_DELIVERED => 0,
+            self::CLAIM_STATUS_CANCELLED => 0,
+            self::CLAIM_STATUS_EXPIRED => 0,
+        ];
+        foreach ($rows as $row) {
+            $summary[(string)$row['status']] = (int)$row['total'];
+        }
+
+        return $summary;
+    }
+
+    private function accountForMemberForUpdate(string $tenantId, string $memberId): array {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM loyalty_point_accounts
+             WHERE tenant_id = :tenant_id AND member_id = :member_id
+             LIMIT 1
+             FOR UPDATE'
+        );
+        $stmt->execute(['tenant_id' => $tenantId, 'member_id' => $memberId]);
+        $account = $stmt->fetch();
+        if (!$account) {
+            throw new \RuntimeException('Cuenta de puntos no encontrada.');
+        }
+
+        return $this->normalizeRow($account);
+    }
+
+    private function rewardForUpdate(string $rewardId): array {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM loyalty_rewards
+             WHERE tenant_id = :tenant_id AND id = :id
+             LIMIT 1
+             FOR UPDATE'
+        );
+        $stmt->execute(['tenant_id' => $this->tenantId(), 'id' => $rewardId]);
+        $reward = $stmt->fetch();
+        if (!$reward) {
+            throw new \RuntimeException('Premio no encontrado.');
+        }
+
+        return $this->normalizeRow($reward);
+    }
+
+    private function memberFromPortalToken(string $token): array {
+        $payload = $this->decodeLoyaltyPortalToken($token);
+        $tenantId = (string)($payload['tenantId'] ?? '');
+        $accountId = (string)($payload['accountId'] ?? '');
+        if ($tenantId === '' || !hash_equals($this->tenantId(), $tenantId) || $accountId === '') {
+            throw new \InvalidArgumentException('El enlace de premios no pertenece a este programa.');
+        }
+
+        $member = $this->memberFromPayload(['accountId' => $accountId]);
+        if (!$member) {
+            throw new \InvalidArgumentException('Socio no encontrado para reclamar premios.');
+        }
+        $this->assertMemberCanOperate($member, 'reclamar premios');
+        if (($member['wallet_platform'] ?? 'none') === 'none' || !$this->hasActiveWallet((string)$member['id'])) {
+            throw new \InvalidArgumentException('Necesitas una tarjeta Wallet activa para reclamar premios.');
+        }
+
+        return $member;
+    }
+
+    private function rewardsPortalPathForMember(array $member): string {
+        return '/api/l/r/' . $this->loyaltyPortalToken($member);
+    }
+
+    private function rewardsPortalUrlForMember(array $member): string {
+        return $this->publicUrlForPath($this->rewardsPortalPathForMember($member));
+    }
+
+    private function publicUrlForPath(string $path): string {
+        $path = $this->publicGatewayPath($path);
+        $base = rtrim((string)(TenantContext::publicBaseUrl() ?? TenantContext::appUrl() ?? ''), '/');
+        if ($base === '') {
+            return $path;
+        }
+
+        return $base . '/' . ltrim($path, '/');
+    }
+
+    private function publicGatewayPath(string $path): string {
+        $path = '/' . ltrim($path, '/');
+        if (!str_starts_with($path, '/api')) {
+            return $path;
+        }
+
+        $tenant = trim((string)($_ENV['PUBLIC_TENANT_SLUG'] ?? TenantContext::slug() ?? $this->tenantId()), '/ ');
+        $apiSegment = trim((string)($_ENV['PUBLIC_API_SERVICE_SEGMENT'] ?? 'api'), '/ ');
+        if ($tenant === '' || $apiSegment === '') {
+            return $path;
+        }
+
+        return '/' . $tenant . '/' . $apiSegment . substr($path, 4);
+    }
+
+    private function portalSupport(): array {
+        $settings = $this->settings()['settings'];
+        $program = is_array($settings['program'] ?? null) ? $settings['program'] : [];
+
+        return [
+            'email' => trim((string)($program['supportEmail'] ?? '')),
+            'phone' => trim((string)($program['supportPhone'] ?? '')),
+        ];
+    }
+
+    private function loyaltyPortalToken(array $member): string {
+        $accountId = trim((string)($member['account_id'] ?? ''));
+        if ($accountId === '') {
+            throw new \InvalidArgumentException('El socio no tiene cuenta para generar el portal.');
+        }
+        $ttl = max(3600, (int)($_ENV['LOYALTY_PORTAL_TOKEN_TTL_SECONDS'] ?? 90 * 24 * 60 * 60));
+        $expiresAt = time() + $ttl;
+        $expiresAtBase36 = base_convert((string)$expiresAt, 10, 36);
+        $payload = 'v1.' . $accountId . '.' . $expiresAtBase36;
+        $signature = substr(hash_hmac('sha256', $this->tenantId() . '|portal|' . $accountId . '|' . $expiresAtBase36, $this->loyaltyPortalSecret(), true), 0, 12);
+
+        return $payload . '.' . $this->base64UrlEncode($signature);
+    }
+
+    private function decodeLoyaltyPortalToken(string $token): array {
+        $parts = explode('.', trim($token));
+        if (count($parts) !== 4 || $parts[0] !== 'v1') {
+            throw new \InvalidArgumentException('El enlace de premios no es valido.');
+        }
+        [, $accountId, $expiresAtBase36, $signature] = $parts;
+        if ($accountId === '' || $expiresAtBase36 === '' || !ctype_alnum($expiresAtBase36)) {
+            throw new \InvalidArgumentException('El enlace de premios no es valido.');
+        }
+        $expected = $this->base64UrlEncode(substr(hash_hmac('sha256', $this->tenantId() . '|portal|' . $accountId . '|' . $expiresAtBase36, $this->loyaltyPortalSecret(), true), 0, 12));
+        if (!hash_equals($expected, $signature)) {
+            throw new \InvalidArgumentException('El enlace de premios no es valido.');
+        }
+        $expiresAt = (int)base_convert(strtolower($expiresAtBase36), 36, 10);
+        if ($expiresAt <= time()) {
+            throw new \InvalidArgumentException('El enlace de premios expiro. Solicita una tarjeta actualizada.');
+        }
+
+        return [
+            'tenantId' => $this->tenantId(),
+            'accountId' => $accountId,
+            'exp' => $expiresAt,
+        ];
+    }
+
+    private function loyaltyPortalSecret(): string {
+        $secret = trim((string)($_ENV['LOYALTY_PORTAL_SECRET'] ?? ''));
+        if ($secret === '') {
+            $secret = trim((string)($_ENV['LOYALTY_WALLET_QR_SECRET'] ?? ''));
+        }
+        if ($secret === '') {
+            $secret = trim((string)($_ENV['JWT_SECRET'] ?? ''));
+        }
+        if ($secret === '') {
+            throw new \RuntimeException('Configura LOYALTY_PORTAL_SECRET, LOYALTY_WALLET_QR_SECRET o JWT_SECRET para firmar el portal de premios.');
+        }
+
+        return $secret;
+    }
+
+    private function normalizeRewardClaimPayload(array $payload, ?array $before = null): array {
+        $mode = $this->normalizeClaimMode((string)($payload['claimMode'] ?? $payload['claim_mode'] ?? $before['claim_mode'] ?? self::CLAIM_MODE_STAFF_ONLY));
+        $instructions = trim((string)($payload['claimInstructions'] ?? $payload['claim_instructions'] ?? $before['claim_instructions'] ?? ''));
+        $options = $payload['claimDeliveryOptions'] ?? $payload['claim_delivery_options'] ?? $before['claim_delivery_options'] ?? [];
+        $options = $mode === self::CLAIM_MODE_MANAGED ? $this->normalizeDeliveryOptions($options) : [];
+        if ($mode === self::CLAIM_MODE_MANAGED && $options === []) {
+            $options = ['pickup'];
+        }
+
+        return [
+            'claim_mode' => $mode,
+            'claim_instructions' => $instructions,
+            'claim_delivery_options' => $options,
+        ];
+    }
+
+    private function normalizeClaimMode(string $mode): string {
+        $mode = strtolower(trim($mode));
+        if (in_array($mode, [self::CLAIM_MODE_STAFF_ONLY, self::CLAIM_MODE_IN_STORE, self::CLAIM_MODE_MANAGED], true)) {
+            return $mode;
+        }
+
+        return self::CLAIM_MODE_STAFF_ONLY;
+    }
+
+    private function normalizeDeliveryOptions($options): array {
+        if (is_string($options)) {
+            $decoded = json_decode($options, true);
+            $options = is_array($decoded) ? $decoded : [$options];
+        }
+        if (!is_array($options)) {
+            return [];
+        }
+        $normalized = [];
+        foreach ($options as $option) {
+            $value = strtolower(trim((string)$option));
+            if (in_array($value, ['pickup', 'delivery'], true) && !in_array($value, $normalized, true)) {
+                $normalized[] = $value;
+            }
+        }
+
+        return $normalized;
+    }
+
+    private function portalFulfillmentType(string $claimMode, array $payload, array $deliveryOptions): string {
+        if ($claimMode === self::CLAIM_MODE_IN_STORE) {
+            return 'in_store';
+        }
+        $requested = strtolower(trim((string)($payload['fulfillmentType'] ?? $payload['fulfillment_type'] ?? '')));
+        if (in_array($requested, $deliveryOptions, true)) {
+            return $requested;
+        }
+        if ($deliveryOptions !== []) {
+            return (string)$deliveryOptions[0];
+        }
+
+        return 'pickup';
+    }
+
+    private function claimCode(): string {
+        return (string)random_int(100000, 999999);
+    }
+
+    private function claimCodeHash(string $code): string {
+        return hash_hmac('sha256', preg_replace('/\D+/', '', $code) ?? '', $this->loyaltyPortalSecret());
+    }
+
+    private function futureTimestamp(int $seconds): string {
+        return date('Y-m-d H:i:s', time() + $seconds);
     }
 
     private function tierMultiplier(string $tierName): float {
@@ -2728,7 +3564,9 @@ HTML;
                 'id' => $this->id('audit'),
                 'tenant_id' => $this->tenantId(),
                 'actor_user_id' => $userId,
-                'actor_type' => str_starts_with((string)$userId, 'api:') ? 'api' : 'dashboard',
+                'actor_type' => str_starts_with((string)$userId, 'api:')
+                    ? 'api'
+                    : (str_starts_with((string)$userId, 'customer:') ? 'customer' : ((string)$userId === 'system' ? 'system' : 'dashboard')),
                 'action' => $action,
                 'subject_type' => $subjectType,
                 'subject_id' => $subjectId,
@@ -2934,7 +3772,9 @@ HTML;
     private function redemptionById(string $redemptionId): array {
         $rows = $this->fetchAll(
             "SELECT r.id, r.member_id, m.account_name AS customer, r.reward_id, w.name AS reward,
-                    r.points_cost, r.status, r.metadata, r.created_at
+                    r.points_cost, r.status, r.source, r.fulfillment_type, r.code_expires_at,
+                    r.expires_at, r.resolved_at, r.resolved_by_user_id, r.resolution_note,
+                    r.metadata, r.created_at, r.updated_at
              FROM loyalty_redemptions r
              JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
              JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
@@ -3694,7 +4534,7 @@ HTML;
 
     private function normalizeRow(array $row): array {
         foreach ($row as $key => $value) {
-            if (is_string($value) && in_array($key, ['metadata', 'last_payload', 'settings', 'benefits', 'scopes', 'before_state', 'after_state', 'response_payload'], true)) {
+            if (is_string($value) && in_array($key, ['metadata', 'last_payload', 'settings', 'benefits', 'scopes', 'before_state', 'after_state', 'response_payload', 'claim_delivery_options'], true)) {
                 $decoded = json_decode($value, true);
                 $row[$key] = is_array($decoded) ? $decoded : [];
             }
