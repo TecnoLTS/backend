@@ -181,6 +181,19 @@ final class LoyaltyController {
         }
     }
 
+    public function publicCatalog(string $token): void {
+        try {
+            $url = $this->repository->publicCatalogRedirect($token);
+            Response::noStore();
+            http_response_code(302);
+            header('Location: ' . $url);
+        } catch (\InvalidArgumentException $e) {
+            $this->respondWalletLandingError($e->getMessage(), 422);
+        } catch (\Throwable $e) {
+            $this->respondWalletLandingError('No se pudo abrir el catálogo.', 500);
+        }
+    }
+
     public function publicRewardsPortal(string $token): void {
         try {
             $portal = $this->repository->publicRewardsPortal($token);

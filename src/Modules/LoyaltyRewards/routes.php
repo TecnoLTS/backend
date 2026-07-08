@@ -45,6 +45,8 @@ return [
     ['method' => 'GET', 'path' => '/api/loyalty/v1/health', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@externalHealth', 'capability' => 'loyalty.public'],
     ['method' => 'GET', 'path' => '/api/l/w/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicGoogleWalletLanding', 'capability' => 'loyalty.public'],
     ['method' => 'HEAD', 'path' => '/api/l/w/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicGoogleWalletLanding', 'capability' => 'loyalty.public'],
+    ['method' => 'GET', 'path' => '/api/l/c/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicCatalog', 'capability' => 'loyalty.public'],
+    ['method' => 'HEAD', 'path' => '/api/l/c/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicCatalog', 'capability' => 'loyalty.public'],
     ['method' => 'GET', 'path' => '/api/l/r/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicRewardsPortal', 'capability' => 'loyalty.public'],
     ['method' => 'POST', 'path' => '/api/l/r/{token}/claims', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicRewardsClaim', 'capability' => 'loyalty.public'],
     ['method' => 'POST', 'path' => '/api/l/r/{token}/claims/{redemptionId}/cancel', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicRewardsCancel', 'capability' => 'loyalty.public'],

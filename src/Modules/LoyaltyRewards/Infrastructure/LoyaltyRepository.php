@@ -1406,7 +1406,7 @@ final class LoyaltyRepository {
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
             (int)($member['points'] ?? 0),
-            $this->rewardsPortalUrlForMember($member)
+            $this->catalogUrlForMember($member)
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'qr-opened', [
@@ -1475,7 +1475,7 @@ final class LoyaltyRepository {
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
             (int)($member['points'] ?? 0),
-            $this->rewardsPortalUrlForMember($member)
+            $this->catalogUrlForMember($member)
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'link-generated', [
@@ -1798,7 +1798,7 @@ HTML;
                 (string)$member['account_id'],
                 (string)($member['account_name'] ?? $member['account_id']),
                 $balanceAfter,
-                $this->rewardsPortalUrlForMember($member)
+                $this->catalogUrlForMember($member)
             );
 
             $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'synced', [
@@ -3231,6 +3231,33 @@ HTML;
 
     private function rewardsPortalPathForMember(array $member): string {
         return '/api/l/r/' . $this->loyaltyPortalToken($member);
+    }
+
+    private function catalogPathForMember(array $member): string {
+        return '/api/l/c/' . $this->loyaltyPortalToken($member);
+    }
+
+    private function catalogUrlForMember(array $member): string {
+        return $this->publicUrlForPath($this->catalogPathForMember($member));
+    }
+
+    /**
+     * Valida que el token pertenezca a un socio con tarjeta Wallet activa
+     * (control de acceso: solo cardholders) y resuelve el destino del catalogo.
+     * Si LOYALTY_CATALOG_URL esta definido, redirige a esa pagina (con el token
+     * como parametro `k` para que pueda revalidar); si no, al portal de premios.
+     */
+    public function publicCatalogRedirect(string $token): string {
+        $member = $this->memberFromPortalToken($token);
+
+        $configured = trim((string)($_ENV['LOYALTY_CATALOG_URL'] ?? ''));
+        if ($configured !== '') {
+            $separator = str_contains($configured, '?') ? '&' : '?';
+
+            return $configured . $separator . 'k=' . rawurlencode($token);
+        }
+
+        return $this->rewardsPortalUrlForMember($member);
     }
 
     private function rewardsPortalUrlForMember(array $member): string {
