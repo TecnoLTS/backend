@@ -1516,6 +1516,7 @@ final class LoyaltyRepository {
         return [
             'configured' => true,
             'saveUrl' => $result['saveUrl'],
+            'portalUrl' => $this->rewardsPortalUrlForMember($member),
             'qrPath' => '/api/l/w/' . $this->googleWalletQrToken($member),
             'objectId' => $result['objectId'],
             'classId' => $result['classId'],
