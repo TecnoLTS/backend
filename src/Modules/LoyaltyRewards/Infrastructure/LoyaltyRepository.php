@@ -1006,6 +1006,166 @@ final class LoyaltyRepository {
         ];
     }
 
+    public function publicRewardsAccessPage(array $state = []): array {
+        $program = $this->program($this->tenantId());
+        $identifier = trim((string)($state['identifier'] ?? $state['account'] ?? $state['accountId'] ?? $state['account_id'] ?? ''));
+
+        $defaults = [
+            'program' => $program,
+            'accessPath' => $this->publicGatewayPath($this->portalAccessPath()),
+            'requestPath' => $this->publicGatewayPath($this->portalAccessPath() . '/request'),
+            'verifyPath' => $this->publicGatewayPath($this->portalAccessPath() . '/verify'),
+            'support' => $this->portalSupport(),
+            'identifier' => $identifier,
+            'step' => $identifier !== '' ? 'identified' : 'identify',
+        ];
+
+        return array_merge($defaults, $state);
+    }
+
+    public function requestPortalAccess(array $payload): array {
+        $this->expirePortalOtpChallenges();
+        $identifier = trim((string)($payload['identifier'] ?? $payload['accountId'] ?? $payload['account_id'] ?? $payload['email'] ?? $payload['phone'] ?? ''));
+        if ($identifier === '') {
+            throw new \InvalidArgumentException('Ingresa tu cuenta, correo o telefono registrado.');
+        }
+
+        $member = $this->memberFromPortalAccessIdentifier($identifier);
+        if (!$member) {
+            throw new \InvalidArgumentException('No encontramos una tarjeta activa con esos datos.');
+        }
+        $this->assertMemberCanOperate($member, 'entrar al catalogo');
+        if (($member['wallet_platform'] ?? 'none') === 'none' || !$this->hasActiveWallet((string)$member['id'])) {
+            throw new \InvalidArgumentException('Necesitas una tarjeta Wallet activa para entrar al catalogo.');
+        }
+
+        $recipient = mb_strtolower(trim((string)($member['email'] ?? '')));
+        if ($recipient === '' || !filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
+            throw new \InvalidArgumentException('Este socio no tiene un correo valido para recibir el codigo.');
+        }
+
+        $recent = (int)$this->scalar(
+            "SELECT COUNT(*)
+             FROM loyalty_portal_otp_challenges
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND consumed_at IS NULL
+               AND created_at > NOW() - INTERVAL '60 seconds'",
+            ['tenant_id' => $this->tenantId(), 'member_id' => (string)$member['id']]
+        );
+        if ($recent > 0) {
+            throw new \InvalidArgumentException('Ya enviamos un codigo hace poco. Espera un minuto antes de pedir otro.');
+        }
+
+        $challengeId = $this->id('otp');
+        $code = (string)random_int(100000, 999999);
+        $expiresAt = $this->futureTimestamp(10 * 60);
+        $this->execute(
+            'INSERT INTO loyalty_portal_otp_challenges
+                (id, tenant_id, member_id, channel, destination, code_hash, expires_at, metadata)
+             VALUES
+                (:id, :tenant_id, :member_id, :channel, :destination, :code_hash, :expires_at, :metadata)',
+            [
+                'id' => $challengeId,
+                'tenant_id' => $this->tenantId(),
+                'member_id' => (string)$member['id'],
+                'channel' => 'email',
+                'destination' => $recipient,
+                'code_hash' => $this->portalOtpHash($challengeId, $code),
+                'expires_at' => $expiresAt,
+                'metadata' => json_encode(['accountId' => (string)$member['account_id'], 'requestedFrom' => 'wallet-catalog'], JSON_UNESCAPED_UNICODE),
+            ]
+        );
+
+        $sent = $this->sendPortalOtpEmail($member, $recipient, $code, $expiresAt);
+        if (!$sent) {
+            throw new \RuntimeException('No se pudo enviar el codigo por correo. Revisa la configuracion SMTP.');
+        }
+
+        $this->recordAudit('portal_access.otp_requested', 'member', (string)$member['id'], null, [
+            'channel' => 'email',
+            'destination' => $this->maskEmail($recipient),
+            'expiresAt' => $expiresAt,
+        ], null, 'customer:otp');
+
+        return $this->publicRewardsAccessPage([
+            'step' => 'verify',
+            'challengeId' => $challengeId,
+            'identifier' => (string)$member['account_id'],
+            'destination' => $this->maskEmail($recipient),
+            'expiresAt' => $expiresAt,
+            'message' => 'Enviamos un codigo de 6 digitos a tu correo registrado.',
+        ]);
+    }
+
+    public function verifyPortalAccess(array $payload): array {
+        $this->expirePortalOtpChallenges();
+        $challengeId = trim((string)($payload['challengeId'] ?? $payload['challenge_id'] ?? ''));
+        $code = preg_replace('/\D+/', '', (string)($payload['code'] ?? $payload['otp'] ?? '')) ?? '';
+        if ($challengeId === '' || $code === '') {
+            throw new \InvalidArgumentException('Ingresa el codigo recibido.');
+        }
+
+        $rows = $this->fetchAll(
+            'SELECT c.*, m.account_id, m.account_name, m.email, m.phone, m.status, m.wallet_platform
+             FROM loyalty_portal_otp_challenges c
+             JOIN loyalty_members m ON m.id = c.member_id AND m.tenant_id = c.tenant_id
+             WHERE c.tenant_id = :tenant_id AND c.id = :id
+             LIMIT 1',
+            ['tenant_id' => $this->tenantId(), 'id' => $challengeId]
+        );
+        $challenge = $rows[0] ?? null;
+        if (!$challenge) {
+            throw new \InvalidArgumentException('El codigo no es valido o expiro.');
+        }
+        if (!empty($challenge['consumed_at'])) {
+            throw new \InvalidArgumentException('Este codigo ya fue utilizado.');
+        }
+        if (strtotime((string)$challenge['expires_at']) <= time()) {
+            throw new \InvalidArgumentException('El codigo expiro. Solicita uno nuevo.');
+        }
+        if ((int)($challenge['attempts'] ?? 0) >= (int)($challenge['max_attempts'] ?? 5)) {
+            throw new \InvalidArgumentException('Se supero el numero de intentos. Solicita un codigo nuevo.');
+        }
+
+        $member = $this->memberFromPayload(['accountId' => (string)$challenge['account_id']]);
+        if (!$member) {
+            throw new \InvalidArgumentException('Socio no encontrado para abrir el catalogo.');
+        }
+        $this->assertMemberCanOperate($member, 'entrar al catalogo');
+        if (($member['wallet_platform'] ?? 'none') === 'none' || !$this->hasActiveWallet((string)$member['id'])) {
+            throw new \InvalidArgumentException('Necesitas una tarjeta Wallet activa para entrar al catalogo.');
+        }
+
+        $expected = (string)($challenge['code_hash'] ?? '');
+        if (!hash_equals($expected, $this->portalOtpHash($challengeId, $code))) {
+            $this->execute(
+                'UPDATE loyalty_portal_otp_challenges SET attempts = attempts + 1, updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND id = :id',
+                ['tenant_id' => $this->tenantId(), 'id' => $challengeId]
+            );
+            $this->recordRisk('medium', 'portal_otp_failed', 'Codigo OTP incorrecto para acceso al catalogo.', (string)$member['id'], null, ['challengeId' => $challengeId]);
+            throw new \InvalidArgumentException('El codigo no es correcto.');
+        }
+
+        $this->execute(
+            'UPDATE loyalty_portal_otp_challenges SET consumed_at = NOW(), updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            ['tenant_id' => $this->tenantId(), 'id' => $challengeId]
+        );
+        $this->recordAudit('portal_access.otp_verified', 'member', (string)$member['id'], null, [
+            'challengeId' => $challengeId,
+        ], null, 'customer:otp');
+
+        $path = $this->rewardsPortalPathForMember($member);
+
+        return [
+            'member' => $member,
+            'portalPath' => $this->publicGatewayPath($path),
+            'portalUrl' => $this->publicUrlForPath($path),
+        ];
+    }
+
     public function createPortalClaim(string $token, array $payload): array {
         $this->expireCustomerPortalReservations();
         $member = $this->memberFromPortalToken($token);
@@ -1406,7 +1566,7 @@ final class LoyaltyRepository {
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
             (int)($member['points'] ?? 0),
-            $this->catalogUrlForMember($member)
+            $this->portalAccessUrl((string)$member['account_id'])
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'qr-opened', [
@@ -1421,7 +1581,6 @@ final class LoyaltyRepository {
 
         return [
             'saveUrl' => (string)$result['saveUrl'],
-            'portalUrl' => $this->rewardsPortalUrlForMember($member),
             'memberName' => (string)($member['account_name'] ?? $member['account_id']),
             'accountId' => (string)$member['account_id'],
             'points' => (int)($member['points'] ?? 0),
@@ -1475,7 +1634,7 @@ final class LoyaltyRepository {
             (string)$member['account_id'],
             (string)($member['account_name'] ?? $member['account_id']),
             (int)($member['points'] ?? 0),
-            $this->catalogUrlForMember($member)
+            $this->portalAccessUrl((string)$member['account_id'])
         );
 
         $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'link-generated', [
@@ -1516,7 +1675,6 @@ final class LoyaltyRepository {
         return [
             'configured' => true,
             'saveUrl' => $result['saveUrl'],
-            'portalUrl' => $this->rewardsPortalUrlForMember($member),
             'qrPath' => '/api/l/w/' . $this->googleWalletQrToken($member),
             'objectId' => $result['objectId'],
             'classId' => $result['classId'],
@@ -1531,8 +1689,9 @@ final class LoyaltyRepository {
     }
 
     /**
-     * Envia el boton "Agregar a Google Wallet" al correo del socio. El saveUrl
-     * no se muestra como URL larga en el HTML y se almacena redaccion en outbox.
+     * Envia el boton "Agregar a Google Wallet" al correo del socio.
+     * El email usa un enlace corto propio para evitar que Gmail recorte el
+     * mensaje por el JWT largo de Google Wallet.
      *
      * @return array{sent: bool, recipient: ?string, reason?: string}
      */
@@ -1550,7 +1709,8 @@ final class LoyaltyRepository {
         $safeProgram = htmlspecialchars($programName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $safeMember = htmlspecialchars($memberName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $safeAccount = htmlspecialchars($accountId, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        $safeUrl = htmlspecialchars($saveUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $landingUrl = $this->publicUrlForPath('/api/l/w/' . $this->googleWalletQrToken($member));
+        $safeUrl = htmlspecialchars($landingUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $safePoints = number_format($points, 0, ',', '.');
 
         $html = <<<HTML
@@ -1583,13 +1743,9 @@ final class LoyaltyRepository {
                     </td>
                   </tr>
                 </table>
-                <table role="presentation" cellspacing="0" cellpadding="0" align="center" style="margin:24px auto 0;">
-                  <tr>
-                    <td align="center" bgcolor="#0f766e" style="border-radius:10px;">
-                      <a href="{$safeUrl}" target="_blank" style="display:inline-block;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;line-height:18px;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
-                    </td>
-                  </tr>
-                </table>
+                <p style="margin:24px 0 0;text-align:center;">
+                  <a href="{$safeUrl}" target="_blank" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;line-height:18px;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
+                </p>
                 <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, intenta tocar el boton desde Chrome en tu telefono Android.</p>
               </td>
             </tr>
@@ -1601,7 +1757,7 @@ final class LoyaltyRepository {
 </html>
 HTML;
 
-        $plain = "Hola {$memberName},\n\nAgrega tu tarjeta de recompensas de {$programName} a Google Wallet.\nCuenta: {$accountId}\nSaldo actual: {$points} pts\n\nEnlace: {$saveUrl}\n";
+        $plain = "Hola {$memberName},\n\nAgrega tu tarjeta de recompensas de {$programName} a Google Wallet.\nCuenta: {$accountId}\nSaldo actual: {$points} pts\n\nEnlace: {$landingUrl}\n";
         $stored = "Invitacion Google Wallet enviada. Cuenta: {$accountId}. Saldo: {$points} pts. Enlace firmado omitido.";
         $sent = MailService::sendHtml($recipient, $subject, $html, $plain, null, null, [
             'module' => 'loyalty-points',
@@ -1798,7 +1954,7 @@ HTML;
                 (string)$member['account_id'],
                 (string)($member['account_name'] ?? $member['account_id']),
                 $balanceAfter,
-                $this->catalogUrlForMember($member)
+                $this->portalAccessUrl((string)$member['account_id'])
             );
 
             $this->upsertGoogleWalletPass((string)$member['id'], $result['objectId'], 'synced', [
@@ -3233,45 +3389,64 @@ HTML;
         return '/api/l/r/' . $this->loyaltyPortalToken($member);
     }
 
-    private function catalogPathForMember(array $member): string {
-        return '/api/l/c/' . $this->loyaltyPortalToken($member);
-    }
-
-    private function catalogUrlForMember(array $member): string {
-        return $this->publicUrlForPath($this->catalogPathForMember($member));
+    private function portalAccessPath(): string {
+        return '/api/l/access';
     }
 
     /**
-     * Valida que el token pertenezca a un socio con tarjeta Wallet activa
-     * (control de acceso: solo cardholders) y resuelve el destino del catalogo.
-     * Si LOYALTY_CATALOG_URL esta definido, redirige a esa pagina (con el token
-     * como parametro `k` para que pueda revalidar); si no, al portal de premios.
+     * El enlace de Wallet es una URL web normal y no prueba que el clic venga
+     * desde la Wallet del titular. Por eso este endpoint legacy nunca debe
+     * entregar un portal privado ni reenviar el token del socio.
      */
     public function publicCatalogRedirect(string $token): string {
-        $member = $this->memberFromPortalToken($token);
-
         $configured = trim((string)($_ENV['LOYALTY_CATALOG_URL'] ?? ''));
         if ($configured !== '') {
-            $separator = str_contains($configured, '?') ? '&' : '?';
-
-            return $configured . $separator . 'k=' . rawurlencode($token);
+            return $configured;
         }
 
-        return $this->rewardsPortalUrlForMember($member);
+        throw new \InvalidArgumentException('El catalogo privado ya no esta disponible desde Google Wallet.');
     }
 
     private function rewardsPortalUrlForMember(array $member): string {
         return $this->publicUrlForPath($this->rewardsPortalPathForMember($member));
     }
 
+    private function portalAccessUrl(?string $accountId = null): string {
+        $path = $this->portalAccessPath();
+        $accountId = trim((string)$accountId);
+        if ($accountId !== '') {
+            $path .= '?account=' . rawurlencode($accountId);
+        }
+
+        return $this->publicUrlForPath($path);
+    }
+
     private function publicUrlForPath(string $path): string {
         $path = $this->publicGatewayPath($path);
-        $base = rtrim((string)(TenantContext::publicBaseUrl() ?? TenantContext::appUrl() ?? ''), '/');
+        $base = rtrim($this->walletPublicBaseUrl(), '/');
         if ($base === '') {
             return $path;
         }
 
         return $base . '/' . ltrim($path, '/');
+    }
+
+    private function walletPublicBaseUrl(): string {
+        $override = trim((string)($_ENV['LOYALTY_WALLET_PUBLIC_BASE_URL'] ?? ''));
+        if ($override !== '') {
+            return $override;
+        }
+
+        $walletSettings = $this->settings()['settings']['googleWallet'] ?? [];
+        $origins = is_array($walletSettings['origins'] ?? null) ? $walletSettings['origins'] : [];
+        foreach ($origins as $origin) {
+            $origin = rtrim(trim((string)$origin), '/');
+            if (preg_match('#^https?://#i', $origin) === 1) {
+                return $origin;
+            }
+        }
+
+        return (string)(TenantContext::publicBaseUrl() ?? TenantContext::appUrl() ?? '');
     }
 
     private function publicGatewayPath(string $path): string {
@@ -3297,6 +3472,107 @@ HTML;
             'email' => trim((string)($program['supportEmail'] ?? '')),
             'phone' => trim((string)($program['supportPhone'] ?? '')),
         ];
+    }
+
+    private function memberFromPortalAccessIdentifier(string $identifier): ?array {
+        $tenantId = $this->tenantId();
+        $identifier = trim($identifier);
+        if ($identifier === '') {
+            return null;
+        }
+        $normalizedEmail = mb_strtolower($identifier);
+        $phoneDigits = preg_replace('/\D+/', '', $identifier) ?? '';
+
+        $where = ['m.account_id = :account_id'];
+        $params = ['tenant_id' => $tenantId, 'account_id' => $identifier];
+        if (filter_var($identifier, FILTER_VALIDATE_EMAIL)) {
+            $where[] = 'lower(m.email) = :email';
+            $params['email'] = $normalizedEmail;
+        }
+        if ($phoneDigits !== '') {
+            $where[] = "regexp_replace(COALESCE(m.phone, ''), '\\D', '', 'g') = :phone";
+            $params['phone'] = $phoneDigits;
+        }
+
+        $rows = $this->fetchAll(
+            'SELECT m.*, COALESCE(a.balance, 0) AS points
+             FROM loyalty_members m
+             LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
+             WHERE m.tenant_id = :tenant_id AND (' . implode(' OR ', $where) . ')
+             ORDER BY m.updated_at DESC
+             LIMIT 1',
+            $params
+        );
+
+        return $rows[0] ?? null;
+    }
+
+    private function sendPortalOtpEmail(array $member, string $recipient, string $code, string $expiresAt): bool {
+        $program = $this->program($this->tenantId());
+        $programName = trim((string)($program['wallet_program_name'] ?? $program['name'] ?? 'Fidepuntos')) ?: 'Fidepuntos';
+        $memberName = trim((string)($member['account_name'] ?? $member['name'] ?? ''));
+        $safeProgram = htmlspecialchars($programName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeMember = htmlspecialchars($memberName !== '' ? $memberName : 'Socio', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeCode = htmlspecialchars($code, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $expiresLabel = htmlspecialchars(date('H:i', strtotime($expiresAt)), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $subject = "Codigo para entrar al catalogo {$programName}";
+        $html = <<<HTML
+<!doctype html>
+<html lang="es">
+  <body style="margin:0;background:#f4f7f6;font-family:Arial,sans-serif;color:#142724;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7f6;padding:28px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background:#ffffff;border:1px solid #dce9e4;border-radius:14px;overflow:hidden;">
+          <tr><td style="background:#173d39;color:#ffffff;padding:22px;">
+            <div style="font-size:12px;font-weight:700;text-transform:uppercase;opacity:.78;">{$safeProgram}</div>
+            <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;">Codigo de acceso</h1>
+          </td></tr>
+          <tr><td style="padding:24px;">
+            <p style="margin:0 0 16px;font-size:16px;line-height:1.5;">Hola {$safeMember}, usa este codigo para entrar al catalogo de premios.</p>
+            <div style="text-align:center;font-size:34px;letter-spacing:8px;font-weight:900;background:#f7fbf9;border:1px solid #dce9e4;border-radius:12px;padding:16px;margin:18px 0;">{$safeCode}</div>
+            <p style="margin:0;color:#506a65;font-size:14px;line-height:1.5;">Expira a las {$expiresLabel}. Si no solicitaste este codigo, ignora este mensaje.</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>
+HTML;
+        $plain = "Hola {$memberName},\n\nTu codigo para entrar al catalogo de premios de {$programName} es: {$code}\nExpira a las {$expiresLabel}.\n\nSi no solicitaste este codigo, ignora este mensaje.\n";
+        $stored = "OTP de acceso al catalogo emitido para cuenta " . (string)($member['account_id'] ?? '') . ". Codigo omitido.";
+
+        return MailService::sendHtml($recipient, $subject, $html, $plain, null, null, [
+            'module' => 'loyalty-points',
+            'template' => 'loyalty-portal-access-otp',
+            'member_id' => (string)($member['id'] ?? ''),
+            'account_id' => (string)($member['account_id'] ?? ''),
+        ], $stored);
+    }
+
+    private function portalOtpHash(string $challengeId, string $code): string {
+        $code = preg_replace('/\D+/', '', $code) ?? '';
+        return hash_hmac('sha256', $this->tenantId() . '|portal-otp|' . $challengeId . '|' . $code, $this->loyaltyPortalSecret());
+    }
+
+    private function expirePortalOtpChallenges(): void {
+        $this->execute(
+            "UPDATE loyalty_portal_otp_challenges
+             SET updated_at = NOW()
+             WHERE tenant_id = :tenant_id
+               AND consumed_at IS NULL
+               AND expires_at < NOW()",
+            ['tenant_id' => $this->tenantId()]
+        );
+    }
+
+    private function maskEmail(string $email): string {
+        $email = mb_strtolower(trim($email));
+        if (!str_contains($email, '@')) {
+            return 'correo registrado';
+        }
+        [$local, $domain] = explode('@', $email, 2);
+        $visible = mb_substr($local, 0, 2);
+        return $visible . str_repeat('*', max(2, mb_strlen($local) - 2)) . '@' . $domain;
     }
 
     private function loyaltyPortalToken(array $member): string {
@@ -4760,11 +5036,17 @@ HTML;
                 JOIN loyalty_wallet_passes p
                   ON p.member_id = m.id AND p.tenant_id = m.tenant_id
                  AND p.platform = 'google' AND p.external_object_id IS NOT NULL
+                 AND COALESCE(p.status, '') NOT IN ('inactive', 'revoked', 'deleted')
                 LEFT JOIN loyalty_point_accounts a
                   ON a.member_id = m.id AND a.tenant_id = m.tenant_id
                 WHERE m.tenant_id = :tenant_id";
 
         $type = (string)($filter['audience_type'] ?? 'segment');
+        $wallet = strtolower(trim((string)($filter['wallet'] ?? $filter['wallet_platform'] ?? 'all')));
+        if (in_array($wallet, ['google', 'apple', 'none'], true)) {
+            $sql .= ' AND m.wallet_platform = :wallet';
+            $params['wallet'] = $wallet;
+        }
 
         // Estado: por defecto solo activos; 'segment' puede pedir otro estado explicito.
         $status = $type === 'segment' ? (string)($filter['status'] ?? 'active') : 'active';
@@ -4899,6 +5181,10 @@ HTML;
     /** @return array<string, mixed> */
     private function sanitizeAudienceFilter(array $payload, string $type): array {
         $filter = ['audience_type' => $type];
+        $wallet = strtolower(trim((string)($payload['wallet'] ?? $payload['wallet_platform'] ?? 'all')));
+        if (in_array($wallet, ['all', 'google', 'apple', 'none'], true)) {
+            $filter['wallet'] = $wallet;
+        }
         if ($type !== 'segment') {
             return $filter;
         }

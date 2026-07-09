@@ -205,6 +205,21 @@ final class LoyaltySchema {
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
             updated_at timestamp without time zone DEFAULT NOW() NOT NULL
         )');
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_portal_otp_challenges (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            member_id text NOT NULL,
+            channel text NOT NULL,
+            destination text NOT NULL,
+            code_hash text NOT NULL,
+            attempts integer NOT NULL DEFAULT 0,
+            max_attempts integer NOT NULL DEFAULT 5,
+            expires_at timestamp without time zone NOT NULL,
+            consumed_at timestamp without time zone,
+            metadata jsonb DEFAULT \'{}\'::jsonb,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL
+        )');
     }
 
     private function createOperationalTables(): void {
@@ -359,6 +374,7 @@ final class LoyaltySchema {
         $this->addColumnIfMissing('loyalty_redemptions', 'resolved_at', 'timestamp without time zone');
         $this->addColumnIfMissing('loyalty_redemptions', 'resolved_by_user_id', 'text');
         $this->addColumnIfMissing('loyalty_redemptions', 'resolution_note', 'text');
+        $this->addColumnIfMissing('loyalty_portal_otp_challenges', 'metadata', 'jsonb DEFAULT \'{}\'::jsonb');
         $this->addColumnIfMissing('loyalty_members', 'blocked_reason', 'text');
         $this->addColumnIfMissing('loyalty_members', 'blocked_at', 'timestamp without time zone');
         $this->addColumnIfMissing('loyalty_risk_events', 'resolved_by_user_id', 'text');
@@ -380,6 +396,8 @@ final class LoyaltySchema {
         $this->createIndexIfMissing('loyalty_redemptions_member_day_idx', 'CREATE INDEX loyalty_redemptions_member_day_idx ON loyalty_redemptions (tenant_id, member_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_rewards_claim_mode_idx', 'CREATE INDEX loyalty_rewards_claim_mode_idx ON loyalty_rewards (tenant_id, claim_mode, status)');
         $this->createIndexIfMissing('loyalty_redemptions_claim_queue_idx', 'CREATE INDEX loyalty_redemptions_claim_queue_idx ON loyalty_redemptions (tenant_id, source, status, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_portal_otp_member_idx', 'CREATE INDEX loyalty_portal_otp_member_idx ON loyalty_portal_otp_challenges (tenant_id, member_id, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_portal_otp_open_idx', 'CREATE INDEX loyalty_portal_otp_open_idx ON loyalty_portal_otp_challenges (tenant_id, expires_at) WHERE consumed_at IS NULL');
         $this->createIndexIfMissing('loyalty_redemptions_expiry_idx', 'CREATE INDEX loyalty_redemptions_expiry_idx ON loyalty_redemptions (tenant_id, expires_at) WHERE expires_at IS NOT NULL');
         $this->createIndexIfMissing('loyalty_api_clients_hash_idx', 'CREATE INDEX loyalty_api_clients_hash_idx ON loyalty_api_clients (tenant_id, key_hash)');
         $this->createIndexIfMissing('loyalty_audit_tenant_created_idx', 'CREATE INDEX loyalty_audit_tenant_created_idx ON loyalty_audit_events (tenant_id, created_at DESC)');

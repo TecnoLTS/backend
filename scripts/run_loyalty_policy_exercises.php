@@ -110,7 +110,9 @@ $cleanup = static function () use ($pdo, &$createdMemberIds, &$createdRewardIds,
 try {
     $member = $repository->createMember([
         'name' => 'Control Politicas ' . $token,
+        'accountId' => 'POL-' . $token,
         'email' => "control.politicas.{$token}@tecnolts.com",
+        'phone' => '099' . random_int(1000000, 9999999),
         'walletPlatform' => 'none',
     ], 'policy-script');
     $createdMemberIds[] = (string)$member['id'];
@@ -180,7 +182,9 @@ try {
 
     $blockedMember = $repository->createMember([
         'name' => 'Control Bloqueado ' . $token,
+        'accountId' => 'BLK-' . $token,
         'email' => "control.bloqueado.{$token}@tecnolts.com",
+        'phone' => '098' . random_int(1000000, 9999999),
         'walletPlatform' => 'google',
     ], 'policy-script');
     $createdMemberIds[] = (string)$blockedMember['id'];

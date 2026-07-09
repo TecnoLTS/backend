@@ -188,9 +188,67 @@ final class LoyaltyController {
             http_response_code(302);
             header('Location: ' . $url);
         } catch (\InvalidArgumentException $e) {
-            $this->respondWalletLandingError($e->getMessage(), 422);
+            $this->respondWalletLandingError($e->getMessage(), 410);
         } catch (\Throwable $e) {
             $this->respondWalletLandingError('No se pudo abrir el catálogo.', 500);
+        }
+    }
+
+    public function publicRewardsAccess(): void {
+        try {
+            $identifier = trim((string)($_GET['account'] ?? $_GET['accountId'] ?? $_GET['account_id'] ?? ''));
+            $page = $this->repository->publicRewardsAccessPage(['identifier' => $identifier]);
+            Response::noStore();
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
+        } catch (\Throwable $e) {
+            $this->respondWalletLandingError('No se pudo abrir el acceso al catalogo.', 500);
+        }
+    }
+
+    public function publicRewardsAccessRequest(): void {
+        try {
+            $page = $this->repository->requestPortalAccess($this->requestPayload());
+            Response::noStore();
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
+        } catch (\InvalidArgumentException $e) {
+            $payload = $this->requestPayload();
+            $page = $this->repository->publicRewardsAccessPage([
+                'error' => $e->getMessage(),
+                'identifier' => (string)($payload['identifier'] ?? $payload['account'] ?? $payload['accountId'] ?? $payload['account_id'] ?? ''),
+            ]);
+            Response::noStore();
+            http_response_code(422);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
+        } catch (\Throwable $e) {
+            $page = $this->repository->publicRewardsAccessPage(['error' => 'No se pudo enviar el codigo. Intenta nuevamente.']);
+            Response::noStore();
+            http_response_code(500);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
+        }
+    }
+
+    public function publicRewardsAccessVerify(): void {
+        try {
+            $result = $this->repository->verifyPortalAccess($this->requestPayload());
+            Response::noStore();
+            http_response_code(303);
+            header('Location: ' . (string)$result['portalPath']);
+        } catch (\InvalidArgumentException $e) {
+            $page = $this->repository->publicRewardsAccessPage(['error' => $e->getMessage()]);
+            Response::noStore();
+            http_response_code(422);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
+        } catch (\Throwable $e) {
+            $page = $this->repository->publicRewardsAccessPage(['error' => 'No se pudo validar el codigo. Intenta nuevamente.']);
+            Response::noStore();
+            http_response_code(500);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsAccessPage($page);
         }
     }
 
@@ -217,9 +275,9 @@ final class LoyaltyController {
             header('Content-Type: text/html; charset=UTF-8');
             echo $this->renderRewardsPortalPage($portal);
         } catch (\InvalidArgumentException $e) {
-            $this->respondWalletLandingError($e->getMessage(), 422);
+            $this->respondRewardsPortalFeedback($token, $this->portalClaimErrorFeedback($e->getMessage()), 422);
         } catch (\Throwable $e) {
-            $this->respondWalletLandingError('No se pudo registrar la solicitud.', 500);
+            $this->respondRewardsPortalFeedback($token, $this->portalClaimErrorFeedback('No se pudo registrar la solicitud.'), 500);
         }
     }
 
@@ -233,9 +291,9 @@ final class LoyaltyController {
             header('Content-Type: text/html; charset=UTF-8');
             echo $this->renderRewardsPortalPage($portal);
         } catch (\InvalidArgumentException $e) {
-            $this->respondWalletLandingError($e->getMessage(), 422);
+            $this->respondRewardsPortalFeedback($token, $this->portalClaimErrorFeedback($e->getMessage()), 422);
         } catch (\Throwable $e) {
-            $this->respondWalletLandingError('No se pudo cancelar la solicitud.', 500);
+            $this->respondRewardsPortalFeedback($token, $this->portalClaimErrorFeedback('No se pudo cancelar la solicitud.'), 500);
         }
     }
 
@@ -285,6 +343,114 @@ final class LoyaltyController {
         );
     }
 
+    private function renderRewardsAccessPage(array $data): string {
+        $program = $this->e((string)($data['program']['wallet_program_name'] ?? $data['program']['name'] ?? 'Fidepuntos'));
+        $requestPath = $this->e((string)($data['requestPath'] ?? '/api/l/access/request'));
+        $verifyPath = $this->e((string)($data['verifyPath'] ?? '/api/l/access/verify'));
+        $step = (string)($data['step'] ?? 'identify');
+        $identifierRaw = trim((string)($data['identifier'] ?? ''));
+        $identifier = $this->e($identifierRaw);
+        $error = trim((string)($data['error'] ?? ''));
+        $message = trim((string)($data['message'] ?? ''));
+        $challengeId = $this->e((string)($data['challengeId'] ?? ''));
+        $destination = $this->e((string)($data['destination'] ?? 'tu correo registrado'));
+        $feedback = '';
+        if ($error !== '') {
+            $feedback = '<div class="notice error">' . $this->e($error) . '</div>';
+        } elseif ($message !== '') {
+            $feedback = '<div class="notice">' . $this->e($message) . '<br><span>Destino: ' . $destination . '</span></div>';
+        }
+
+        if ($step === 'verify') {
+            $resendForm = $identifierRaw !== ''
+                ? <<<HTML
+<form method="post" action="{$requestPath}" class="secondary">
+  <input type="hidden" name="identifier" value="{$identifier}">
+  <button class="btn btn-light" type="submit">Reenviar codigo</button>
+</form>
+HTML
+                : <<<HTML
+<form method="post" action="{$requestPath}" class="secondary">
+  <label>Enviar otro codigo
+    <input name="identifier" autocomplete="username" placeholder="Cuenta, correo o telefono">
+  </label>
+  <button class="btn btn-light" type="submit">Reenviar</button>
+</form>
+HTML;
+            $form = <<<HTML
+<form method="post" action="{$verifyPath}">
+  <input type="hidden" name="challengeId" value="{$challengeId}">
+  <label>Codigo recibido
+    <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" required>
+  </label>
+  <button class="btn" type="submit">Entrar al catalogo</button>
+</form>
+{$resendForm}
+HTML
+;
+        } elseif ($step === 'identified' && $identifierRaw !== '') {
+            $form = <<<HTML
+<form method="post" action="{$requestPath}">
+  <input type="hidden" name="identifier" value="{$identifier}">
+  <div class="account-box">
+    <span>Tarjeta detectada</span>
+    <strong>{$identifier}</strong>
+  </div>
+  <button class="btn" type="submit">Enviar codigo</button>
+</form>
+HTML;
+        } else {
+            $form = <<<HTML
+<form method="post" action="{$requestPath}">
+  <label>Cuenta, correo o telefono registrado
+    <input name="identifier" autocomplete="username" placeholder="CLI-00849 o correo@dominio.com" required>
+  </label>
+  <button class="btn" type="submit">Enviar codigo</button>
+</form>
+HTML;
+        }
+
+        return <<<HTML
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Acceso al catalogo {$program}</title>
+<style>
+:root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#10231f;--muted:#64746f;--line:#d9e5e1;--brand:#0f766e;--danger:#b42318}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.5}
+main{width:min(460px,100%);margin:0 auto;padding:28px 14px}.panel{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 18px 42px rgba(15,23,42,.08)}
+.head{background:#173d39;color:#fff;padding:24px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.78}.head h1{margin:8px 0 0;font-size:24px;line-height:1.15}
+.body{padding:22px}.body p{margin:0 0 16px;color:var(--muted)}form{display:grid;gap:12px;margin:0}form.secondary{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+label{display:grid;gap:7px;font-weight:800;font-size:13px}input{min-height:46px;border:1px solid var(--line);border-radius:11px;padding:11px 12px;font:inherit;color:var(--ink);background:#fff}
+.account-box{display:grid;gap:4px;border:1px solid var(--line);border-radius:12px;background:#f7fbf9;padding:13px 14px}.account-box span{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.04em}.account-box strong{font-size:20px}
+.btn{border:0;border-radius:11px;min-height:48px;background:var(--brand);color:#fff;font-weight:900;font-size:15px;cursor:pointer}.btn-light{background:#e7f4f1;color:#0f4f49}
+.notice{border:1px solid #b7dfd8;background:#ecfdf8;color:#134e4a;border-radius:12px;padding:12px;margin:0 0 14px;font-weight:750}.notice span{font-weight:600}.notice.error{border-color:#fecdca;background:#fff1f0;color:var(--danger)}
+.hint{font-size:13px;color:var(--muted);margin-top:14px}@media(max-width:520px){main{padding:0}.panel{border-radius:0;min-height:100vh;border:0}.head{padding-top:30px}}
+</style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">{$program}</span>
+      <h1>Catalogo de premios</h1>
+    </div>
+    <div class="body">
+      <p>Valida tu identidad para ver premios disponibles y reclamar beneficios con tu tarjeta Wallet.</p>
+      {$feedback}
+      {$form}
+      <div class="hint">El codigo expira en pocos minutos. Usa el correo registrado en tu cuenta de fidelizacion.</div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
+HTML;
+    }
+
     private function renderRewardsPortalPage(array $data): string {
         $token = rawurlencode((string)($data['token'] ?? ''));
         $portalPath = '/' . ltrim((string)($data['publicPath'] ?? "/api/l/r/{$token}"), '/');
@@ -293,7 +459,7 @@ final class LoyaltyController {
         $memberName = $this->e((string)($member['account_name'] ?? $member['name'] ?? 'Socio'));
         $accountId = $this->e((string)($member['account_id'] ?? ''));
         $points = number_format((int)($member['points'] ?? 0), 0, ',', '.');
-        $result = $this->renderRewardsPortalResult($data);
+        $result = $this->renderRewardsPortalResult($data, $portalPath);
         $rewards = array_map(fn(array $reward): string => $this->renderRewardsPortalReward($portalPath, $reward), $data['rewards'] ?? []);
         $claims = array_map(fn(array $claim): string => $this->renderRewardsPortalClaim($portalPath, $claim), $data['claims'] ?? []);
         $rewardList = implode('', $rewards) ?: '<div class="empty">No hay premios publicados para reclamar desde Wallet.</div>';
@@ -310,70 +476,291 @@ final class LoyaltyController {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Premios {$program}</title>
+<title>Catalogo de premios {$program}</title>
 <style>
 :root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#10231f;--muted:#64746f;--line:#d9e5e1;--brand:#0f766e;--brand2:#115e59;--ok:#047857;--warn:#b45309;--danger:#b42318}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.5}
-main{width:min(720px,100%);margin:0 auto;padding:18px 14px 32px}.hero{background:linear-gradient(135deg,#123d38,#0f766e);color:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 40px rgba(15,118,110,.18)}
+main{width:min(1120px,100%);margin:0 auto;padding:18px 14px 32px}.hero{background:linear-gradient(135deg,#123d38,#0f766e);color:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 40px rgba(15,118,110,.18)}
 .eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.78}.hero h1{margin:8px 0 10px;font-size:28px;line-height:1.08}.hero p{margin:0;color:rgba(255,255,255,.86)}
 .balance{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.balance div{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:12px}.balance span,.meta{display:block;font-size:12px;color:var(--muted);font-weight:700}.balance span{color:rgba(255,255,255,.72)}.balance strong{display:block;font-size:20px}
-.notice{margin:14px 0 0;border:1px solid #b7dfd8;background:#ecfdf8;color:#134e4a;border-radius:14px;padding:14px}.notice strong{display:block}.notice--cancel{border-color:#fed7aa;background:#fff7ed;color:#7c2d12}
-.section{margin-top:18px}.section h2{font-size:19px;margin:0 0 4px}.section>p{margin:0 0 12px;color:var(--muted)}.grid{display:grid;gap:12px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 10px 24px rgba(15,23,42,.06)}.card h3{margin:0;font-size:17px}.card p{margin:8px 0;color:var(--muted)}.row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.price{font-size:18px;font-weight:850;color:var(--brand2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.section{margin-top:22px}.section h2{font-size:20px;margin:0 0 4px}.section>p{margin:0 0 14px;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;align-items:start}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 24px rgba(15,23,42,.06);display:flex;flex-direction:column;min-height:100%}.card-body{display:flex;flex-direction:column;gap:10px;padding:14px;flex:1}.card h3{margin:0;font-size:17px;line-height:1.2}.card p{margin:0;color:var(--muted)}.card-media{position:relative;aspect-ratio:16/10;background:#e7f4f1;overflow:hidden}.card-media img{display:block;width:100%;height:100%;object-fit:cover}.card-media--empty{display:grid;place-items:center;color:#0f4f49;font-weight:900}.card-media:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(2,6,23,0),rgba(2,6,23,.22));pointer-events:none}.price-tag{position:absolute;right:10px;bottom:10px;border-radius:999px;background:rgba(255,255,255,.95);color:var(--brand2);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums;padding:6px 10px;box-shadow:0 8px 18px rgba(15,23,42,.12)}
+.row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.price{font-size:18px;font-weight:850;color:var(--brand2);font-variant-numeric:tabular-nums;white-space:nowrap}
 .badges{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.badge{border-radius:999px;border:1px solid var(--line);padding:5px 9px;font-size:12px;font-weight:800;color:#29443f;background:#f7fbf9}.badge.ok{border-color:#bbf7d0;background:#f0fdf4;color:#166534}.badge.warn{border-color:#fed7aa;background:#fff7ed;color:#92400e}
 form{display:grid;gap:10px;margin-top:12px}label{display:grid;gap:6px;font-weight:750;font-size:13px}textarea,input,select{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit;background:#fff;color:var(--ink)}textarea{min-height:84px;resize:vertical}
 .choice{display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:9px 10px}.choice input{width:auto;min-height:auto}
-.btn{appearance:none;border:0;border-radius:11px;min-height:46px;padding:12px 14px;font-weight:850;font-size:15px;cursor:pointer;text-align:center}.btn-primary{background:var(--brand);color:#fff}.btn-secondary{background:#e7f4f1;color:#0f4f49}.btn-danger{background:#fff1f0;color:var(--danger);border:1px solid #fecdca}.btn[disabled]{opacity:.52;cursor:not-allowed}.block{font-size:13px;color:var(--danger);font-weight:750}.empty{border:1px dashed var(--line);border-radius:14px;padding:18px;color:var(--muted);background:#fff}
+.btn{appearance:none;border:0;border-radius:11px;min-height:46px;padding:12px 14px;font-weight:850;font-size:15px;cursor:pointer;text-align:center;touch-action:manipulation}.btn-primary{background:var(--brand);color:#fff}.btn-secondary{background:#e7f4f1;color:#0f4f49}.btn-danger{background:#fff1f0;color:var(--danger);border:1px solid #fecdca}.btn[disabled]{opacity:.52;cursor:not-allowed}.claim-panel{margin-top:auto}.claim-panel summary{list-style:none}.claim-panel summary::-webkit-details-marker{display:none}.claim-panel form{border-top:1px solid var(--line);padding-top:12px}.claim-panel[open] summary{background:#0f4f49}.block{font-size:13px;color:var(--danger);font-weight:750;background:#fff1f0;border:1px solid #fecdca;border-radius:11px;padding:10px 12px}.empty{border:1px dashed var(--line);border-radius:14px;padding:18px;color:var(--muted);background:#fff}
 .claims .card{padding:14px}.status{font-weight:850}.status.pending_review{color:var(--warn)}.status.ready_for_pickup,.status.approved{color:var(--brand2)}.status.delivered{color:var(--ok)}.status.cancelled,.status.expired{color:var(--danger)}
-footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}@media(max-width:520px){main{padding-inline:10px}.hero{border-radius:0;margin:-18px -10px 0}.balance{grid-template-columns:1fr}.row{display:grid}.price{white-space:normal}.card{border-radius:12px}}
+.modal-scrim{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:rgba(15,23,42,.58);padding:18px;overflow:auto}.result-modal{width:min(470px,100%);background:#fff;border:1px solid rgba(255,255,255,.72);border-radius:20px;box-shadow:0 28px 80px rgba(15,23,42,.28);padding:18px;animation:modalIn .18s ease-out}.result-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.result-icon{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;border:1px solid}.result-icon svg{width:26px;height:26px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}.result-modal--success .result-icon{background:#ecfdf5;border-color:#bbf7d0;color:#047857}.result-modal--error .result-icon{background:#fff1f0;border-color:#fecdca;color:#b42318}.result-modal--cancel .result-icon{background:#fff7ed;border-color:#fed7aa;color:#b45309}.modal-close{width:44px;height:44px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#29443f;font-size:18px;font-weight:900;cursor:pointer}.result-kicker{margin:14px 0 4px;color:var(--muted);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.result-modal h2{margin:0;font-size:24px;line-height:1.16}.result-copy{margin:10px 0 0;color:#425b55}.result-details{display:grid;gap:8px;margin:16px 0 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:#f7fbf9}.result-details div{display:grid;grid-template-columns:minmax(86px,.8fr) 1.4fr;gap:10px}.result-details dt{color:var(--muted);font-size:12px;font-weight:900}.result-details dd{margin:0;font-weight:850;color:#19312d;overflow-wrap:anywhere}.result-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.result-actions .btn{text-decoration:none;display:grid;place-items:center}.modal-open{overflow:hidden}@keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}@media(prefers-reduced-motion:reduce){.result-modal{animation:none}}@media(max-width:480px){.modal-scrim{align-items:end;padding:10px}.result-modal{border-radius:18px;padding:16px}.result-modal h2{font-size:21px}.result-details div{grid-template-columns:1fr}.result-actions{grid-template-columns:1fr}}
+footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}@media(max-width:640px){main{padding-inline:10px}.hero{border-radius:0;margin:-18px -10px 0}.balance{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr;gap:10px}.card{border-radius:12px}.card-body{padding:12px}.card h3{font-size:15px}.card p{font-size:13px}.badges{margin:6px 0}.badge{font-size:11px;padding:4px 7px}.btn{font-size:14px;padding-inline:10px}.claims .grid{grid-template-columns:1fr}}@media(max-width:420px){.grid{grid-template-columns:1fr}.hero h1{font-size:25px}}
 </style>
 </head>
 <body>
 <main>
   <section class="hero">
     <span class="eyebrow">{$program}</span>
-    <h1>Premios disponibles</h1>
-    <p>Hola {$memberName}, reclama premios desde tu tarjeta Wallet y sigue tus solicitudes.</p>
+    <h1>Catalogo de premios</h1>
+    <p>Hola {$memberName}, elige los premios que quieres solicitar con tu tarjeta Wallet.</p>
     <div class="balance" aria-label="Resumen de cuenta">
       <div><span>Cuenta</span><strong>{$accountId}</strong></div>
       <div><span>Saldo</span><strong>{$points} pts</strong></div>
     </div>
   </section>
-  {$result}
-  <section class="section">
-    <h2>Elegir premio</h2>
-    <p>Los premios de local generan un codigo temporal; los premios gestionados quedan en revision.</p>
+  <section class="section" id="catalogo">
+    <h2>Selecciona un premio</h2>
+    <p>Puedes solicitar uno o varios premios mientras tengas saldo y stock disponible.</p>
     <div class="grid">{$rewardList}</div>
   </section>
-  <section class="section claims">
+  <section class="section claims" id="mis-solicitudes">
     <h2>Mis solicitudes</h2>
     <p>Consulta estados recientes o cancela reservas que aun no han sido atendidas.</p>
     <div class="grid">{$claimList}</div>
   </section>
   <footer>{$supportText}</footer>
 </main>
+{$result}
 </body>
 </html>
 HTML;
     }
 
-    private function renderRewardsPortalResult(array $data): string {
+    private function renderRewardsPortalResult(array $data, string $portalPath): string {
         if (isset($data['claimResult']) && is_array($data['claimResult'])) {
             $redemption = $data['claimResult']['redemption'] ?? [];
-            $reward = $this->e((string)($redemption['reward'] ?? 'Premio'));
+            $reward = (string)($redemption['reward'] ?? 'Premio');
             $code = trim((string)($data['claimResult']['claimCode'] ?? ''));
+            $points = number_format((int)($redemption['points_cost'] ?? 0), 0, ',', '.');
             if ($code !== '') {
-                $safeCode = $this->e($code);
-                return "<div class=\"notice\"><strong>Codigo para el local: {$safeCode}</strong><span>Muestralo al equipo antes de que expire. Premio: {$reward}.</span></div>";
+                return $this->renderRewardsPortalModal($portalPath, [
+                    'type' => 'success',
+                    'kicker' => 'Codigo listo',
+                    'title' => 'Premio reservado para usar en el local',
+                    'message' => 'Muestra este codigo al equipo antes de que expire. Reservamos tus puntos y el stock para este premio.',
+                    'primaryLabel' => 'Ver solicitudes',
+                    'primaryTarget' => 'mis-solicitudes',
+                    'secondaryLabel' => 'Seguir viendo premios',
+                    'secondaryTarget' => 'catalogo',
+                    'details' => [
+                        'Premio' => $reward,
+                        'Codigo' => $code,
+                        'Puntos' => "{$points} pts",
+                    ],
+                ]);
             }
 
-            return "<div class=\"notice\"><strong>Solicitud recibida</strong><span>{$reward} quedo reservado mientras el gestor revisa retiro o entrega.</span></div>";
+            return $this->renderRewardsPortalModal($portalPath, [
+                'type' => 'success',
+                'kicker' => 'Solicitud enviada',
+                'title' => 'Tu premio quedo reservado',
+                'message' => 'El negocio revisara la solicitud y coordinara contigo el retiro o la entrega. Mientras tanto, los puntos y el stock quedan apartados.',
+                'primaryLabel' => 'Ver solicitudes',
+                'primaryTarget' => 'mis-solicitudes',
+                'secondaryLabel' => 'Seguir viendo premios',
+                'secondaryTarget' => 'catalogo',
+                'details' => [
+                    'Premio' => $reward,
+                    'Estado' => 'Pendiente de revision',
+                    'Puntos' => "{$points} pts",
+                ],
+            ]);
         }
         if (isset($data['claimCancelled'])) {
-            return '<div class="notice notice--cancel"><strong>Solicitud cancelada</strong><span>Los puntos y el stock reservado fueron devueltos.</span></div>';
+            $redemption = is_array($data['claimCancelled']) ? ($data['claimCancelled']['redemption'] ?? []) : [];
+            return $this->renderRewardsPortalModal($portalPath, [
+                'type' => 'cancel',
+                'kicker' => 'Solicitud cancelada',
+                'title' => 'Devolvimos tus puntos',
+                'message' => 'La reserva fue cancelada correctamente. El stock del premio vuelve a estar disponible y tus puntos regresan a la cuenta.',
+                'primaryLabel' => 'Volver al catalogo',
+                'primaryTarget' => 'catalogo',
+                'secondaryLabel' => 'Ver solicitudes',
+                'secondaryTarget' => 'mis-solicitudes',
+                'details' => [
+                    'Premio' => (string)($redemption['reward'] ?? 'Premio'),
+                    'Estado' => 'Cancelado',
+                    'Puntos' => number_format((int)($redemption['points_cost'] ?? 0), 0, ',', '.') . ' pts',
+                ],
+            ]);
+        }
+        if (isset($data['claimFeedback']) && is_array($data['claimFeedback'])) {
+            return $this->renderRewardsPortalModal($portalPath, $data['claimFeedback']);
         }
 
         return '';
+    }
+
+    private function respondRewardsPortalFeedback(string $token, array $feedback, int $status): void {
+        try {
+            $portal = $this->repository->publicRewardsPortal($token);
+            $portal['claimFeedback'] = $feedback;
+            Response::noStore();
+            http_response_code($status);
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsPortalPage($portal);
+        } catch (\Throwable $e) {
+            $this->respondWalletLandingError((string)($feedback['message'] ?? 'No se pudo completar la solicitud.'), $status);
+        }
+    }
+
+    private function portalClaimErrorFeedback(string $message): array {
+        $copy = $this->portalClaimErrorCopy($message);
+        return [
+            'type' => 'error',
+            'kicker' => 'Solicitud no completada',
+            'title' => $copy['title'],
+            'message' => $copy['message'],
+            'primaryLabel' => 'Volver al catalogo',
+            'primaryTarget' => 'catalogo',
+            'secondaryLabel' => 'Ver solicitudes',
+            'secondaryTarget' => 'mis-solicitudes',
+            'details' => [
+                'Motivo' => $copy['reason'],
+                'Que hacer' => $copy['recovery'],
+            ],
+        ];
+    }
+
+    /** @return array{title: string, message: string, reason: string, recovery: string} */
+    private function portalClaimErrorCopy(string $message): array {
+        $clean = trim($message) !== '' ? trim($message) : 'No se pudo completar la solicitud.';
+        $normalized = mb_strtolower($clean);
+
+        if (str_contains($normalized, 'ya canjeo este premio hoy')) {
+            return [
+                'title' => 'Este premio ya fue solicitado hoy',
+                'message' => 'Para evitar solicitudes duplicadas, este premio solo puede reclamarse una vez por dia.',
+                'reason' => 'Ya existe una solicitud activa o atendida para este mismo premio hoy.',
+                'recovery' => 'Elige otro premio disponible o vuelve a intentarlo manana.',
+            ];
+        }
+        if (str_contains($normalized, 'limite diario')) {
+            return [
+                'title' => 'Llegaste al limite diario',
+                'message' => 'Tu cuenta ya alcanzo la cantidad maxima de solicitudes permitidas por hoy.',
+                'reason' => $clean,
+                'recovery' => 'Revisa tus solicitudes actuales o vuelve a intentarlo manana.',
+            ];
+        }
+        if (str_contains($normalized, 'puntos suficientes') || str_contains($normalized, 'puntos insuficientes')) {
+            return [
+                'title' => 'No tienes puntos suficientes',
+                'message' => 'Este premio necesita mas puntos de los que hay disponibles en tu cuenta.',
+                'reason' => $clean,
+                'recovery' => 'Elige un premio de menor valor o acumula mas puntos antes de solicitarlo.',
+            ];
+        }
+        if (str_contains($normalized, 'stock')) {
+            return [
+                'title' => 'El premio ya no tiene stock',
+                'message' => 'El premio se agoto o quedo reservado por otra solicitud antes de completar el proceso.',
+                'reason' => $clean,
+                'recovery' => 'Selecciona otro premio del catalogo o consulta mas tarde si vuelve a estar disponible.',
+            ];
+        }
+        if (str_contains($normalized, 'no esta activo')) {
+            return [
+                'title' => 'El premio no esta disponible',
+                'message' => 'El negocio desactivo este premio temporalmente.',
+                'reason' => $clean,
+                'recovery' => 'Elige otro premio publicado en el catalogo.',
+            ];
+        }
+        if (str_contains($normalized, 'cancelar')) {
+            return [
+                'title' => 'No pudimos cancelar la solicitud',
+                'message' => 'La solicitud puede haber cambiado de estado o ya fue atendida por el negocio.',
+                'reason' => $clean,
+                'recovery' => 'Revisa el estado en Mis solicitudes o consulta al equipo del local.',
+            ];
+        }
+
+        return [
+            'title' => 'No pudimos solicitar el premio',
+            'message' => 'La solicitud no se completo. Tus puntos no se descontaron si la reserva no aparece en Mis solicitudes.',
+            'reason' => $clean,
+            'recovery' => 'Intenta nuevamente o elige otro premio disponible.',
+        ];
+    }
+
+    private function renderRewardsPortalModal(string $portalPath, array $feedback): string {
+        $type = (string)($feedback['type'] ?? 'success');
+        if (!in_array($type, ['success', 'error', 'cancel'], true)) {
+            $type = 'success';
+        }
+        $kicker = $this->e((string)($feedback['kicker'] ?? 'Estado de solicitud'));
+        $title = $this->e((string)($feedback['title'] ?? 'Solicitud actualizada'));
+        $message = $this->e((string)($feedback['message'] ?? 'El estado de tu solicitud fue actualizado.'));
+        $primaryLabel = $this->e((string)($feedback['primaryLabel'] ?? 'Volver al catalogo'));
+        $secondaryLabel = $this->e((string)($feedback['secondaryLabel'] ?? 'Ver solicitudes'));
+        $primaryHref = $this->portalResultActionHref($portalPath, (string)($feedback['primaryTarget'] ?? 'catalogo'));
+        $secondaryHref = $this->portalResultActionHref($portalPath, (string)($feedback['secondaryTarget'] ?? 'mis-solicitudes'));
+        $details = is_array($feedback['details'] ?? null) ? $feedback['details'] : [];
+        $detailsHtml = '';
+        foreach ($details as $label => $value) {
+            $safeLabel = $this->e((string)$label);
+            $safeValue = $this->e((string)$value);
+            if ($safeValue === '') {
+                continue;
+            }
+            $detailsHtml .= "<div><dt>{$safeLabel}</dt><dd>{$safeValue}</dd></div>";
+        }
+        $detailsBlock = $detailsHtml !== '' ? "<dl class=\"result-details\">{$detailsHtml}</dl>" : '';
+        $icon = $this->portalResultIcon($type);
+
+        return <<<HTML
+<div class="modal-scrim" data-result-modal>
+  <section class="result-modal result-modal--{$type}" role="dialog" aria-modal="true" aria-labelledby="claim-feedback-title" aria-describedby="claim-feedback-copy">
+    <div class="result-top">
+      <span class="result-icon" aria-hidden="true">{$icon}</span>
+      <button class="modal-close" type="button" aria-label="Cerrar mensaje" data-modal-close>x</button>
+    </div>
+    <p class="result-kicker">{$kicker}</p>
+    <h2 id="claim-feedback-title">{$title}</h2>
+    <p class="result-copy" id="claim-feedback-copy">{$message}</p>
+    {$detailsBlock}
+    <div class="result-actions">
+      <a class="btn btn-primary" href="{$primaryHref}">{$primaryLabel}</a>
+      <a class="btn btn-secondary" href="{$secondaryHref}">{$secondaryLabel}</a>
+    </div>
+  </section>
+</div>
+<script>
+(() => {
+  const modal = document.querySelector('[data-result-modal]');
+  if (!modal) return;
+  document.documentElement.classList.add('modal-open');
+  const close = () => {
+    modal.remove();
+    document.documentElement.classList.remove('modal-open');
+  };
+  modal.querySelectorAll('[data-modal-close]').forEach((button) => button.addEventListener('click', close));
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) close();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') close();
+  });
+  const firstAction = modal.querySelector('.result-actions a') || modal.querySelector('[data-modal-close]');
+  if (firstAction) firstAction.focus({ preventScroll: true });
+})();
+</script>
+HTML;
+    }
+
+    private function portalResultActionHref(string $portalPath, string $target): string {
+        $anchor = $target === 'mis-solicitudes' ? 'mis-solicitudes' : 'catalogo';
+        return $this->e(rtrim($portalPath, '/') . '#' . $anchor);
+    }
+
+    private function portalResultIcon(string $type): string {
+        if ($type === 'error') {
+            return '<svg viewBox="0 0 24 24" focusable="false"><path d="M12 8v5"></path><path d="M12 17h.01"></path><path d="M10.3 4.4 2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4.4a2 2 0 0 0-3.4 0Z"></path></svg>';
+        }
+        if ($type === 'cancel') {
+            return '<svg viewBox="0 0 24 24" focusable="false"><path d="M5 12h14"></path><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z"></path></svg>';
+        }
+
+        return '<svg viewBox="0 0 24 24" focusable="false"><path d="M20 6 9 17l-5-5"></path><path d="M12 22a10 10 0 1 0-8.5-4.7"></path></svg>';
     }
 
     private function renderRewardsPortalReward(string $portalPath, array $reward): string {
@@ -385,7 +772,10 @@ HTML;
         $mode = (string)($reward['claim_mode'] ?? 'staff_only');
         $modeLabel = $this->claimModeLabel($mode);
         $instructions = trim((string)($reward['claim_instructions'] ?? ''));
-        $instructionsHtml = $instructions !== '' ? '<p>' . $this->e($instructions) . '</p>' : '';
+        $instructionsHtml = $instructions !== '' ? '<p class="meta">' . $this->e($instructions) . '</p>' : '';
+        $category = $this->rewardCategory($reward);
+        $categoryBadge = $category !== '' ? '<span class="badge">' . $this->e($category) . '</span>' : '';
+        $image = $this->rewardImageHtml($reward, $name, $points);
         $canClaim = (bool)($reward['canClaim'] ?? false);
         $blockReason = trim((string)($reward['blockReason'] ?? ''));
         $action = $this->e(rtrim($portalPath, '/') . '/claims');
@@ -395,19 +785,22 @@ HTML;
 <form method="post" action="{$action}">
   <input type="hidden" name="rewardId" value="{$id}">
   <input type="hidden" name="fulfillmentType" value="in_store">
-  <button class="btn btn-primary" type="submit">Estoy en el local</button>
+  <button class="btn btn-primary" type="submit">Solicitar premio</button>
 </form>
 HTML;
         } elseif ($canClaim && $mode === 'managed') {
             $options = $this->renderDeliveryOptions($reward['claim_delivery_options'] ?? []);
             $form = <<<HTML
+<details class="claim-panel">
+  <summary class="btn btn-primary">Solicitar premio</summary>
 <form method="post" action="{$action}">
   <input type="hidden" name="rewardId" value="{$id}">
   {$options}
   <label>Telefono de contacto<input name="contactPhone" inputmode="tel" autocomplete="tel"></label>
   <label>Notas para el gestor<textarea name="notes" maxlength="500" placeholder="Horario, referencia de retiro o direccion si aplica"></textarea></label>
-  <button class="btn btn-primary" type="submit">Solicitar revision</button>
+  <button class="btn btn-primary" type="submit">Solicitar premio</button>
 </form>
+</details>
 HTML;
         } else {
             $form = '<div class="block">' . $this->e($blockReason !== '' ? $blockReason : 'No disponible para reclamar ahora.') . '</div>';
@@ -415,21 +808,50 @@ HTML;
 
         return <<<HTML
 <article class="card">
-  <div class="row">
+  {$image}
+  <div class="card-body">
     <div>
       <h3>{$name}</h3>
       <p>{$description}</p>
     </div>
-    <div class="price">{$points} pts</div>
+    {$instructionsHtml}
+    <div class="badges">
+      {$categoryBadge}
+      <span class="badge {$this->claimModeTone($mode)}">{$modeLabel}</span>
+      <span class="badge">Stock {$stock}</span>
+    </div>
+    {$form}
   </div>
-  {$instructionsHtml}
-  <div class="badges">
-    <span class="badge {$this->claimModeTone($mode)}">{$modeLabel}</span>
-    <span class="badge">Stock {$stock}</span>
-  </div>
-  {$form}
 </article>
 HTML;
+    }
+
+    private function rewardImageHtml(array $reward, string $safeName, string $points): string {
+        $imageUrl = trim((string)($reward['image_url'] ?? ''));
+        $price = $this->e($points . ' pts');
+        if ($imageUrl === '') {
+            return <<<HTML
+<div class="card-media card-media--empty">
+  <span>{$safeName}</span>
+  <div class="price-tag">{$price}</div>
+</div>
+HTML;
+        }
+
+        $src = $this->e($imageUrl);
+        $alt = $this->e('Premio: ' . strip_tags($safeName));
+
+        return <<<HTML
+<div class="card-media">
+  <img src="{$src}" alt="{$alt}" loading="lazy" decoding="async">
+  <div class="price-tag">{$price}</div>
+</div>
+HTML;
+    }
+
+    private function rewardCategory(array $reward): string {
+        $metadata = is_array($reward['metadata'] ?? null) ? $reward['metadata'] : [];
+        return trim((string)($metadata['category'] ?? ''));
     }
 
     private function renderRewardsPortalClaim(string $portalPath, array $claim): string {
@@ -515,17 +937,13 @@ HTML;
         };
     }
 
-    /** @param array{saveUrl: string, portalUrl?: string, memberName: string, accountId: string, points: int, programName: string} $data */
+    /** @param array{saveUrl: string, memberName: string, accountId: string, points: int, programName: string} $data */
     private function renderWalletLandingPage(array $data): string {
         $program = htmlspecialchars((string)$data['programName'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $member = htmlspecialchars((string)$data['memberName'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $account = htmlspecialchars((string)$data['accountId'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $points = number_format((int)$data['points'], 0, ',', '.');
         $url = htmlspecialchars((string)$data['saveUrl'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        $portalUrl = htmlspecialchars((string)($data['portalUrl'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        $portalButton = $portalUrl !== ''
-            ? '<a href="' . $portalUrl . '" style="display:block;text-align:center;background:#e7f4f1;color:#0f4f49;text-decoration:none;font-weight:800;font-size:16px;padding:14px 22px;border-radius:12px;margin-top:12px;">Ver premios disponibles</a>'
-            : '';
 
         return <<<HTML
 <!doctype html>
@@ -556,7 +974,6 @@ HTML;
           </div>
         </div>
         <a href="{$url}" style="display:block;text-align:center;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;font-size:16px;padding:16px 22px;border-radius:12px;">Agregar a Google Wallet</a>
-        {$portalButton}
         <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, toca el boton desde Chrome en tu telefono Android.</p>
       </div>
     </div>

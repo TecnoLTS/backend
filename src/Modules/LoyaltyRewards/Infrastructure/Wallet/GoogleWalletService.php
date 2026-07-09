@@ -74,10 +74,8 @@ final class GoogleWalletService implements WalletMessenger {
     public function pushPointsToObject(string $objectId, string $accountId, string $accountName, int $points, ?string $catalogUrl = null): array {
         $patchBody = [
             'loyaltyPoints' => $this->loyaltyPointsBody($points),
+            'linksModuleData' => $this->linksModuleData($catalogUrl),
         ];
-        if ($catalogUrl !== null && trim($catalogUrl) !== '') {
-            $patchBody['linksModuleData'] = $this->linksModuleData($catalogUrl);
-        }
 
         $patch = $this->authorizedRequest('PATCH', '/loyaltyObject/' . rawurlencode($objectId), $patchBody, allow404: true);
 
@@ -186,14 +184,17 @@ final class GoogleWalletService implements WalletMessenger {
         ];
     }
 
-    private function linksModuleData(string $catalogUrl): array {
+    private function linksModuleData(?string $catalogUrl): array {
+        $catalogUrl = trim((string)$catalogUrl);
+        if ($catalogUrl === '') {
+            return ['uris' => []];
+        }
+
         return [
-            'uris' => [
-                [
-                    'uri' => $catalogUrl,
-                    'description' => 'Catálogo',
-                ],
-            ],
+            'uris' => [[
+                'uri' => $catalogUrl,
+                'description' => 'Catalogo',
+            ]],
         ];
     }
 

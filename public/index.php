@@ -416,6 +416,10 @@ function is_public_api_request(string $uri, string $method): bool {
         return true;
     }
 
+    if (in_array($normalizedMethod, ['GET', 'HEAD', 'POST'], true) && str_starts_with($uri, '/api/l/access')) {
+        return true;
+    }
+
     if (in_array($normalizedMethod, ['GET', 'HEAD'], true) && str_starts_with($uri, '/api/l/c/')) {
         return true;
     }

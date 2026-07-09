@@ -39,10 +39,18 @@ $assert('tabla loyalty_wallet_campaign_recipients existe', $tableExists($pdo, 'l
 $preview = $repository->previewNotificationAudience(['audience_type' => 'all']);
 $assert('preview all devuelve entero >= 0', isset($preview['recipients']) && is_int($preview['recipients']) && $preview['recipients'] >= 0);
 
+$previewAndroid = $repository->previewNotificationAudience(['audience_type' => 'all', 'wallet' => 'google']);
+$assert('preview Android devuelve entero >= 0', isset($previewAndroid['recipients']) && is_int($previewAndroid['recipients']) && $previewAndroid['recipients'] >= 0);
+$assert('preview Android <= all', $previewAndroid['recipients'] <= $preview['recipients']);
+
+$previewNoCard = $repository->previewNotificationAudience(['audience_type' => 'all', 'wallet' => 'none']);
+$assert('preview sin tarjeta no agenda push', isset($previewNoCard['recipients']) && $previewNoCard['recipients'] === 0);
+
 $segment = $repository->previewNotificationAudience([
     'audience_type' => 'segment',
     'tier' => 'Oro',
     'minBalance' => 100,
+    'wallet' => 'google',
 ]);
 $assert('preview segment devuelve entero >= 0', isset($segment['recipients']) && is_int($segment['recipients']) && $segment['recipients'] >= 0);
 $assert('segment <= all', $segment['recipients'] <= $preview['recipients']);

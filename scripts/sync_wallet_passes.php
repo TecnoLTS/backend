@@ -7,7 +7,9 @@ declare(strict_types=1);
  * el balance a Google. Best-effort, pensado para cron o un worker de bucle
  * (mismo patron que process_billing_recovery.php).
  *
- * Uso: php scripts/sync_wallet_passes.php [--limit=25] [--min-age-seconds=120] [--tenant=xxx]
+ * Uso:
+ *   php scripts/sync_wallet_passes.php [--limit=25] [--min-age-seconds=120] [--tenant=xxx]
+ *   php scripts/sync_wallet_passes.php --all [--limit=250] [--tenant=xxx]
  */
 
 require_once __DIR__ . '/../vendor/autoload.php';
@@ -28,12 +30,42 @@ foreach (getenv() ?: [] as $key => $value) {
     }
 }
 
-$options = getopt('', ['limit::', 'min-age-seconds::', 'tenant::']);
+$options = getopt('', ['limit::', 'min-age-seconds::', 'tenant::', 'all']);
+$syncAll = array_key_exists('all', $options);
 $limit = max(1, (int)($options['limit'] ?? 25));
 $minAgeSeconds = max(0, (int)($options['min-age-seconds'] ?? 120));
 $tenantFilter = trim((string)($options['tenant'] ?? ''));
 
 const MAX_ATTEMPTS = 5;
+
+$publicWalletAccessUrl = static function (string $tenantId, array $settings, string $accountId): string {
+    $tenant = trim((string)($_ENV['PUBLIC_TENANT_SLUG'] ?? $tenantId), '/ ');
+    $apiSegment = trim((string)($_ENV['PUBLIC_API_SERVICE_SEGMENT'] ?? 'api'), '/ ');
+    $base = rtrim((string)($_ENV['LOYALTY_WALLET_PUBLIC_BASE_URL'] ?? ''), '/');
+    if ($base === '') {
+        $origins = is_array($settings['googleWallet']['origins'] ?? null) ? $settings['googleWallet']['origins'] : [];
+        foreach ($origins as $origin) {
+            $origin = rtrim(trim((string)$origin), '/');
+            if (preg_match('#^https?://#i', $origin) === 1) {
+                $base = $origin;
+                break;
+            }
+        }
+    }
+    if ($base === '') {
+        $base = rtrim((string)($_ENV['PUBLIC_BASE_URL'] ?? $_ENV['APP_URL'] ?? ''), '/');
+    }
+    $path = '/' . ($tenant !== '' ? $tenant : $tenantId) . '/' . ($apiSegment !== '' ? $apiSegment : 'api') . '/l/access';
+    $accountId = trim($accountId);
+    if ($accountId !== '') {
+        $path .= '?account=' . rawurlencode($accountId);
+    }
+    if ($base === '') {
+        return $path;
+    }
+
+    return $base . $path;
+};
 
 try {
     $pdo = Database::getModuleInstance(LoyaltyRewardsDomain::KEY);
@@ -42,20 +74,25 @@ try {
     exit(0);
 }
 
-$sql = "SELECT p.id AS pass_id, p.tenant_id, p.member_id, p.last_payload,
+$statusFilter = $syncAll
+    ? "AND p.status IN ('ready-for-issuer', 'issued', 'link-generated', 'qr-opened', 'synced', 'sync-error', 'sync-abandoned')"
+    : "AND p.status = 'sync-error'
+          AND p.updated_at < NOW() - make_interval(secs => :age)";
+
+$sql = "SELECT p.id AS pass_id, p.tenant_id, p.member_id, p.external_object_id, p.last_payload,
                m.account_id, m.account_name, m.wallet_platform,
                COALESCE(a.balance, 0) AS balance
         FROM loyalty_wallet_passes p
         JOIN loyalty_members m ON m.id = p.member_id AND m.tenant_id = p.tenant_id
         LEFT JOIN loyalty_point_accounts a ON a.member_id = m.id AND a.tenant_id = m.tenant_id
         WHERE p.platform = 'google'
-          AND p.status = 'sync-error'
-          AND p.updated_at < NOW() - make_interval(secs => :age)" .
+          AND m.wallet_platform = 'google'
+          {$statusFilter}" .
         ($tenantFilter !== '' ? ' AND p.tenant_id = :tenant_id' : '') .
         ' ORDER BY p.updated_at ASC LIMIT ' . $limit;
 
 $stmt = $pdo->prepare($sql);
-$params = ['age' => $minAgeSeconds];
+$params = $syncAll ? [] : ['age' => $minAgeSeconds];
 if ($tenantFilter !== '') {
     $params['tenant_id'] = $tenantFilter;
 }
@@ -63,7 +100,8 @@ $stmt->execute($params);
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
 if ($rows === []) {
-    fwrite(STDOUT, "[wallet-sync] sin pases pendientes de reintento\n");
+    $scope = $syncAll ? 'sin pases Google activos para sincronizar' : 'sin pases pendientes de reintento';
+    fwrite(STDOUT, "[wallet-sync] {$scope}\n");
     exit(0);
 }
 
@@ -105,14 +143,31 @@ foreach ($rows as $row) {
     $payload = is_string($row['last_payload']) ? (json_decode($row['last_payload'], true) ?: []) : (array)$row['last_payload'];
     $attempts = (int)($payload['attempts'] ?? 0) + 1;
     $balance = (int)$row['balance'];
+    $externalObjectId = trim((string)($row['external_object_id'] ?? ''));
+    $objectId = $externalObjectId !== '' && $service->ownsObjectId($externalObjectId)
+        ? $externalObjectId
+        : $service->objectId((string)$row['account_id']);
 
     try {
-        $result = $service->pushPoints((string)$row['account_id'], (string)($row['account_name'] ?? $row['account_id']), $balance);
+        $result = $service->pushPointsToObject(
+            $objectId,
+            (string)$row['account_id'],
+            (string)($row['account_name'] ?? $row['account_id']),
+            $balance,
+            $publicWalletAccessUrl($tenantId, $settings, (string)$row['account_id'])
+        );
         $updateStmt->execute([
             'id' => (string)$row['pass_id'],
             'status' => 'synced',
             'external_object_id' => $result['objectId'],
-            'last_payload' => json_encode(['points' => $balance, 'syncedAt' => date('c'), 'attempts' => $attempts, 'created' => $result['created']], JSON_UNESCAPED_UNICODE),
+            'last_payload' => json_encode([
+                'points' => $balance,
+                'syncedAt' => date('c'),
+                'attempts' => $attempts,
+                'created' => $result['created'],
+                'linksModuleData' => 'account_catalog_access',
+                'forced' => $syncAll,
+            ], JSON_UNESCAPED_UNICODE),
         ]);
         $ok++;
     } catch (\Throwable $e) {
@@ -120,7 +175,7 @@ foreach ($rows as $row) {
         $updateStmt->execute([
             'id' => (string)$row['pass_id'],
             'status' => $status,
-            'external_object_id' => $service->objectId((string)$row['account_id']),
+            'external_object_id' => $objectId,
             'last_payload' => json_encode(['points' => $balance, 'attempts' => $attempts, 'error' => mb_substr($e->getMessage(), 0, 500), 'failedAt' => date('c')], JSON_UNESCAPED_UNICODE),
         ]);
 
