@@ -25,12 +25,15 @@ final class WalletNotificationProcessor {
     public function sendRecipient(WalletMessenger $service, array $recipient, string $header, string $body): string {
         $attempts = (int)$recipient['attempts'] + 1;
         try {
-            $result = $service->addMessage((string)$recipient['account_id'], $header, $body);
+            $objectId = trim((string)($recipient['object_id'] ?? ''));
+            $result = $objectId !== '' && method_exists($service, 'addMessageToObject')
+                ? $service->addMessageToObject($objectId, $header, $body)
+                : $service->addMessage((string)$recipient['account_id'], $header, $body);
             $this->updateRecipient((string)$recipient['id'], 'sent', $attempts, $result['messageId'], null);
             $this->bumpCampaign((string)$recipient['campaign_id'], 'sent');
             return 'sent';
         } catch (\RuntimeException $e) {
-            // addMessage lanza RuntimeException cuando el pase no existe en Google (404).
+            // addMessage lanza RuntimeException cuando no hay pase, usuarios guardados o push real.
             $this->updateRecipient((string)$recipient['id'], 'skipped', $attempts, null, mb_substr($e->getMessage(), 0, 500));
             $this->bumpCampaign((string)$recipient['campaign_id'], 'skipped');
             return 'skipped';
@@ -53,10 +56,15 @@ final class WalletNotificationProcessor {
         $this->markProcessing($campaignId);
 
         $stmt = $this->pdo->prepare(
-            "SELECT id, campaign_id, member_id, account_id, attempts
-             FROM loyalty_wallet_campaign_recipients
-             WHERE campaign_id = :cid AND status = 'pending'
-             ORDER BY id ASC"
+            "SELECT r.id, r.campaign_id, r.member_id, r.account_id, r.attempts,
+                    p.external_object_id AS object_id
+             FROM loyalty_wallet_campaign_recipients r
+             LEFT JOIN loyalty_wallet_passes p
+               ON p.tenant_id = r.tenant_id
+              AND p.member_id = r.member_id
+              AND p.platform = 'google'
+             WHERE r.campaign_id = :cid AND r.status = 'pending'
+             ORDER BY r.id ASC"
         );
         $stmt->execute(['cid' => $campaignId]);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];

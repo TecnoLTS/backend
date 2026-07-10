@@ -118,7 +118,18 @@ final class GoogleWalletService implements WalletMessenger {
      * @throws \RuntimeException si el pase aun no existe en Google (404)
      */
     public function addMessage(string $accountId, string $header, string $body): array {
-        $objectId = $this->config->objectId($accountId);
+        return $this->addMessageToObject($this->config->objectId($accountId), $header, $body);
+    }
+
+    /**
+     * @return array{objectId: string, messageId: string, messageType?: string}
+     */
+    public function addMessageToObject(string $objectId, string $header, string $body): array {
+        $object = $this->getObject($objectId);
+        if (($object['hasUsers'] ?? false) !== true) {
+            throw new \RuntimeException('La tarjeta existe en Google Wallet, pero todavia no esta guardada en ningun telefono.');
+        }
+
         $messageId = 'msg_' . bin2hex(random_bytes(6));
 
         $response = $this->authorizedRequest('POST', '/loyaltyObject/' . rawurlencode($objectId) . '/addMessage', [
@@ -134,7 +145,15 @@ final class GoogleWalletService implements WalletMessenger {
             throw new \RuntimeException('El pase aun no existe en Google. El socio debe agregar primero la tarjeta a su Wallet.');
         }
 
-        return ['objectId' => $objectId, 'messageId' => $messageId];
+        $messageType = $this->messageTypeFromResource($response['json']['resource'] ?? $response['json'] ?? [], $messageId);
+        if ($messageType === null) {
+            $messageType = $this->messageTypeFromResource($this->getObject($objectId), $messageId);
+        }
+        if ($messageType === null || !$this->isNotifyMessageType($messageType)) {
+            throw new \RuntimeException('Google Wallet guardo el mensaje sin notificacion push. Revisa el limite de 3 notificaciones por tarjeta cada 24 horas o el throttling de Google.');
+        }
+
+        return ['objectId' => $objectId, 'messageId' => $messageId, 'messageType' => $messageType];
     }
 
     public function objectId(string $accountId): string {
@@ -143,6 +162,23 @@ final class GoogleWalletService implements WalletMessenger {
 
     public function ownsObjectId(string $objectId): bool {
         return str_starts_with($objectId, $this->config->issuerId() . '.');
+    }
+
+    private function messageTypeFromResource(array $resource, string $messageId): ?string {
+        foreach (($resource['messages'] ?? []) as $message) {
+            if (!is_array($message)) {
+                continue;
+            }
+            if (($message['id'] ?? null) === $messageId) {
+                return is_string($message['messageType'] ?? null) ? $message['messageType'] : null;
+            }
+        }
+
+        return null;
+    }
+
+    private function isNotifyMessageType(string $messageType): bool {
+        return strtolower(str_replace('_', '', $messageType)) === 'textandnotify';
     }
 
     private function loyaltyClassBody(): array {

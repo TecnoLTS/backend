@@ -1608,14 +1608,24 @@ final class LoyaltyRepository {
         $header = mb_substr($header, 0, 100);
         $body = mb_substr($body, 0, 300);
 
-        $result = $service->addMessage((string)$member['account_id'], $header, $body);
+        $objectId = $this->googleWalletObjectIdForMember(
+            (string)$member['id'],
+            (string)$member['account_id'],
+            $service
+        );
+        $result = $service->addMessageToObject($objectId, $header, $body);
 
         $this->recordAudit(
             'wallet.google.message_sent',
             'member',
             (string)$member['id'],
             null,
-            ['objectId' => $result['objectId'], 'messageId' => $result['messageId'], 'header' => $header],
+            [
+                'objectId' => $result['objectId'],
+                'messageId' => $result['messageId'],
+                'messageType' => $result['messageType'] ?? null,
+                'header' => $header,
+            ],
             null,
             $userId
         );
@@ -1624,6 +1634,7 @@ final class LoyaltyRepository {
             'sent' => true,
             'objectId' => $result['objectId'],
             'messageId' => $result['messageId'],
+            'messageType' => $result['messageType'] ?? null,
         ];
     }
 
