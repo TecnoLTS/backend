@@ -6,6 +6,7 @@ RUN set -eux; \
     apk add --no-cache \
         ca-certificates \
         freetype \
+        libwebp \
         libjpeg-turbo \
         libpng \
         libxml2 \
@@ -16,6 +17,7 @@ RUN set -eux; \
     apk add --no-cache --virtual .build-deps \
         $PHPIZE_DEPS \
         freetype-dev \
+        libwebp-dev \
         libjpeg-turbo-dev \
         libpng-dev \
         postgresql-dev \
@@ -29,7 +31,7 @@ ENV TZ=America/Guayaquil
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Install PHP extensions
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
     && docker-php-ext-install gd pdo_pgsql soap zip
 
 # Configurar zona horaria de PHP
@@ -60,6 +62,7 @@ RUN set -eux; \
     apk del .build-deps; \
     mkdir -p \
         /var/www/html/public/uploads/products \
+        /var/www/html/public/uploads/loyalty/rewards \
         /var/www/html/storage/logs \
         /var/www/html/storage/billing/cache \
         /var/www/html/storage/billing/certs \

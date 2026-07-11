@@ -4,7 +4,9 @@ namespace App\Modules\LoyaltyRewards\Controllers;
 
 use App\Core\Auth;
 use App\Core\Response;
+use App\Core\TenantContext;
 use App\Modules\LoyaltyRewards\Infrastructure\LoyaltyRepository;
+use App\Modules\LoyaltyRewards\Infrastructure\RewardImageStorage;
 
 final class LoyaltyController {
     private LoyaltyRepository $repository;
@@ -77,6 +79,29 @@ final class LoyaltyController {
             'LOYALTY_REWARD_CREATE_FAILED',
             201
         );
+    }
+
+    public function uploadRewardImage(): void {
+        Auth::requireAdmin();
+        $upload = $_FILES['image'] ?? null;
+        if (!is_array($upload)) {
+            Response::error('Selecciona una imagen para subir.', 422, 'LOYALTY_REWARD_IMAGE_UPLOAD_FAILED');
+            return;
+        }
+
+        $this->respond(
+            fn() => (new RewardImageStorage())->store($upload, $this->tenantId()),
+            'LOYALTY_REWARD_IMAGE_UPLOAD_FAILED',
+            201
+        );
+    }
+
+    public function rewardImage(string $tenantId, string $fileName): void {
+        try {
+            (new RewardImageStorage())->send($tenantId, $fileName);
+        } catch (\Throwable) {
+            Response::error('Imagen no encontrada.', 404, 'LOYALTY_REWARD_IMAGE_NOT_FOUND');
+        }
     }
 
     public function rewardDetail(string $rewardId): void {
@@ -301,6 +326,12 @@ final class LoyaltyController {
         Auth::requireAdmin();
         $filters = [
             'status' => isset($_GET['status']) ? trim((string)$_GET['status']) : 'open',
+            'query' => isset($_GET['query']) ? trim((string)$_GET['query']) : '',
+            'fulfillment' => isset($_GET['fulfillment']) ? trim((string)$_GET['fulfillment']) : 'all',
+            'claim_mode' => isset($_GET['claim_mode']) ? trim((string)$_GET['claim_mode']) : 'all',
+            'date_from' => isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '',
+            'date_to' => isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '',
+            'sort' => isset($_GET['sort']) ? trim((string)$_GET['sort']) : 'priority',
             'limit' => isset($_GET['limit']) ? (int)$_GET['limit'] : 50,
             'offset' => isset($_GET['offset']) ? (int)$_GET['offset'] : 0,
         ];
@@ -838,7 +869,7 @@ HTML;
 HTML;
         }
 
-        $src = $this->e($imageUrl);
+        $src = $this->e($this->publicImagePath($imageUrl));
         $alt = $this->e('Premio: ' . strip_tags($safeName));
 
         return <<<HTML
@@ -1274,6 +1305,29 @@ HTML;
         }
 
         return $this->jsonPayload();
+    }
+
+    private function tenantId(): string {
+        return TenantContext::id() ?: (TenantContext::slug() ?: 'default');
+    }
+
+    private function publicImagePath(string $path): string {
+        $path = trim($path);
+        if ($path === '' || preg_match('#^(https?:|data:|blob:)#i', $path) === 1) {
+            return $path;
+        }
+        $path = '/' . ltrim($path, '/');
+        if (!str_starts_with($path, '/api')) {
+            return $path;
+        }
+
+        $tenant = trim((string)($_ENV['PUBLIC_TENANT_SLUG'] ?? TenantContext::slug() ?? $this->tenantId()), '/ ');
+        $apiSegment = trim((string)($_ENV['PUBLIC_API_SERVICE_SEGMENT'] ?? 'api'), '/ ');
+        if ($tenant === '' || $apiSegment === '') {
+            return $path;
+        }
+
+        return '/' . $tenant . '/' . $apiSegment . substr($path, 4);
     }
 
     private function queryFilters(): array {

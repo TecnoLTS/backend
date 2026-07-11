@@ -365,6 +365,7 @@ final class LoyaltySchema {
         $this->addColumnIfMissing('loyalty_rewards', 'claim_mode', 'text NOT NULL DEFAULT \'staff_only\'');
         $this->addColumnIfMissing('loyalty_rewards', 'claim_instructions', 'text');
         $this->addColumnIfMissing('loyalty_rewards', 'claim_delivery_options', 'jsonb DEFAULT \'[]\'::jsonb');
+        $this->addColumnIfMissing('loyalty_rewards', 'image_url', 'text');
         $this->addColumnIfMissing('loyalty_redemptions', 'created_by_user_id', 'text');
         $this->addColumnIfMissing('loyalty_redemptions', 'source', 'text NOT NULL DEFAULT \'dashboard\'');
         $this->addColumnIfMissing('loyalty_redemptions', 'fulfillment_type', 'text');
@@ -391,11 +392,14 @@ final class LoyaltySchema {
         $this->createOptionalIndexIfMissing('loyalty_members_email_trgm_idx', 'CREATE INDEX loyalty_members_email_trgm_idx ON loyalty_members USING gin (lower(email) gin_trgm_ops)');
         $this->createOptionalIndexIfMissing('loyalty_members_account_id_trgm_idx', 'CREATE INDEX loyalty_members_account_id_trgm_idx ON loyalty_members USING gin (lower(account_id) gin_trgm_ops)');
         $this->createOptionalIndexIfMissing('loyalty_members_phone_trgm_idx', 'CREATE INDEX loyalty_members_phone_trgm_idx ON loyalty_members USING gin (lower(COALESCE(phone, \'\')) gin_trgm_ops)');
+        $this->createOptionalIndexIfMissing('loyalty_rewards_name_trgm_idx', 'CREATE INDEX loyalty_rewards_name_trgm_idx ON loyalty_rewards USING gin (lower(name) gin_trgm_ops)');
         $this->createIndexIfMissing('loyalty_ledger_tenant_created_idx', 'CREATE INDEX loyalty_ledger_tenant_created_idx ON loyalty_point_ledger (tenant_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_ledger_reference_idx', 'CREATE INDEX loyalty_ledger_reference_idx ON loyalty_point_ledger (tenant_id, source, reference)');
         $this->createIndexIfMissing('loyalty_redemptions_member_day_idx', 'CREATE INDEX loyalty_redemptions_member_day_idx ON loyalty_redemptions (tenant_id, member_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_rewards_claim_mode_idx', 'CREATE INDEX loyalty_rewards_claim_mode_idx ON loyalty_rewards (tenant_id, claim_mode, status)');
         $this->createIndexIfMissing('loyalty_redemptions_claim_queue_idx', 'CREATE INDEX loyalty_redemptions_claim_queue_idx ON loyalty_redemptions (tenant_id, source, status, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_redemptions_claim_created_idx', 'CREATE INDEX loyalty_redemptions_claim_created_idx ON loyalty_redemptions (tenant_id, source, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_redemptions_claim_fulfillment_idx', 'CREATE INDEX loyalty_redemptions_claim_fulfillment_idx ON loyalty_redemptions (tenant_id, source, fulfillment_type, created_at DESC)');
         $this->createIndexIfMissing('loyalty_portal_otp_member_idx', 'CREATE INDEX loyalty_portal_otp_member_idx ON loyalty_portal_otp_challenges (tenant_id, member_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_portal_otp_open_idx', 'CREATE INDEX loyalty_portal_otp_open_idx ON loyalty_portal_otp_challenges (tenant_id, expires_at) WHERE consumed_at IS NULL');
         $this->createIndexIfMissing('loyalty_redemptions_expiry_idx', 'CREATE INDEX loyalty_redemptions_expiry_idx ON loyalty_redemptions (tenant_id, expires_at) WHERE expires_at IS NOT NULL');

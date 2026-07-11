@@ -222,7 +222,7 @@ final class LoyaltyRepository {
             'claim_mode' => $claim['claim_mode'],
             'claim_instructions' => $claim['claim_instructions'],
             'claim_delivery_options' => json_encode($claim['claim_delivery_options'], JSON_UNESCAPED_UNICODE),
-            'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? '')),
+            'image_url' => $this->normalizeRewardImageUrl($payload['imageUrl'] ?? $payload['image_url'] ?? ''),
             'metadata' => json_encode($payload['metadata'] ?? new \stdClass()),
         ];
         if (!in_array($reward['status'], ['active', 'inactive'], true)) {
@@ -316,7 +316,7 @@ final class LoyaltyRepository {
                 'claim_mode' => $claim['claim_mode'],
                 'claim_instructions' => $claim['claim_instructions'],
                 'claim_delivery_options' => json_encode($claim['claim_delivery_options'], JSON_UNESCAPED_UNICODE),
-                'image_url' => trim((string)($payload['imageUrl'] ?? $payload['image_url'] ?? $before['image_url'] ?? '')),
+                'image_url' => $this->normalizeRewardImageUrl($payload['imageUrl'] ?? $payload['image_url'] ?? $before['image_url'] ?? ''),
                 'tenant_id' => $this->tenantId(),
                 'id' => $rewardId,
             ]
@@ -578,12 +578,9 @@ final class LoyaltyRepository {
         }
 
         if (isset($payload['tiers']) && is_array($payload['tiers'])) {
+            $tiers = $this->normalizeTierRules($payload['tiers']);
             $this->execute('DELETE FROM loyalty_tier_rules WHERE tenant_id = :tenant_id', ['tenant_id' => $tenantId]);
-            foreach ($payload['tiers'] as $index => $tier) {
-                $name = trim((string)($tier['name'] ?? ''));
-                if ($name === '') {
-                    throw new \InvalidArgumentException('Cada nivel debe tener nombre.');
-                }
+            foreach ($tiers as $index => $tier) {
                 $this->execute(
                     'INSERT INTO loyalty_tier_rules
                         (id, tenant_id, program_id, name, min_lifetime_points, max_lifetime_points, multiplier, benefits, status, sort_order)
@@ -593,13 +590,13 @@ final class LoyaltyRepository {
                         'id' => $this->id('tier'),
                         'tenant_id' => $tenantId,
                         'program_id' => $program['id'],
-                        'name' => $name,
-                        'min_lifetime_points' => max(0, (int)($tier['minLifetimePoints'] ?? $tier['min_lifetime_points'] ?? 0)),
-                        'max_lifetime_points' => isset($tier['maxLifetimePoints']) && $tier['maxLifetimePoints'] !== '' ? (int)$tier['maxLifetimePoints'] : (isset($tier['max_lifetime_points']) && $tier['max_lifetime_points'] !== '' ? (int)$tier['max_lifetime_points'] : null),
-                        'multiplier' => max(0.01, (float)($tier['multiplier'] ?? 1)),
-                        'benefits' => json_encode(is_array($tier['benefits'] ?? null) ? $tier['benefits'] : []),
-                        'status' => trim((string)($tier['status'] ?? 'active')) ?: 'active',
-                        'sort_order' => (int)($tier['sortOrder'] ?? $tier['sort_order'] ?? ($index + 1)),
+                        'name' => $tier['name'],
+                        'min_lifetime_points' => $tier['minLifetimePoints'],
+                        'max_lifetime_points' => $tier['maxLifetimePoints'],
+                        'multiplier' => $tier['multiplier'],
+                        'benefits' => json_encode($tier['benefits'], JSON_UNESCAPED_UNICODE),
+                        'status' => $tier['status'],
+                        'sort_order' => $index + 1,
                     ]
                 );
             }
@@ -610,6 +607,91 @@ final class LoyaltyRepository {
         $this->recordAudit('rules.updated', 'program', (string)$program['id'], $before, $after, trim((string)($payload['reason'] ?? '')), $userId);
 
         return $after;
+    }
+
+    private function normalizeTierRules(array $tiers): array {
+        if ($tiers === []) {
+            throw new \InvalidArgumentException('Debe existir al menos un nivel.');
+        }
+
+        $normalized = [];
+        $names = [];
+        foreach ($tiers as $index => $tier) {
+            if (!is_array($tier)) {
+                throw new \InvalidArgumentException('Cada nivel debe ser un objeto valido.');
+            }
+            $name = trim((string)($tier['name'] ?? ''));
+            if ($name === '') {
+                throw new \InvalidArgumentException('Cada nivel debe tener nombre.');
+            }
+            $nameKey = mb_strtolower($name);
+            if (isset($names[$nameKey])) {
+                throw new \InvalidArgumentException(sprintf('El nivel "%s" esta duplicado.', $name));
+            }
+            $names[$nameKey] = true;
+
+            $min = (int)($tier['minLifetimePoints'] ?? $tier['min_lifetime_points'] ?? 0);
+            $maxValue = $tier['maxLifetimePoints'] ?? $tier['max_lifetime_points'] ?? null;
+            $max = $maxValue === null || $maxValue === '' ? null : (int)$maxValue;
+            $multiplier = (float)($tier['multiplier'] ?? 1);
+            if ($min < 0) {
+                throw new \InvalidArgumentException(sprintf('El nivel "%s" no puede iniciar en puntos negativos.', $name));
+            }
+            if ($max !== null && $max < $min) {
+                throw new \InvalidArgumentException(sprintf('El maximo del nivel "%s" debe ser mayor o igual al minimo.', $name));
+            }
+            if ($multiplier <= 0) {
+                throw new \InvalidArgumentException(sprintf('El multiplicador del nivel "%s" debe ser mayor a cero.', $name));
+            }
+
+            $benefits = is_array($tier['benefits'] ?? null) ? array_values(array_filter(array_map(
+                static fn($benefit): string => trim((string)$benefit),
+                $tier['benefits']
+            ))) : [];
+            $status = strtolower(trim((string)($tier['status'] ?? 'active')));
+            if (!in_array($status, ['active', 'inactive'], true)) {
+                $status = 'active';
+            }
+
+            $normalized[] = [
+                'sourceIndex' => $index,
+                'name' => $name,
+                'minLifetimePoints' => $min,
+                'maxLifetimePoints' => $max,
+                'multiplier' => $multiplier,
+                'benefits' => $benefits,
+                'status' => $status,
+            ];
+        }
+
+        usort($normalized, static fn(array $a, array $b): int => ($a['minLifetimePoints'] <=> $b['minLifetimePoints']) ?: ($a['sourceIndex'] <=> $b['sourceIndex']));
+
+        $expectedMin = 0;
+        foreach ($normalized as $index => $tier) {
+            if ((int)$tier['minLifetimePoints'] !== $expectedMin) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Los niveles deben ser continuos: "%s" debe iniciar en %d puntos.',
+                    $tier['name'],
+                    $expectedMin
+                ));
+            }
+            if ($tier['maxLifetimePoints'] === null) {
+                if ($index !== count($normalized) - 1) {
+                    throw new \InvalidArgumentException('Solo el ultimo nivel puede quedar sin limite superior.');
+                }
+                continue;
+            }
+            $expectedMin = ((int)$tier['maxLifetimePoints']) + 1;
+        }
+
+        if ($normalized[count($normalized) - 1]['maxLifetimePoints'] !== null) {
+            throw new \InvalidArgumentException('El ultimo nivel debe quedar sin limite superior para cubrir socios con mas puntos.');
+        }
+
+        return array_map(static function (array $tier): array {
+            unset($tier['sourceIndex']);
+            return $tier;
+        }, $normalized);
     }
 
     public function adjustPoints(array $payload, ?string $userId = null): array {
@@ -1199,13 +1281,15 @@ final class LoyaltyRepository {
             throw new \InvalidArgumentException('No tienes puntos suficientes para este premio.');
         }
 
+        $manualApprovalThreshold = max(0, (int)($settings['redemption']['manualApprovalThresholdPoints'] ?? 0));
+        $requiresManualApproval = $manualApprovalThreshold > 0 && $pointsCost >= $manualApprovalThreshold;
         $deliveryOptions = $this->normalizeDeliveryOptions($reward['claim_delivery_options'] ?? []);
         $fulfillmentType = $this->portalFulfillmentType($claimMode, $payload, $deliveryOptions);
-        $claimCode = $claimMode === self::CLAIM_MODE_IN_STORE ? $this->claimCode() : null;
-        $expiresAt = $claimMode === self::CLAIM_MODE_IN_STORE
+        $claimCode = $claimMode === self::CLAIM_MODE_IN_STORE && !$requiresManualApproval ? $this->claimCode() : null;
+        $expiresAt = $claimMode === self::CLAIM_MODE_IN_STORE && !$requiresManualApproval
             ? $this->futureTimestamp(15 * 60)
             : $this->futureTimestamp(7 * 24 * 60 * 60);
-        $status = $claimMode === self::CLAIM_MODE_IN_STORE
+        $status = $claimMode === self::CLAIM_MODE_IN_STORE && !$requiresManualApproval
             ? self::CLAIM_STATUS_READY_FOR_PICKUP
             : self::CLAIM_STATUS_PENDING_REVIEW;
         $metadata = [
@@ -1218,6 +1302,8 @@ final class LoyaltyRepository {
             'deliveryAddress' => trim((string)($payload['deliveryAddress'] ?? $payload['delivery_address'] ?? '')),
             'notes' => mb_substr(trim((string)($payload['notes'] ?? $payload['note'] ?? '')), 0, 500),
             'createdFrom' => 'wallet-portal',
+            'manualApprovalRequired' => $requiresManualApproval,
+            'manualApprovalThresholdPoints' => $manualApprovalThreshold,
         ];
 
         $redemptionId = $this->reservePortalRedemption(
@@ -1267,6 +1353,12 @@ final class LoyaltyRepository {
         $limit = min(100, max(10, (int)($filters['limit'] ?? 50)));
         $offset = max(0, (int)($filters['offset'] ?? 0));
         $status = strtolower(trim((string)($filters['status'] ?? 'open')));
+        $query = mb_substr(strtolower(trim((string)($filters['query'] ?? ''))), 0, 120);
+        $fulfillment = strtolower(trim((string)($filters['fulfillment'] ?? 'all')));
+        $claimMode = strtolower(trim((string)($filters['claim_mode'] ?? 'all')));
+        $dateFrom = trim((string)($filters['date_from'] ?? ''));
+        $dateTo = trim((string)($filters['date_to'] ?? ''));
+        $sort = strtolower(trim((string)($filters['sort'] ?? 'priority')));
         $where = ['r.tenant_id = :tenant_id', 'r.source = :source'];
         $params = ['tenant_id' => $tenantId, 'source' => self::CUSTOMER_PORTAL_SOURCE];
         if ($status !== 'all') {
@@ -1285,6 +1377,46 @@ final class LoyaltyRepository {
             }
         }
 
+        if ($query !== '') {
+            $where[] = '(lower(m.account_id) LIKE :query OR lower(m.account_name) LIKE :query OR lower(COALESCE(m.email, \'\')) LIKE :query OR lower(COALESCE(m.phone, \'\')) LIKE :query OR lower(w.name) LIKE :query OR lower(r.id) LIKE :query)';
+            $params['query'] = '%' . $query . '%';
+        }
+
+        if (in_array($fulfillment, ['in_store', 'pickup', 'delivery'], true)) {
+            $where[] = 'r.fulfillment_type = :fulfillment';
+            $params['fulfillment'] = $fulfillment;
+        } elseif ($fulfillment === 'unassigned') {
+            $where[] = '(r.fulfillment_type IS NULL OR r.fulfillment_type = \'\')';
+        }
+
+        if (in_array($claimMode, ['in_store', 'managed'], true)) {
+            $where[] = 'w.claim_mode = :claim_mode';
+            $params['claim_mode'] = $claimMode;
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom) === 1) {
+            $where[] = 'r.created_at >= CAST(:date_from AS date)';
+            $params['date_from'] = $dateFrom;
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo) === 1) {
+            $where[] = "r.created_at < (CAST(:date_to AS date) + INTERVAL '1 day')";
+            $params['date_to'] = $dateTo;
+        }
+
+        $orderBy = match ($sort) {
+            'oldest' => 'r.created_at ASC',
+            'expires' => 'COALESCE(r.code_expires_at, r.expires_at, r.created_at) ASC, r.created_at DESC',
+            'newest' => 'r.created_at DESC',
+            default => "CASE r.status
+                 WHEN 'ready_for_pickup' THEN 1
+                 WHEN 'pending_review' THEN 2
+                 WHEN 'approved' THEN 3
+                 ELSE 4
+               END,
+               r.created_at DESC",
+        };
+
         $sqlWhere = implode(' AND ', $where);
         $items = $this->fetchAll(
             "SELECT r.id, r.member_id, m.account_id, m.account_name AS customer, m.email, m.phone,
@@ -1295,20 +1427,15 @@ final class LoyaltyRepository {
              JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
              JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
              WHERE {$sqlWhere}
-             ORDER BY
-               CASE r.status
-                 WHEN 'ready_for_pickup' THEN 1
-                 WHEN 'pending_review' THEN 2
-                 WHEN 'approved' THEN 3
-                 ELSE 4
-               END,
-               r.created_at DESC
+             ORDER BY {$orderBy}
              LIMIT {$limit} OFFSET {$offset}",
             $params
         );
         $total = (int)$this->scalar(
             "SELECT COUNT(*)
              FROM loyalty_redemptions r
+             JOIN loyalty_members m ON m.id = r.member_id AND m.tenant_id = r.tenant_id
+             JOIN loyalty_rewards w ON w.id = r.reward_id AND w.tenant_id = r.tenant_id
              WHERE {$sqlWhere}",
             $params
         );
@@ -2790,7 +2917,17 @@ HTML;
         $tenantId = $this->tenantId();
         $key = trim($idempotencyKey);
         if ($key === '') {
-            throw new \InvalidArgumentException('Idempotency-Key es obligatorio para mutaciones externas.');
+            $settings = $this->settings()['settings'];
+            $required = filter_var($settings['security']['idempotencyRequiredForExternalApi'] ?? true, FILTER_VALIDATE_BOOL);
+            if ($required) {
+                throw new \InvalidArgumentException('Idempotency-Key es obligatorio para mutaciones externas.');
+            }
+
+            return [
+                'payload' => $callback(),
+                'status' => 201,
+                'replayed' => false,
+            ];
         }
 
         $requestHash = hash('sha256', json_encode($payload));
@@ -3656,6 +3793,21 @@ HTML;
         ];
     }
 
+    private function normalizeRewardImageUrl($value): string {
+        $url = trim((string)$value);
+        if ($url === '') {
+            return '';
+        }
+        if (preg_match('#^https?://#i', $url) === 1) {
+            return $url;
+        }
+        if (str_starts_with($url, '/api/l/reward-images/') || str_starts_with($url, '/uploads/')) {
+            return $url;
+        }
+
+        throw new \InvalidArgumentException('La imagen del premio debe venir del cargador seguro.');
+    }
+
     private function normalizeClaimMode(string $mode): string {
         $mode = strtolower(trim($mode));
         if (in_array($mode, [self::CLAIM_MODE_STAFF_ONLY, self::CLAIM_MODE_IN_STORE, self::CLAIM_MODE_MANAGED], true)) {
@@ -3819,6 +3971,48 @@ HTML;
         if (!in_array((string)($earning['roundingMode'] ?? 'floor'), ['floor', 'round', 'ceil'], true)) {
             throw new \InvalidArgumentException('El redondeo debe ser hacia abajo, normal o hacia arriba.');
         }
+        if ((float)($earning['minimumPurchaseAmount'] ?? 0) < 0) {
+            throw new \InvalidArgumentException('El minimo de compra no puede ser negativo.');
+        }
+        if ((int)($earning['maximumPointsPerPurchase'] ?? 0) < 1) {
+            throw new \InvalidArgumentException('El maximo de puntos por compra debe ser mayor a cero.');
+        }
+        if ((int)($earning['maximumPointsPerMemberPerDay'] ?? 0) < 0) {
+            throw new \InvalidArgumentException('El maximo diario de puntos no puede ser negativo.');
+        }
+
+        $redemption = $settings['redemption'] ?? [];
+        $maxDailyRedemptions = (int)($redemption['maximumRedemptionsPerMemberPerDay'] ?? 0);
+        $maxSameReward = (int)($redemption['maximumSameRewardPerMemberPerDay'] ?? 0);
+        if ($maxDailyRedemptions < 1 || $maxSameReward < 1) {
+            throw new \InvalidArgumentException('Los limites diarios de canje deben ser mayores a cero.');
+        }
+        if ($maxSameReward > $maxDailyRedemptions) {
+            throw new \InvalidArgumentException('El limite del mismo premio no puede superar el total diario de canjes.');
+        }
+        if ((int)($redemption['manualApprovalThresholdPoints'] ?? 0) < 0 || (int)($redemption['minimumRewardStockAlert'] ?? 0) < 0) {
+            throw new \InvalidArgumentException('El umbral de aprobacion y la alerta de stock no pueden ser negativos.');
+        }
+
+        $expiration = $settings['expiration'] ?? [];
+        if (filter_var($expiration['enabled'] ?? false, FILTER_VALIDATE_BOOL)) {
+            $expireAfter = (int)($expiration['pointsExpireAfterDays'] ?? 0);
+            $warningDays = (int)($expiration['warningDays'] ?? 0);
+            if ($expireAfter < 1 || $warningDays < 1) {
+                throw new \InvalidArgumentException('La expiracion y el aviso deben ser mayores a cero dias.');
+            }
+            if ($warningDays >= $expireAfter) {
+                throw new \InvalidArgumentException('El aviso de expiracion debe ocurrir antes del vencimiento.');
+            }
+        }
+
+        $security = $settings['security'] ?? [];
+        if ((int)($security['auditRetentionDays'] ?? 0) < 30) {
+            throw new \InvalidArgumentException('La retencion minima de auditoria es 30 dias.');
+        }
+        if ((int)($security['riskBlockThreshold'] ?? 0) < 1) {
+            throw new \InvalidArgumentException('El umbral antifraude debe ser mayor a cero.');
+        }
 
         $wallet = is_array($settings['googleWallet'] ?? null) ? $settings['googleWallet'] : [];
         if (filter_var($wallet['enabled'] ?? false, FILTER_VALIDATE_BOOL)) {
@@ -3910,6 +4104,54 @@ HTML;
                 'metadata' => json_encode($metadata),
             ]
         );
+        if ($memberId !== null && in_array($severity, ['high', 'critical'], true)) {
+            $this->autoBlockMemberForRiskThreshold($memberId);
+        }
+    }
+
+    private function autoBlockMemberForRiskThreshold(string $memberId): void {
+        $settings = $this->settings()['settings'];
+        $threshold = (int)($settings['security']['riskBlockThreshold'] ?? 0);
+        if ($threshold < 1) {
+            return;
+        }
+
+        $tenantId = $this->tenantId();
+        $openHighRiskEvents = (int)$this->scalar(
+            "SELECT COUNT(*)
+             FROM loyalty_risk_events
+             WHERE tenant_id = :tenant_id
+               AND member_id = :member_id
+               AND status = 'open'
+               AND severity IN ('high', 'critical')",
+            ['tenant_id' => $tenantId, 'member_id' => $memberId]
+        );
+        if ($openHighRiskEvents < $threshold) {
+            return;
+        }
+
+        $before = $this->memberById($memberId);
+        if (!$before || (string)($before['status'] ?? '') === 'blocked') {
+            return;
+        }
+
+        $reason = sprintf('Bloqueo automatico por %d eventos de riesgo alto abiertos.', $openHighRiskEvents);
+        $this->execute(
+            'UPDATE loyalty_members
+             SET status = :status,
+                 blocked_reason = :blocked_reason,
+                 blocked_at = COALESCE(blocked_at, NOW()),
+                 updated_at = NOW()
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'status' => 'blocked',
+                'blocked_reason' => $reason,
+                'tenant_id' => $tenantId,
+                'id' => $memberId,
+            ]
+        );
+        $after = $this->memberById($memberId) ?? [];
+        $this->recordAudit('member.auto_blocked_by_risk', 'member', $memberId, $before, $after, $reason, 'system');
     }
 
     private function eventPage(string $table, array $filters): array {
