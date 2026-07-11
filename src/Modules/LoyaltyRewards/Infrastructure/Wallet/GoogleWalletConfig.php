@@ -45,7 +45,7 @@ final class GoogleWalletConfig {
             classSuffix: self::sanitizeSuffix(trim((string)($wallet['classSuffix'] ?? ''))),
             issuerName: trim((string)($wallet['issuerName'] ?? '')) ?: 'TecnoLTS',
             programName: trim((string)($wallet['programName'] ?? '')) ?: trim((string)($program['name'] ?? '')) ?: 'Programa de fidelizacion',
-            hexBackgroundColor: trim((string)($wallet['hexBackgroundColor'] ?? '')) ?: trim((string)($program['brand_color'] ?? '')) ?: '#0f766e',
+            hexBackgroundColor: trim((string)($wallet['hexBackgroundColor'] ?? '')) ?: trim((string)($program['brand_color'] ?? '')) ?: '#2b648f',
             logoUrl: trim((string)($wallet['logoUrl'] ?? '')) ?: trim((string)($program['logo_url'] ?? '')),
             pointsLabel: trim((string)($wallet['pointsLabel'] ?? '')) ?: 'Puntos',
             origins: $origins

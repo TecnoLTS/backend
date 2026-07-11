@@ -450,15 +450,15 @@ HTML;
 <meta name="robots" content="noindex">
 <title>Acceso al catalogo {$program}</title>
 <style>
-:root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#10231f;--muted:#64746f;--line:#d9e5e1;--brand:#0f766e;--danger:#b42318}
+:root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#172a3d;--muted:#64778a;--line:#d9e5ee;--brand:#2b648f;--danger:#b42318}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.5}
 main{width:min(460px,100%);margin:0 auto;padding:28px 14px}.panel{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 18px 42px rgba(15,23,42,.08)}
-.head{background:#173d39;color:#fff;padding:24px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.78}.head h1{margin:8px 0 0;font-size:24px;line-height:1.15}
+.head{background:#17324a;color:#fff;padding:24px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.78}.head h1{margin:8px 0 0;font-size:24px;line-height:1.15}
 .body{padding:22px}.body p{margin:0 0 16px;color:var(--muted)}form{display:grid;gap:12px;margin:0}form.secondary{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 label{display:grid;gap:7px;font-weight:800;font-size:13px}input{min-height:46px;border:1px solid var(--line);border-radius:11px;padding:11px 12px;font:inherit;color:var(--ink);background:#fff}
-.account-box{display:grid;gap:4px;border:1px solid var(--line);border-radius:12px;background:#f7fbf9;padding:13px 14px}.account-box span{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.04em}.account-box strong{font-size:20px}
-.btn{border:0;border-radius:11px;min-height:48px;background:var(--brand);color:#fff;font-weight:900;font-size:15px;cursor:pointer}.btn-light{background:#e7f4f1;color:#0f4f49}
-.notice{border:1px solid #b7dfd8;background:#ecfdf8;color:#134e4a;border-radius:12px;padding:12px;margin:0 0 14px;font-weight:750}.notice span{font-weight:600}.notice.error{border-color:#fecdca;background:#fff1f0;color:var(--danger)}
+.account-box{display:grid;gap:4px;border:1px solid var(--line);border-radius:12px;background:#f7fafe;padding:13px 14px}.account-box span{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.04em}.account-box strong{font-size:20px}
+.btn{border:0;border-radius:11px;min-height:48px;background:var(--brand);color:#fff;font-weight:900;font-size:15px;cursor:pointer}.btn-light{background:#edf5fb;color:#204f73}
+.notice{border:1px solid #bfd6e7;background:#edf5fb;color:#204f73;border-radius:12px;padding:12px;margin:0 0 14px;font-weight:750}.notice span{font-weight:600}.notice.error{border-color:#fecdca;background:#fff1f0;color:var(--danger)}
 .hint{font-size:13px;color:var(--muted);margin-top:14px}@media(max-width:520px){main{padding:0}.panel{border-radius:0;min-height:100vh;border:0}.head{padding-top:30px}}
 </style>
 </head>
@@ -509,20 +509,20 @@ HTML;
 <meta name="robots" content="noindex">
 <title>Catalogo de premios {$program}</title>
 <style>
-:root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#10231f;--muted:#64746f;--line:#d9e5e1;--brand:#0f766e;--brand2:#115e59;--ok:#047857;--warn:#b45309;--danger:#b42318}
+:root{color-scheme:light;--bg:#f5f7fb;--surface:#fff;--ink:#172a3d;--muted:#64778a;--line:#d9e5ee;--brand:#2b648f;--brand2:#204f73;--ok:#24577c;--warn:#b45309;--danger:#b42318}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.5}
-main{width:min(1120px,100%);margin:0 auto;padding:18px 14px 32px}.hero{background:linear-gradient(135deg,#123d38,#0f766e);color:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 40px rgba(15,118,110,.18)}
+main{width:min(1120px,100%);margin:0 auto;padding:18px 14px 32px}.hero{background:linear-gradient(135deg,#17324a,#2b648f);color:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 40px rgba(43,100,143,.18)}
 .eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.78}.hero h1{margin:8px 0 10px;font-size:28px;line-height:1.08}.hero p{margin:0;color:rgba(255,255,255,.86)}
 .balance{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.balance div{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:12px}.balance span,.meta{display:block;font-size:12px;color:var(--muted);font-weight:700}.balance span{color:rgba(255,255,255,.72)}.balance strong{display:block;font-size:20px}
 .section{margin-top:22px}.section h2{font-size:20px;margin:0 0 4px}.section>p{margin:0 0 14px;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;align-items:start}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 24px rgba(15,23,42,.06);display:flex;flex-direction:column;min-height:100%}.card-body{display:flex;flex-direction:column;gap:10px;padding:14px;flex:1}.card h3{margin:0;font-size:17px;line-height:1.2}.card p{margin:0;color:var(--muted)}.card-media{position:relative;aspect-ratio:16/10;background:#e7f4f1;overflow:hidden}.card-media img{display:block;width:100%;height:100%;object-fit:cover}.card-media--empty{display:grid;place-items:center;color:#0f4f49;font-weight:900}.card-media:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(2,6,23,0),rgba(2,6,23,.22));pointer-events:none}.price-tag{position:absolute;right:10px;bottom:10px;border-radius:999px;background:rgba(255,255,255,.95);color:var(--brand2);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums;padding:6px 10px;box-shadow:0 8px 18px rgba(15,23,42,.12)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 24px rgba(15,23,42,.06);display:flex;flex-direction:column;min-height:100%}.card-body{display:flex;flex-direction:column;gap:10px;padding:14px;flex:1}.card h3{margin:0;font-size:17px;line-height:1.2}.card p{margin:0;color:var(--muted)}.card-media{position:relative;aspect-ratio:16/10;background:#edf5fb;overflow:hidden}.card-media img{display:block;width:100%;height:100%;object-fit:cover}.card-media--empty{display:grid;place-items:center;color:#204f73;font-weight:900}.card-media:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(2,6,23,0),rgba(2,6,23,.22));pointer-events:none}.price-tag{position:absolute;right:10px;bottom:10px;border-radius:999px;background:rgba(255,255,255,.95);color:var(--brand2);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums;padding:6px 10px;box-shadow:0 8px 18px rgba(15,23,42,.12)}
 .row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.price{font-size:18px;font-weight:850;color:var(--brand2);font-variant-numeric:tabular-nums;white-space:nowrap}
-.badges{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.badge{border-radius:999px;border:1px solid var(--line);padding:5px 9px;font-size:12px;font-weight:800;color:#29443f;background:#f7fbf9}.badge.ok{border-color:#bbf7d0;background:#f0fdf4;color:#166534}.badge.warn{border-color:#fed7aa;background:#fff7ed;color:#92400e}
+.badges{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.badge{border-radius:999px;border:1px solid var(--line);padding:5px 9px;font-size:12px;font-weight:800;color:#40566b;background:#f7fafe}.badge.ok{border-color:#b7d0e3;background:#edf5fb;color:#204f73}.badge.warn{border-color:#fed7aa;background:#fff7ed;color:#92400e}
 form{display:grid;gap:10px;margin-top:12px}label{display:grid;gap:6px;font-weight:750;font-size:13px}textarea,input,select{width:100%;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit;background:#fff;color:var(--ink)}textarea{min-height:84px;resize:vertical}
 .choice{display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:9px 10px}.choice input{width:auto;min-height:auto}
-.btn{appearance:none;border:0;border-radius:11px;min-height:46px;padding:12px 14px;font-weight:850;font-size:15px;cursor:pointer;text-align:center;touch-action:manipulation}.btn-primary{background:var(--brand);color:#fff}.btn-secondary{background:#e7f4f1;color:#0f4f49}.btn-danger{background:#fff1f0;color:var(--danger);border:1px solid #fecdca}.btn[disabled]{opacity:.52;cursor:not-allowed}.claim-panel{margin-top:auto}.claim-panel summary{list-style:none}.claim-panel summary::-webkit-details-marker{display:none}.claim-panel form{border-top:1px solid var(--line);padding-top:12px}.claim-panel[open] summary{background:#0f4f49}.block{font-size:13px;color:var(--danger);font-weight:750;background:#fff1f0;border:1px solid #fecdca;border-radius:11px;padding:10px 12px}.empty{border:1px dashed var(--line);border-radius:14px;padding:18px;color:var(--muted);background:#fff}
+.btn{appearance:none;border:0;border-radius:11px;min-height:46px;padding:12px 14px;font-weight:850;font-size:15px;cursor:pointer;text-align:center;touch-action:manipulation}.btn-primary{background:var(--brand);color:#fff}.btn-secondary{background:#edf5fb;color:#204f73}.btn-danger{background:#fff1f0;color:var(--danger);border:1px solid #fecdca}.btn[disabled]{opacity:.52;cursor:not-allowed}.claim-panel{margin-top:auto}.claim-panel summary{list-style:none}.claim-panel summary::-webkit-details-marker{display:none}.claim-panel form{border-top:1px solid var(--line);padding-top:12px}.claim-panel[open] summary{background:#204f73}.block{font-size:13px;color:var(--danger);font-weight:750;background:#fff1f0;border:1px solid #fecdca;border-radius:11px;padding:10px 12px}.empty{border:1px dashed var(--line);border-radius:14px;padding:18px;color:var(--muted);background:#fff}
 .claims .card{padding:14px}.status{font-weight:850}.status.pending_review{color:var(--warn)}.status.ready_for_pickup,.status.approved{color:var(--brand2)}.status.delivered{color:var(--ok)}.status.cancelled,.status.expired{color:var(--danger)}
-.modal-scrim{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:rgba(15,23,42,.58);padding:18px;overflow:auto}.result-modal{width:min(470px,100%);background:#fff;border:1px solid rgba(255,255,255,.72);border-radius:20px;box-shadow:0 28px 80px rgba(15,23,42,.28);padding:18px;animation:modalIn .18s ease-out}.result-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.result-icon{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;border:1px solid}.result-icon svg{width:26px;height:26px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}.result-modal--success .result-icon{background:#ecfdf5;border-color:#bbf7d0;color:#047857}.result-modal--error .result-icon{background:#fff1f0;border-color:#fecdca;color:#b42318}.result-modal--cancel .result-icon{background:#fff7ed;border-color:#fed7aa;color:#b45309}.modal-close{width:44px;height:44px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#29443f;font-size:18px;font-weight:900;cursor:pointer}.result-kicker{margin:14px 0 4px;color:var(--muted);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.result-modal h2{margin:0;font-size:24px;line-height:1.16}.result-copy{margin:10px 0 0;color:#425b55}.result-details{display:grid;gap:8px;margin:16px 0 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:#f7fbf9}.result-details div{display:grid;grid-template-columns:minmax(86px,.8fr) 1.4fr;gap:10px}.result-details dt{color:var(--muted);font-size:12px;font-weight:900}.result-details dd{margin:0;font-weight:850;color:#19312d;overflow-wrap:anywhere}.result-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.result-actions .btn{text-decoration:none;display:grid;place-items:center}.modal-open{overflow:hidden}@keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}@media(prefers-reduced-motion:reduce){.result-modal{animation:none}}@media(max-width:480px){.modal-scrim{align-items:end;padding:10px}.result-modal{border-radius:18px;padding:16px}.result-modal h2{font-size:21px}.result-details div{grid-template-columns:1fr}.result-actions{grid-template-columns:1fr}}
+.modal-scrim{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:rgba(15,23,42,.58);padding:18px;overflow:auto}.result-modal{width:min(470px,100%);background:#fff;border:1px solid rgba(255,255,255,.72);border-radius:20px;box-shadow:0 28px 80px rgba(15,23,42,.28);padding:18px;animation:modalIn .18s ease-out}.result-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.result-icon{width:48px;height:48px;border-radius:16px;display:grid;place-items:center;border:1px solid}.result-icon svg{width:26px;height:26px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}.result-modal--success .result-icon{background:#edf5fb;border-color:#b7d0e3;color:#24577c}.result-modal--error .result-icon{background:#fff1f0;border-color:#fecdca;color:#b42318}.result-modal--cancel .result-icon{background:#fff7ed;border-color:#fed7aa;color:#b45309}.modal-close{width:44px;height:44px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#40566b;font-size:18px;font-weight:900;cursor:pointer}.result-kicker{margin:14px 0 4px;color:var(--muted);font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.result-modal h2{margin:0;font-size:24px;line-height:1.16}.result-copy{margin:10px 0 0;color:#40566b}.result-details{display:grid;gap:8px;margin:16px 0 0;padding:12px;border:1px solid var(--line);border-radius:14px;background:#f7fafe}.result-details div{display:grid;grid-template-columns:minmax(86px,.8fr) 1.4fr;gap:10px}.result-details dt{color:var(--muted);font-size:12px;font-weight:900}.result-details dd{margin:0;font-weight:850;color:#172a3d;overflow-wrap:anywhere}.result-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.result-actions .btn{text-decoration:none;display:grid;place-items:center}.modal-open{overflow:hidden}@keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}@media(prefers-reduced-motion:reduce){.result-modal{animation:none}}@media(max-width:480px){.modal-scrim{align-items:end;padding:10px}.result-modal{border-radius:18px;padding:16px}.result-modal h2{font-size:21px}.result-details div{grid-template-columns:1fr}.result-actions{grid-template-columns:1fr}}
 footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}@media(max-width:640px){main{padding-inline:10px}.hero{border-radius:0;margin:-18px -10px 0}.balance{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr;gap:10px}.card{border-radius:12px}.card-body{padding:12px}.card h3{font-size:15px}.card p{font-size:13px}.badges{margin:6px 0}.badge{font-size:11px;padding:4px 7px}.btn{font-size:14px;padding-inline:10px}.claims .grid{grid-template-columns:1fr}}@media(max-width:420px){.grid{grid-template-columns:1fr}.hero h1{font-size:25px}}
 </style>
 </head>
@@ -985,27 +985,27 @@ HTML;
 <meta name="robots" content="noindex">
 <title>Agregar tarjeta a Google Wallet</title>
 </head>
-<body style="margin:0;padding:0;background:#f4f7f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#142724;">
+<body style="margin:0;padding:0;background:#f3f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#172a3d;">
   <div style="max-width:460px;margin:0 auto;padding:28px 16px;">
-    <div style="background:#ffffff;border:1px solid #dce9e4;border-radius:16px;overflow:hidden;">
-      <div style="background:#173d39;color:#ffffff;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #d9e5ee;border-radius:16px;overflow:hidden;">
+      <div style="background:#17324a;color:#ffffff;padding:24px;">
         <div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.78;">{$program}</div>
         <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;">Tu tarjeta de recompensas esta lista</h1>
       </div>
       <div style="padding:24px;">
         <p style="margin:0 0 18px;font-size:16px;line-height:1.5;">Hola {$member}, agrega tu tarjeta a Google Wallet para ver y usar tus puntos desde el telefono.</p>
         <div style="display:flex;gap:12px;margin:0 0 22px;">
-          <div style="flex:1;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;padding:12px;">
-            <div style="font-size:12px;color:#506a65;font-weight:700;">Cuenta</div>
+          <div style="flex:1;background:#f7fafe;border:1px solid #d9e5ee;border-radius:10px;padding:12px;">
+            <div style="font-size:12px;color:#50657a;font-weight:700;">Cuenta</div>
             <div style="font-size:17px;font-weight:800;">{$account}</div>
           </div>
-          <div style="flex:1;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;padding:12px;">
-            <div style="font-size:12px;color:#506a65;font-weight:700;">Saldo actual</div>
+          <div style="flex:1;background:#f7fafe;border:1px solid #d9e5ee;border-radius:10px;padding:12px;">
+            <div style="font-size:12px;color:#50657a;font-weight:700;">Saldo actual</div>
             <div style="font-size:17px;font-weight:800;">{$points} pts</div>
           </div>
         </div>
-        <a href="{$url}" style="display:block;text-align:center;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;font-size:16px;padding:16px 22px;border-radius:12px;">Agregar a Google Wallet</a>
-        <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, toca el boton desde Chrome en tu telefono Android.</p>
+        <a href="{$url}" style="display:block;text-align:center;background:#2b648f;color:#ffffff;text-decoration:none;font-weight:800;font-size:16px;padding:16px 22px;border-radius:12px;">Agregar a Google Wallet</a>
+        <p style="margin:16px 0 0;text-align:center;color:#50657a;font-size:13px;line-height:1.5;">Si no abre, toca el boton desde Chrome en tu telefono Android.</p>
       </div>
     </div>
   </div>
@@ -1023,11 +1023,11 @@ HTML;
 <!doctype html>
 <html lang="es">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tarjeta no disponible</title></head>
-<body style="margin:0;padding:0;background:#f4f7f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#142724;">
+<body style="margin:0;padding:0;background:#f3f7fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#172a3d;">
   <div style="max-width:460px;margin:0 auto;padding:40px 16px;text-align:center;">
-    <div style="background:#ffffff;border:1px solid #dce9e4;border-radius:16px;padding:32px 24px;">
+    <div style="background:#ffffff;border:1px solid #d9e5ee;border-radius:16px;padding:32px 24px;">
       <h1 style="margin:0 0 10px;font-size:20px;">No pudimos abrir la tarjeta</h1>
-      <p style="margin:0;color:#506a65;font-size:15px;line-height:1.5;">{$safe}</p>
+      <p style="margin:0;color:#50657a;font-size:15px;line-height:1.5;">{$safe}</p>
     </div>
   </div>
 </body>

@@ -547,7 +547,7 @@ final class LoyaltyRepository {
                 'name' => trim((string)($programSettings['name'] ?? $program['name'] ?? 'Fidepuntos')),
                 'status' => trim((string)($programSettings['status'] ?? $program['status'] ?? 'active')),
                 'currency_code' => trim((string)($programSettings['currencyCode'] ?? $program['currency_code'] ?? 'USD')),
-                'brand_color' => trim((string)($programSettings['brandColor'] ?? $program['brand_color'] ?? '#0f766e')),
+                'brand_color' => trim((string)($programSettings['brandColor'] ?? $program['brand_color'] ?? '#2b648f')),
                 'logo_url' => trim((string)($programSettings['logoUrl'] ?? $program['logo_url'] ?? '')),
                 'tenant_id' => $tenantId,
                 'id' => $program['id'],
@@ -1854,13 +1854,13 @@ final class LoyaltyRepository {
         $html = <<<HTML
 <!doctype html>
 <html lang="es">
-  <body style="margin:0;padding:0;background:#f4f7f6;font-family:Arial,sans-serif;color:#142724;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7f6;padding:28px 12px;">
+  <body style="margin:0;padding:0;background:#f3f7fa;font-family:Arial,sans-serif;color:#172a3d;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f7fa;padding:28px 12px;">
       <tr>
         <td align="center">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #dce9e4;border-radius:14px;overflow:hidden;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #d9e5ee;border-radius:14px;overflow:hidden;">
             <tr>
-              <td style="background:#173d39;color:#ffffff;padding:24px;">
+              <td style="background:#17324a;color:#ffffff;padding:24px;">
                 <div style="font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.78;">{$safeProgram}</div>
                 <h1 style="margin:8px 0 0;font-size:24px;line-height:1.2;">Tu tarjeta de recompensas esta lista</h1>
               </td>
@@ -1869,22 +1869,22 @@ final class LoyaltyRepository {
               <td style="padding:24px;">
                 <p style="margin:0 0 14px;font-size:16px;line-height:1.5;">Hola {$safeMember},</p>
                 <p style="margin:0 0 18px;font-size:16px;line-height:1.5;">Agrega tu tarjeta a Google Wallet para consultar y usar tus puntos desde el telefono.</p>
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 20px;background:#f7fbf9;border:1px solid #dce9e4;border-radius:10px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 20px;background:#f7fafe;border:1px solid #d9e5ee;border-radius:10px;">
                   <tr>
                     <td style="padding:14px;">
-                      <div style="font-size:12px;color:#506a65;font-weight:700;">Cuenta</div>
+                      <div style="font-size:12px;color:#50657a;font-weight:700;">Cuenta</div>
                       <div style="font-size:18px;font-weight:800;">{$safeAccount}</div>
                     </td>
                     <td style="padding:14px;">
-                      <div style="font-size:12px;color:#506a65;font-weight:700;">Saldo actual</div>
+                      <div style="font-size:12px;color:#50657a;font-weight:700;">Saldo actual</div>
                       <div style="font-size:18px;font-weight:800;">{$safePoints} pts</div>
                     </td>
                   </tr>
                 </table>
                 <p style="margin:24px 0 0;text-align:center;">
-                  <a href="{$safeUrl}" target="_blank" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;line-height:18px;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
+                  <a href="{$safeUrl}" target="_blank" style="display:inline-block;background:#2b648f;color:#ffffff;text-decoration:none;font-weight:800;font-size:14px;line-height:18px;padding:14px 22px;border-radius:10px;">Agregar tarjeta a Google Wallet</a>
                 </p>
-                <p style="margin:16px 0 0;text-align:center;color:#506a65;font-size:13px;line-height:1.5;">Si no abre, intenta tocar el boton desde Chrome en tu telefono Android.</p>
+                <p style="margin:16px 0 0;text-align:center;color:#50657a;font-size:13px;line-height:1.5;">Si no abre, intenta tocar el boton desde Chrome en tu telefono Android.</p>
               </td>
             </tr>
           </table>
@@ -3667,18 +3667,18 @@ HTML;
         $html = <<<HTML
 <!doctype html>
 <html lang="es">
-  <body style="margin:0;background:#f4f7f6;font-family:Arial,sans-serif;color:#142724;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7f6;padding:28px 12px;">
+  <body style="margin:0;background:#f3f7fa;font-family:Arial,sans-serif;color:#172a3d;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f7fa;padding:28px 12px;">
       <tr><td align="center">
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background:#ffffff;border:1px solid #dce9e4;border-radius:14px;overflow:hidden;">
-          <tr><td style="background:#173d39;color:#ffffff;padding:22px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background:#ffffff;border:1px solid #d9e5ee;border-radius:14px;overflow:hidden;">
+          <tr><td style="background:#17324a;color:#ffffff;padding:22px;">
             <div style="font-size:12px;font-weight:700;text-transform:uppercase;opacity:.78;">{$safeProgram}</div>
             <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;">Codigo de acceso</h1>
           </td></tr>
           <tr><td style="padding:24px;">
             <p style="margin:0 0 16px;font-size:16px;line-height:1.5;">Hola {$safeMember}, usa este codigo para entrar al catalogo de premios.</p>
-            <div style="text-align:center;font-size:34px;letter-spacing:8px;font-weight:900;background:#f7fbf9;border:1px solid #dce9e4;border-radius:12px;padding:16px;margin:18px 0;">{$safeCode}</div>
-            <p style="margin:0;color:#506a65;font-size:14px;line-height:1.5;">Expira a las {$expiresLabel}. Si no solicitaste este codigo, ignora este mensaje.</p>
+            <div style="text-align:center;font-size:34px;letter-spacing:8px;font-weight:900;background:#f7fafe;border:1px solid #d9e5ee;border-radius:12px;padding:16px;margin:18px 0;">{$safeCode}</div>
+            <p style="margin:0;color:#50657a;font-size:14px;line-height:1.5;">Expira a las {$expiresLabel}. Si no solicitaste este codigo, ignora este mensaje.</p>
           </td></tr>
         </table>
       </td></tr>
@@ -4024,7 +4024,7 @@ HTML;
                 throw new \InvalidArgumentException('googleWallet.logoUrl debe ser una URL https publica (Google exige logo para la clase).');
             }
             if (!preg_match('/^#[0-9a-fA-F]{6}$/', trim((string)($wallet['hexBackgroundColor'] ?? '')))) {
-                throw new \InvalidArgumentException('googleWallet.hexBackgroundColor debe ser un color hex de 6 digitos, por ejemplo #0F6E56.');
+                throw new \InvalidArgumentException('googleWallet.hexBackgroundColor debe ser un color hex de 6 digitos, por ejemplo #2b648f.');
             }
             foreach ((array)($wallet['origins'] ?? []) as $origin) {
                 if (!str_starts_with(trim((string)$origin), 'https://')) {

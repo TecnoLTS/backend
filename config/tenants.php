@@ -85,7 +85,7 @@ if ($fidepuntosDemoEnabled) {
             'logo_url' => $env('FIDEPUNTOS_DEMO_LOGO_URL', 'assets/images/logo.png'),
             'logo_light_url' => $env('FIDEPUNTOS_DEMO_LOGO_LIGHT_URL', 'assets/images/logo-light.png'),
             'logo_icon_url' => $env('FIDEPUNTOS_DEMO_LOGO_ICON_URL', 'assets/images/logo-icon.png'),
-            'primary_color' => $env('FIDEPUNTOS_DEMO_PRIMARY_COLOR', '#0369a1'),
+            'primary_color' => $env('FIDEPUNTOS_DEMO_PRIMARY_COLOR', '#2b648f'),
         ],
     ];
 }
