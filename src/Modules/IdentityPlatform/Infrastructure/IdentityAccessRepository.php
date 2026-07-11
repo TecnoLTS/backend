@@ -284,6 +284,84 @@ class IdentityAccessRepository {
         }
     }
 
+    public function createCustomRoleWithNavigationGrants(
+        array $role,
+        array $grants,
+        ?string $actorUserId = null,
+        ?string $tenantId = null
+    ): array {
+        $tenantId = $tenantId ?: $this->tenantId();
+        $roleId = strtolower(trim((string)($role['id'] ?? '')));
+        if ($tenantId === '' || $roleId === '') {
+            throw new InvalidArgumentException('El rol no tiene un identificador válido.');
+        }
+        if (!empty($role['system'])) {
+            throw new InvalidArgumentException('Los roles operativos no pueden convertirse en roles del sistema.');
+        }
+
+        $normalized = $this->normalizeNavigationGrants($grants);
+        $this->assertOperationalRoleGrants($normalized, $tenantId);
+        $this->db->beginTransaction();
+        try {
+            $insertRole = $this->db->prepare('
+                INSERT INTO tenant_roles (
+                    tenant_id, role_id, name, description, permissions,
+                    system_role, created_at, updated_at
+                ) VALUES (
+                    :tenant_id, :role_id, :name, :description, \'[]\'::jsonb,
+                    FALSE, NOW(), NOW()
+                )
+            ');
+            $insertRole->execute([
+                'tenant_id' => $tenantId,
+                'role_id' => $roleId,
+                'name' => trim((string)($role['name'] ?? $roleId)),
+                'description' => trim((string)($role['description'] ?? 'Rol operativo del tenant.')),
+            ]);
+
+            $insertGrant = $this->db->prepare('
+                INSERT INTO tenant_role_navigation_grants (
+                    tenant_id, role_id, menu_option_key, action_key,
+                    assigned_by_user_id, granted_at, updated_at
+                ) VALUES (
+                    :tenant_id, :role_id, :menu_option_key, :action_key,
+                    :assigned_by_user_id, NOW(), NOW()
+                )
+            ');
+            foreach ($normalized as $grant) {
+                foreach ($grant['actions'] as $action) {
+                    $insertGrant->execute([
+                        'tenant_id' => $tenantId,
+                        'role_id' => $roleId,
+                        'menu_option_key' => $grant['menuOptionKey'],
+                        'action_key' => $action,
+                        'assigned_by_user_id' => $actorUserId,
+                    ]);
+                }
+            }
+
+            $this->insertAuditEvent(
+                $tenantId,
+                $actorUserId,
+                'role.created',
+                'role',
+                $roleId,
+                [
+                    'name' => trim((string)($role['name'] ?? $roleId)),
+                    'navigationGrants' => $normalized,
+                ]
+            );
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
+        }
+
+        return $this->role($roleId, $tenantId) ?? throw new RuntimeException('No se pudo recuperar el rol creado.');
+    }
+
     public function roles(?string $tenantId = null): array {
         $tenantId = $tenantId ?: $this->tenantId();
         $stmt = $this->db->prepare('
@@ -365,11 +443,16 @@ class IdentityAccessRepository {
     }
 
     public function validateAssignableRoleIds(array $roleIds, ?string $tenantId = null): array {
+        $tenantId = $tenantId ?: $this->tenantId();
         $normalized = $this->normalizeRoleIds($roleIds);
         if ($normalized === []) {
-            throw new InvalidArgumentException('El usuario debe conservar al menos un rol del tenant.');
+            throw new InvalidArgumentException('Debes asignar al menos un rol operativo del tenant.');
         }
-        $this->assertAssignableRoleIds($normalized, $tenantId ?: $this->tenantId());
+        $this->assertAssignableRoleIds($normalized, $tenantId);
+        $systemRoleIds = $this->systemRoleIds($normalized, $tenantId);
+        if ($systemRoleIds !== []) {
+            throw new InvalidArgumentException('Los roles base del sistema no se pueden asignar desde un tenant.');
+        }
         return $normalized;
     }
 
@@ -399,11 +482,13 @@ class IdentityAccessRepository {
         $tenantId = $tenantId ?: $this->tenantId();
         $userId = trim($userId);
         $roleIds = $this->normalizeRoleIds($roleIds);
-        if ($userId === '' || $roleIds === []) {
-            throw new InvalidArgumentException('El usuario debe conservar al menos un rol del tenant.');
+        if ($userId === '') {
+            throw new InvalidArgumentException('Usuario no válido para asignación de roles.');
         }
 
-        $this->assertAssignableRoleIds($roleIds, $tenantId);
+        if ($roleIds !== []) {
+            $this->assertAssignableRoleIds($roleIds, $tenantId);
+        }
 
         $this->db->beginTransaction();
         try {
@@ -422,6 +507,17 @@ class IdentityAccessRepository {
 
             $adminRoleId = "{$tenantId}_admin";
             $currentRoleIds = $this->roleIdsForUser($userId, $tenantId);
+            $currentSystemRoleIds = $this->systemRoleIds($currentRoleIds, $tenantId);
+            $requestedSystemRoleIds = $this->systemRoleIds($roleIds, $tenantId);
+            $newSystemRoleIds = array_values(array_diff($requestedSystemRoleIds, $currentSystemRoleIds));
+            if ($newSystemRoleIds !== []) {
+                throw new InvalidArgumentException('Los roles base del sistema no se pueden asignar desde un tenant.');
+            }
+            $customRoleIds = array_values(array_diff($roleIds, $requestedSystemRoleIds));
+            $roleIds = array_values(array_unique([...$currentSystemRoleIds, ...$customRoleIds]));
+            if ($roleIds === []) {
+                throw new InvalidArgumentException('El usuario debe conservar al menos un rol del tenant.');
+            }
             $removesAdmin = in_array($adminRoleId, $currentRoleIds, true)
                 && !in_array($adminRoleId, $roleIds, true);
             if ($removesAdmin && trim((string)$actorUserId) === $userId) {
@@ -710,6 +806,7 @@ class IdentityAccessRepository {
         }
 
         $normalized = $this->normalizeNavigationGrants($grants);
+        $this->assertOperationalRoleGrants($normalized, $tenantId);
         $this->db->beginTransaction();
         try {
             $delete = $this->db->prepare('
@@ -744,6 +841,7 @@ class IdentityAccessRepository {
                 WHERE tenant_id = :tenant_id AND role_id = :role_id
             ');
             $touch->execute(['tenant_id' => $tenantId, 'role_id' => $roleId]);
+            $this->revokeSessionsForRoleRows($roleId, $tenantId);
             $this->insertAuditEvent(
                 $tenantId,
                 $actorUserId,
@@ -768,69 +866,159 @@ class IdentityAccessRepository {
     }
 
     public function usersForRole(string $roleId, ?string $tenantId = null): array {
+        $result = $this->searchTenantUsers([
+            'roleId' => strtolower(trim($roleId)),
+            'page' => 1,
+            'pageSize' => 100,
+        ], $tenantId);
+
+        return $result['data'];
+    }
+
+    public function searchTenantUsers(array $filters = [], ?string $tenantId = null): array {
         $tenantId = $tenantId ?: $this->tenantId();
-        $stmt = $this->db->prepare('
+        $page = max(1, (int)($filters['page'] ?? 1));
+        $pageSize = max(1, min(100, (int)($filters['pageSize'] ?? 20)));
+        $search = trim((string)($filters['search'] ?? ''));
+        $status = strtolower(trim((string)($filters['status'] ?? 'all')));
+        $roleId = strtolower(trim((string)($filters['roleId'] ?? '')));
+        $conditions = [
+            'u.tenant_id = :tenant_id',
+            "membership.identity_type = 'tenant_staff'",
+        ];
+        $params = ['tenant_id' => $tenantId];
+
+        if ($search !== '') {
+            $conditions[] = "CONCAT_WS(' ', u.name, u.email, u.profile->>'department', u.profile->>'position', role_data.role_names) ILIKE :search";
+            $params['search'] = '%' . $search . '%';
+        }
+        if (in_array($status, ['invited', 'active', 'inactive', 'blocked'], true)) {
+            $conditions[] = 'membership.status = :status';
+            $params['status'] = $status;
+        }
+        if ($roleId !== '') {
+            $conditions[] = 'EXISTS (
+                SELECT 1
+                FROM tenant_user_roles role_filter
+                WHERE role_filter.tenant_id = u.tenant_id
+                  AND role_filter.user_id = u.id
+                  AND role_filter.role_id = :role_id
+            )';
+            $params['role_id'] = $roleId;
+        }
+
+        $from = '
+            FROM "User" u
+            JOIN tenant_memberships membership
+              ON membership.tenant_id = u.tenant_id
+             AND membership.user_id = u.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COALESCE(
+                        jsonb_agg(
+                            jsonb_build_object(
+                                \'id\', assigned_role.role_id,
+                                \'name\', assigned_role.name,
+                                \'system\', assigned_role.system_role
+                            ) ORDER BY assigned_role.system_role DESC, LOWER(assigned_role.name), assigned_role.role_id
+                        ),
+                        \'[]\'::jsonb
+                    ) AS assignments,
+                    COALESCE(string_agg(assigned_role.name, \' \' ORDER BY LOWER(assigned_role.name)), \'\') AS role_names
+                FROM tenant_user_roles assignment
+                JOIN tenant_roles assigned_role
+                  ON assigned_role.tenant_id = assignment.tenant_id
+                 AND assigned_role.role_id = assignment.role_id
+                WHERE assignment.tenant_id = u.tenant_id
+                  AND assignment.user_id = u.id
+            ) role_data ON TRUE
+        ';
+        $where = ' WHERE ' . implode(' AND ', $conditions);
+
+        $count = $this->db->prepare('SELECT COUNT(*) ' . $from . $where);
+        $count->execute($params);
+        $totalItems = (int)$count->fetchColumn();
+        $totalPages = max(1, (int)ceil($totalItems / $pageSize));
+        $page = min($page, $totalPages);
+        $offset = ($page - 1) * $pageSize;
+
+        $data = $this->db->prepare('
             SELECT
-                u.id, u.name, u.email, u.last_login_at,
+                u.id,
+                u.name,
+                u.email,
+                u.email_verified,
                 u.profile,
-                membership.status AS account_status,
-                membership.identity_type,
+                u.created_at,
+                u.updated_at,
+                u.last_login_at,
                 u.failed_login_attempts,
                 u.login_locked_until,
-                ARRAY(
-                    SELECT all_roles.role_id
-                    FROM tenant_user_roles all_roles
-                    WHERE all_roles.tenant_id = assignment.tenant_id
-                      AND all_roles.user_id = assignment.user_id
-                    ORDER BY all_roles.role_id
-                ) AS role_ids
-            FROM tenant_user_roles assignment
-            JOIN tenant_memberships membership
-              ON membership.tenant_id = assignment.tenant_id
-             AND membership.user_id = assignment.user_id
-            JOIN "User" u
-              ON u.tenant_id = assignment.tenant_id
-             AND u.id = assignment.user_id
-            WHERE assignment.tenant_id = :tenant_id
-              AND assignment.role_id = :role_id
-            ORDER BY LOWER(u.name), LOWER(u.email)
+                membership.status AS account_status,
+                membership.identity_type,
+                role_data.assignments AS role_assignments
+            ' . $from . $where . '
+            ORDER BY LOWER(u.name), LOWER(u.email), u.id
+            LIMIT ' . $pageSize . ' OFFSET ' . $offset . '
         ');
-        $stmt->execute([
-            'tenant_id' => $tenantId,
-            'role_id' => strtolower(trim($roleId)),
-        ]);
-        return array_map(static function (array $row): array {
-            $lockedUntil = strtotime((string)($row['login_locked_until'] ?? ''));
-            $profile = $row['profile'] ?? [];
-            if (is_string($profile)) {
-                $decodedProfile = json_decode($profile, true);
-                $profile = is_array($decodedProfile) ? $decodedProfile : [];
-            }
-            $roleIds = $row['role_ids'] ?? [];
-            if (is_string($roleIds)) {
-                $roleIds = trim($roleIds, '{}');
-                $roleIds = $roleIds === '' ? [] : str_getcsv($roleIds);
-            }
-            return [
-                'id' => (string)$row['id'],
-                'name' => (string)($row['name'] ?? ''),
-                'email' => (string)($row['email'] ?? ''),
-                'department' => (string)($profile['department'] ?? ''),
-                'position' => (string)($profile['position'] ?? ''),
-                'roles' => array_values(array_map('strval', is_array($roleIds) ? $roleIds : [])),
-                'status' => (string)($row['account_status'] ?? 'inactive'),
-                'accountStatus' => (string)($row['account_status'] ?? 'inactive'),
-                'identityType' => (string)($row['identity_type'] ?? 'tenant_staff'),
-                'lastLoginAt' => strtotime((string)($row['last_login_at'] ?? '')) !== false
-                    ? gmdate('c', strtotime((string)$row['last_login_at']))
-                    : null,
-                'securityLock' => [
-                    'isLocked' => $lockedUntil !== false && $lockedUntil > time(),
-                    'failedAttempts' => (int)($row['failed_login_attempts'] ?? 0),
-                    'lockedUntil' => $lockedUntil !== false ? gmdate('c', $lockedUntil) : null,
+        $data->execute($params);
+
+        $summary = $this->db->prepare('
+            SELECT
+                COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE membership.status = \'active\')::int AS active,
+                COUNT(*) FILTER (WHERE membership.status = \'invited\')::int AS invited,
+                COUNT(*) FILTER (WHERE membership.status = \'inactive\')::int AS inactive,
+                COUNT(*) FILTER (WHERE membership.status = \'blocked\')::int AS blocked,
+                COUNT(*) FILTER (WHERE u.login_locked_until > NOW())::int AS security_locked
+            FROM "User" u
+            JOIN tenant_memberships membership
+              ON membership.tenant_id = u.tenant_id
+             AND membership.user_id = u.id
+            WHERE u.tenant_id = :tenant_id
+              AND membership.identity_type = \'tenant_staff\'
+        ');
+        $summary->execute(['tenant_id' => $tenantId]);
+        $summaryRow = $summary->fetch() ?: [];
+
+        return [
+            'data' => array_map(fn (array $row): array => $this->tenantUserRecord($row), $data->fetchAll() ?: []),
+            'meta' => [
+                'page' => $page,
+                'pageSize' => $pageSize,
+                'totalItems' => $totalItems,
+                'totalPages' => $totalPages,
+                'summary' => [
+                    'total' => (int)($summaryRow['total'] ?? 0),
+                    'active' => (int)($summaryRow['active'] ?? 0),
+                    'invited' => (int)($summaryRow['invited'] ?? 0),
+                    'inactive' => (int)($summaryRow['inactive'] ?? 0),
+                    'blocked' => (int)($summaryRow['blocked'] ?? 0),
+                    'securityLocked' => (int)($summaryRow['security_locked'] ?? 0),
                 ],
-            ];
-        }, $stmt->fetchAll() ?: []);
+            ],
+        ];
+    }
+
+    public function revokeSessionsForRole(string $roleId, ?string $tenantId = null): int {
+        $tenantId = $tenantId ?: $this->tenantId();
+        $roleId = strtolower(trim($roleId));
+        $ownsTransaction = !$this->db->inTransaction();
+        if ($ownsTransaction) {
+            $this->db->beginTransaction();
+        }
+        try {
+            $affectedUsers = $this->revokeSessionsForRoleRows($roleId, $tenantId);
+            if ($ownsTransaction) {
+                $this->db->commit();
+            }
+            return $affectedUsers;
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
+        }
     }
 
     public function recordAuditEvent(
@@ -991,6 +1179,47 @@ class IdentityAccessRepository {
         }
     }
 
+    private function revokeSessionsForRoleRows(string $roleId, string $tenantId): int {
+        $sessions = $this->db->prepare('
+            UPDATE tenant_user_sessions
+            SET revoked_at = COALESCE(revoked_at, NOW()),
+                last_seen_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id IN (
+                  SELECT user_id
+                  FROM tenant_user_roles
+                  WHERE tenant_id = :assignment_tenant_id
+                    AND role_id = :role_id
+              )
+              AND revoked_at IS NULL
+        ');
+        $sessions->execute([
+            'tenant_id' => $tenantId,
+            'assignment_tenant_id' => $tenantId,
+            'role_id' => $roleId,
+        ]);
+
+        $tokens = $this->db->prepare('
+            UPDATE "User"
+            SET active_token_id = NULL,
+                updated_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND id IN (
+                  SELECT user_id
+                  FROM tenant_user_roles
+                  WHERE tenant_id = :assignment_tenant_id
+                    AND role_id = :role_id
+              )
+        ');
+        $tokens->execute([
+            'tenant_id' => $tenantId,
+            'assignment_tenant_id' => $tenantId,
+            'role_id' => $roleId,
+        ]);
+
+        return $tokens->rowCount();
+    }
+
     private function roleRecord(array $row): array {
         $permissions = $row['permissions'] ?? [];
         if (is_string($permissions)) {
@@ -1009,6 +1238,72 @@ class IdentityAccessRepository {
             'createdAt' => (string)($row['created_at'] ?? ''),
             'updatedAt' => (string)($row['updated_at'] ?? ''),
         ];
+    }
+
+    private function tenantUserRecord(array $row): array {
+        $profile = $row['profile'] ?? [];
+        if (is_string($profile)) {
+            $decoded = json_decode($profile, true);
+            $profile = is_array($decoded) ? $decoded : [];
+        }
+
+        $roleAssignments = $row['role_assignments'] ?? [];
+        if (is_string($roleAssignments)) {
+            $decoded = json_decode($roleAssignments, true);
+            $roleAssignments = is_array($decoded) ? $decoded : [];
+        }
+        $roleAssignments = array_values(array_filter(array_map(static function ($assignment): ?array {
+            if (!is_array($assignment)) {
+                return null;
+            }
+            $id = strtolower(trim((string)($assignment['id'] ?? '')));
+            if ($id === '') {
+                return null;
+            }
+            return [
+                'id' => $id,
+                'name' => trim((string)($assignment['name'] ?? $id)),
+                'system' => filter_var($assignment['system'] ?? false, FILTER_VALIDATE_BOOLEAN),
+            ];
+        }, is_array($roleAssignments) ? $roleAssignments : [])));
+
+        $lockedUntilTimestamp = strtotime((string)($row['login_locked_until'] ?? ''));
+        $securityLocked = $lockedUntilTimestamp !== false && $lockedUntilTimestamp > time();
+        $accountStatus = strtolower(trim((string)($row['account_status'] ?? 'inactive')));
+        if (!in_array($accountStatus, ['invited', 'active', 'inactive', 'blocked'], true)) {
+            $accountStatus = 'inactive';
+        }
+
+        return [
+            'id' => (string)($row['id'] ?? ''),
+            'name' => (string)($row['name'] ?? 'Usuario'),
+            'email' => (string)($row['email'] ?? ''),
+            'emailVerified' => filter_var($row['email_verified'] ?? false, FILTER_VALIDATE_BOOLEAN),
+            'phone' => trim((string)($profile['phone'] ?? '')) ?: null,
+            'department' => trim((string)($profile['department'] ?? '')),
+            'position' => trim((string)($profile['position'] ?? '')),
+            'description' => trim((string)($profile['description'] ?? '')) ?: null,
+            'roles' => array_values(array_map(static fn (array $assignment): string => $assignment['id'], $roleAssignments)),
+            'roleAssignments' => $roleAssignments,
+            'status' => $accountStatus,
+            'accountStatus' => $accountStatus,
+            'identityType' => (string)($row['identity_type'] ?? 'tenant_staff'),
+            'securityLock' => [
+                'isLocked' => $securityLocked,
+                'locked' => $securityLocked,
+                'failedAttempts' => (int)($row['failed_login_attempts'] ?? 0),
+                'lockedUntil' => $securityLocked ? gmdate('c', $lockedUntilTimestamp) : null,
+            ],
+            'createdAt' => $this->nullableIsoDate($row['created_at'] ?? null),
+            'updatedAt' => $this->nullableIsoDate($row['updated_at'] ?? null),
+            'lastLoginAt' => $this->nullableIsoDate($row['last_login_at'] ?? null),
+            'invitationStatus' => $accountStatus === 'invited' ? 'pending' : null,
+        ];
+    }
+
+    private function nullableIsoDate($value): ?string {
+        $timestamp = strtotime((string)($value ?? ''));
+        return $timestamp !== false ? gmdate('c', $timestamp) : null;
     }
 
     private function normalizeRoleIds(array $roleIds): array {
@@ -1042,6 +1337,28 @@ class IdentityAccessRepository {
         if ($invalid !== []) {
             throw new InvalidArgumentException('Uno o más roles no pertenecen al tenant activo.');
         }
+    }
+
+    private function systemRoleIds(array $roleIds, string $tenantId): array {
+        $roleIds = $this->normalizeRoleIds($roleIds);
+        if ($roleIds === []) {
+            return [];
+        }
+
+        $placeholders = [];
+        $params = ['tenant_id' => $tenantId];
+        foreach ($roleIds as $index => $roleId) {
+            $key = "system_role_{$index}";
+            $placeholders[] = ":{$key}";
+            $params[$key] = $roleId;
+        }
+        $stmt = $this->db->prepare(sprintf(
+            'SELECT role_id FROM tenant_roles WHERE tenant_id = :tenant_id AND system_role = TRUE AND role_id IN (%s)',
+            implode(', ', $placeholders)
+        ));
+        $stmt->execute($params);
+
+        return array_values(array_map('strval', $stmt->fetchAll(\PDO::FETCH_COLUMN) ?: []));
     }
 
     private function normalizeNavigationGrants(array $grants): array {
@@ -1084,6 +1401,32 @@ class IdentityAccessRepository {
         }
         ksort($normalized);
         return array_values($normalized);
+    }
+
+    private function assertOperationalRoleGrants(array $grants, string $tenantId): void {
+        $options = [];
+        $catalog = (new LoyaltyNavigationService())->catalog($tenantId);
+        foreach (is_array($catalog['options'] ?? null) ? $catalog['options'] : [] as $option) {
+            $key = strtolower(trim((string)($option['key'] ?? '')));
+            if ($key !== '') {
+                $options[$key] = $option;
+            }
+        }
+
+        foreach ($grants as $grant) {
+            $key = strtolower(trim((string)($grant['menuOptionKey'] ?? '')));
+            $option = $options[$key] ?? null;
+            if (
+                is_array($option)
+                && ($option['kind'] ?? '') === 'page'
+                && empty($option['mandatory'])
+                && in_array('view', $grant['actions'] ?? [], true)
+            ) {
+                return;
+            }
+        }
+
+        throw new InvalidArgumentException('Selecciona al menos una pantalla operativa para el rol.');
     }
 
     private function navigationPermissionMap(?string $tenantId = null): array {

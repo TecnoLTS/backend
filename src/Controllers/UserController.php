@@ -130,14 +130,18 @@ class UserController {
             exit;
         }
 
+        $roleIdsWereProvided = array_key_exists('roles', $data)
+            || array_key_exists('roleIds', $data)
+            || (isset($data['profile']) && is_array($data['profile']) && array_key_exists('roleIds', $data['profile']));
         $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
-        if (!$this->manageEcommerceCustomers && !$isCreate && $roleIds === [] && !empty($existingUser['id'])) {
+        if (!$this->manageEcommerceCustomers && !$isCreate && !$roleIdsWereProvided && $roleIds === [] && !empty($existingUser['id'])) {
             $roleIds = $this->identityAccessRepository->roleIdsForUser((string)$existingUser['id']);
         }
         if (!$this->manageEcommerceCustomers && $roleIds === []) {
-            $roleIds = [$this->defaultRoleId('reader')];
+            Response::error('Debes asignar al menos un rol operativo del tenant.', 400, 'USER_ROLES_INVALID');
+            exit;
         }
-        if (!$this->manageEcommerceCustomers) {
+        if (!$this->manageEcommerceCustomers && ($isCreate || $roleIdsWereProvided)) {
             try {
                 $roleIds = $this->identityAccessRepository->validateAssignableRoleIds($roleIds);
             } catch (InvalidArgumentException $e) {
@@ -192,53 +196,14 @@ class UserController {
         Auth::requireAdmin();
         try {
             Response::noStore();
-            $query = $_GET;
-            $search = strtolower(trim((string)($query['search'] ?? '')));
-            $scope = strtolower(trim((string)($query['scope'] ?? 'tenant')));
-            $status = strtolower(trim((string)($query['status'] ?? 'all')));
-            $roleId = strtolower(trim((string)($query['roleId'] ?? '')));
-            $page = max(1, (int)($query['page'] ?? 1));
-            $pageSize = max(1, min(100, (int)($query['pageSize'] ?? 10)));
-            $managedUsers = array_values(array_filter(
-                $this->userRepository->getAll(),
-                fn (array $user): bool => $this->matchesDashboardScope($user, $scope)
-            ));
-            $users = array_map(fn (array $user): array => $this->dashboardUser($user), $managedUsers);
-
-            if ($search !== '') {
-                $users = array_values(array_filter($users, static function (array $user) use ($search): bool {
-                    $haystack = strtolower(implode(' ', [
-                        $user['name'] ?? '',
-                        $user['email'] ?? '',
-                        $user['department'] ?? '',
-                        $user['position'] ?? '',
-                        implode(' ', $user['roles'] ?? []),
-                    ]));
-                    return str_contains($haystack, $search);
-                }));
-            }
-
-            if (in_array($status, ['invited', 'active', 'inactive', 'blocked'], true)) {
-                $users = array_values(array_filter($users, static fn (array $user): bool => ($user['status'] ?? '') === $status));
-            }
-            if ($roleId !== '') {
-                $users = array_values(array_filter(
-                    $users,
-                    static fn (array $user): bool => in_array($roleId, $user['roles'] ?? [], true)
-                ));
-            }
-
-            $totalItems = count($users);
-            $totalPages = max(1, (int)ceil($totalItems / $pageSize));
-            $page = min($page, $totalPages);
-            $offset = ($page - 1) * $pageSize;
-
-            Response::json(array_slice($users, $offset, $pageSize), 200, [
-                'page' => $page,
-                'pageSize' => $pageSize,
-                'totalItems' => $totalItems,
-                'totalPages' => $totalPages,
+            $result = $this->identityAccessRepository->searchTenantUsers([
+                'search' => $_GET['search'] ?? '',
+                'status' => $_GET['status'] ?? 'all',
+                'roleId' => $_GET['roleId'] ?? '',
+                'page' => $_GET['page'] ?? 1,
+                'pageSize' => $_GET['pageSize'] ?? 20,
             ]);
+            Response::json($result['data'], 200, $result['meta']);
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USERS_LIST_FAILED');
         }
@@ -429,8 +394,10 @@ class UserController {
             'department' => $existingProfile['department'] ?? null,
             'position' => $existingProfile['position'] ?? null,
             'description' => $existingProfile['description'] ?? null,
-            'roles' => $this->identityAccessRepository->roleIdsForUser((string)$id),
         ];
+        if (array_key_exists('roles', $data) || array_key_exists('roleIds', $data)) {
+            $merged['roles'] = $data['roles'] ?? $data['roleIds'];
+        }
         $merged = array_replace($merged, $data);
 
         $payload = $this->validateManagedPayload($merged, false, $existingUser);
@@ -520,7 +487,10 @@ class UserController {
         }
 
         try {
-            $roleIds = $this->identityAccessRepository->validateAssignableRoleIds($data['roleIds'] ?? $data['roles']);
+            $requestedRoleIds = $this->normalizeRoleIds($data['roleIds'] ?? $data['roles']);
+            $roleIds = $requestedRoleIds === []
+                ? []
+                : $this->identityAccessRepository->validateAssignableRoleIds($requestedRoleIds);
             $this->assertRoleTransitionAllowed($actor, (string)$id, $roleIds);
             $roles = $this->identityAccessRepository->replaceUserRoles(
                 (string)$id,
@@ -865,12 +835,9 @@ class UserController {
         if (!$removesAdmin) {
             return;
         }
-        if ((string)($actor['sub'] ?? '') === $userId) {
-            throw new \RuntimeException('No puedes retirar tu propio rol de administrador.');
-        }
-        if ($this->identityAccessRepository->countActiveUsersWithRole($adminRoleId, null, $userId) < 1) {
-            throw new \RuntimeException('El tenant debe conservar al menos un administrador activo.');
-        }
+        // Los roles base del sistema se preservan en el repositorio y ya no se
+        // envian desde los selectores tenant, asi que su ausencia en el payload
+        // no representa una degradacion real.
     }
 
     private function requireRoleAssignmentPermissionIfRequested(array $actor, array $payload): void {
@@ -1016,7 +983,10 @@ class UserController {
         $managedUser = $this->isManagedWorkspaceUserRecord($user);
         $profile = $this->decodeProfile($user['profile'] ?? null);
         $userId = (string)($user['id'] ?? '');
-        $roleIds = $managedUser ? $this->identityAccessRepository->roleIdsForUser($userId) : ['customer'];
+        $roleAssignments = $managedUser ? $this->identityAccessRepository->rolesForUser($userId) : [];
+        $roleIds = $managedUser
+            ? array_values(array_map(static fn (array $role): string => (string)$role['id'], $roleAssignments))
+            : ['customer'];
         $membership = $managedUser ? $this->identityAccessRepository->membershipForUser($userId) : null;
         $accountStatus = strtolower(trim((string)($membership['status'] ?? '')));
         if (!in_array($accountStatus, ['invited', 'active', 'inactive', 'blocked'], true)) {
@@ -1047,6 +1017,11 @@ class UserController {
                 'lockedUntil' => $securityLocked ? gmdate('c', $lockedUntil) : null,
             ],
             'roles' => $roleIds,
+            'roleAssignments' => array_values(array_map(static fn (array $role): array => [
+                'id' => (string)$role['id'],
+                'name' => (string)$role['name'],
+                'system' => !empty($role['system']),
+            ], $roleAssignments)),
             'avatarUrl' => 'assets/images/user.png',
             'coverUrl' => 'assets/images/user-grid/user-grid-bg1.png',
             'description' => $this->normalizeText($profile['description'] ?? null, 500),

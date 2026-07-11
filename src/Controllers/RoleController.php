@@ -8,7 +8,6 @@ use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
 use App\Repositories\SettingsRepository;
-use App\Repositories\UserRepository;
 use InvalidArgumentException;
 use RuntimeException;
 
@@ -89,9 +88,20 @@ class RoleController {
         ];
 
         try {
-            $navigationGrants = $this->isFidepuntos() && is_array($data['navigationGrants'] ?? null)
-                ? $this->identityAccessRepository->validateRoleNavigationGrants($data['navigationGrants'])
-                : [];
+            if ($this->isFidepuntos()) {
+                if (!is_array($data['navigationGrants'] ?? null)) {
+                    Response::error('Selecciona al menos una pantalla operativa.', 400, 'ROLE_GRANTS_INVALID');
+                    return;
+                }
+                $created = $this->identityAccessRepository->createCustomRoleWithNavigationGrants(
+                    $role,
+                    $data['navigationGrants'],
+                    (string)($actor['sub'] ?? '')
+                );
+                Response::json($created, 201);
+                return;
+            }
+
             $this->identityAccessRepository->syncRole($role);
             $this->identityAccessRepository->recordAuditEvent(
                 (string)($actor['sub'] ?? ''),
@@ -101,15 +111,6 @@ class RoleController {
                 ['name' => $role['name'], 'permissions' => $role['permissions']]
             );
             $created = $this->identityAccessRepository->role($role['id']);
-
-            if ($navigationGrants !== []) {
-                $this->identityAccessRepository->replaceRoleNavigationGrants(
-                    $role['id'],
-                    $navigationGrants,
-                    (string)($actor['sub'] ?? '')
-                );
-                $created = $this->identityAccessRepository->role($role['id']);
-            }
             Response::json($created ?: $role, 201);
         } catch (InvalidArgumentException $e) {
             Response::error($e->getMessage(), 400, 'ROLE_PAYLOAD_INVALID');
@@ -204,19 +205,11 @@ class RoleController {
         }
 
         try {
-            $affectedUsers = $this->identityAccessRepository->usersForRole($this->normalizeId($roleId));
             $this->identityAccessRepository->replaceRoleNavigationGrants(
                 $this->normalizeId($roleId),
                 $grants,
                 (string)($actor['sub'] ?? '')
             );
-            $users = new UserRepository();
-            foreach ($affectedUsers as $affectedUser) {
-                $userId = trim((string)($affectedUser['id'] ?? ''));
-                if ($userId !== '') {
-                    $users->revokeSessions($userId);
-                }
-            }
             Response::json($this->identityAccessRepository->role($this->normalizeId($roleId)));
         } catch (InvalidArgumentException $e) {
             Response::error($e->getMessage(), 400, 'ROLE_GRANTS_INVALID');
@@ -235,7 +228,13 @@ class RoleController {
             return;
         }
         Response::noStore();
-        Response::json($this->identityAccessRepository->usersForRole($roleId));
+        $result = $this->identityAccessRepository->searchTenantUsers([
+            'roleId' => $roleId,
+            'search' => $_GET['search'] ?? '',
+            'page' => $_GET['page'] ?? 1,
+            'pageSize' => $_GET['pageSize'] ?? 20,
+        ]);
+        Response::json($result['data'], 200, $result['meta']);
     }
 
     private function requestJson(): array {

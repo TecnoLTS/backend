@@ -270,6 +270,7 @@ $unionRoleA = $marker . '_purchase_role';
 $unionRoleB = $marker . '_redeem_role';
 $ephemeralAdminRole = $ephemeralTenant . '_admin';
 $ephemeralReaderRole = $ephemeralTenant . '_reader';
+$ephemeralCustomRole = $marker . '_operator_role';
 $sessionOne = $marker . '_session_one';
 $sessionTwo = $marker . '_session_two';
 $sessionThree = $marker . '_session_three';
@@ -449,6 +450,7 @@ try {
         [$tenantId, $unionRoleB, 'Canje efimero', false],
         [$ephemeralTenant, $ephemeralAdminRole, 'Administrador efimero', true],
         [$ephemeralTenant, $ephemeralReaderRole, 'Lector efimero', true],
+        [$ephemeralTenant, $ephemeralCustomRole, 'Operador efimero', false],
     ] as [$roleTenant, $roleId, $name, $system]) {
         $insertRole->execute([
             'tenant_id' => $roleTenant,
@@ -539,6 +541,33 @@ try {
     );
     fwrite(STDOUT, "[OK] composicion de acceso: union de roles e implicacion automatica de view.\n");
 
+    $pagedUsers = $identityRepository->searchTenantUsers([
+        'search' => 'Union RBAC',
+        'roleId' => $unionRoleA,
+        'status' => 'active',
+        'page' => 1,
+        'pageSize' => 1,
+    ], $tenantId);
+    assertRbacDatabaseCheck(
+        count($pagedUsers['data'] ?? []) === 1
+            && (int)($pagedUsers['meta']['totalItems'] ?? 0) === 1
+            && (int)($pagedUsers['meta']['summary']['active'] ?? 0) >= 1,
+        'La busqueda paginada de usuarios no aplico filtros o resumen correctamente.'
+    );
+    assertSameStringSet(
+        [$unionRoleA, $unionRoleB],
+        array_map(
+            static fn (array $assignment): string => (string)$assignment['id'],
+            $pagedUsers['data'][0]['roleAssignments'] ?? []
+        ),
+        'La lista de usuarios no agrego los roles como JSON estructurado.'
+    );
+    assertRbacDatabaseCheck(
+        count($identityRepository->usersForRole($unionRoleA, $tenantId)) === 1,
+        'La consulta de usuarios por rol fallo bajo el manejador estricto de PHP.'
+    );
+    fwrite(STDOUT, "[OK] usuarios: filtros SQL, paginacion, resumen y roles JSON.\n");
+
     assertSameStringSet(
         [$unionRoleA, $unionRoleB],
         $identityRepository->validateAssignableRoleIds([$unionRoleA, $unionRoleB], $tenantId),
@@ -555,6 +584,12 @@ try {
         InvalidArgumentException::class,
         'no pertenecen',
         'Se acepto un rol inexistente.'
+    );
+    expectRbacDatabaseException(
+        static fn () => $identityRepository->validateAssignableRoleIds([$readerRoleId], $tenantId),
+        InvalidArgumentException::class,
+        'base del sistema',
+        'Se acepto asignar desde tenant un rol base del sistema.'
     );
     foreach (['platform_admin', 'superadmin'] as $reservedRole) {
         expectRbacDatabaseException(
@@ -585,6 +620,15 @@ try {
     assertRbacDatabaseCheck($userRepository->relationalSessionIsActive($fixtureUser, $sessionTwo) === false, 'Una sesion secundaria continuo activa.');
     assertRbacDatabaseCheck($userRepository->relationalSessionIsActive($fixtureUser, $sessionThree) === false, 'Una sesion secundaria continuo activa.');
     fwrite(STDOUT, "[OK] sesiones: tres activas y revocacion selectiva de las otras dos.\n");
+    assertRbacDatabaseCheck(
+        $identityRepository->revokeSessionsForRole($unionRoleA, $tenantId) === 1,
+        'La revocacion masiva por rol no afecto al usuario asignado.'
+    );
+    assertRbacDatabaseCheck(
+        $userRepository->relationalSessionIsActive($fixtureUser, $sessionOne) === false,
+        'La revocacion masiva por rol dejo activa la sesion principal.'
+    );
+    fwrite(STDOUT, "[OK] sesiones: revocacion masiva de usuarios afectados por un rol.\n");
 
     $accountLinkRepository = new PasswordResetTokenRepository();
     injectRbacDatabaseConnection($accountLinkRepository, $pdo);
@@ -888,23 +932,12 @@ try {
         static fn () => $identityRepository->replaceUserRoles(
             $firstAdminUser,
             [$ephemeralReaderRole],
-            $firstAdminUser,
-            $ephemeralTenant
-        ),
-        RuntimeException::class,
-        'propio rol',
-        'El administrador pudo degradarse a si mismo.'
-    );
-    expectRbacDatabaseException(
-        static fn () => $identityRepository->replaceUserRoles(
-            $firstAdminUser,
-            [$ephemeralReaderRole],
             $secondAdminUser,
             $ephemeralTenant
         ),
-        RuntimeException::class,
-        'al menos un administrador',
-        'Se pudo retirar el rol del ultimo administrador activo.'
+        InvalidArgumentException::class,
+        'base del sistema',
+        'Se pudo asignar un rol base desde la API tenant.'
     );
     expectRbacDatabaseException(
         static fn () => $identityRepository->updateMembershipStatus(
@@ -942,26 +975,20 @@ try {
     ]);
     $identityRepository->replaceUserRoles(
         $firstAdminUser,
-        [$ephemeralReaderRole],
+        [$ephemeralCustomRole],
         $secondAdminUser,
         $ephemeralTenant
     );
+    assertSameStringSet(
+        [$ephemeralAdminRole, $ephemeralCustomRole],
+        $identityRepository->roleIdsForUser($firstAdminUser, $ephemeralTenant),
+        'La mutacion valida no preservo el rol base administrador junto al rol operativo.'
+    );
     assertRbacDatabaseCheck(
-        $identityRepository->countActiveUsersWithRole($ephemeralAdminRole, $ephemeralTenant) === 1,
-        'La mutacion valida no conservo exactamente un administrador activo.'
+        $identityRepository->countActiveUsersWithRole($ephemeralAdminRole, $ephemeralTenant) === 2,
+        'La mutacion valida no preservo los administradores activos.'
     );
-    expectRbacDatabaseException(
-        static fn () => $identityRepository->updateMembershipStatus(
-            $secondAdminUser,
-            'inactive',
-            $firstAdminUser,
-            $ephemeralTenant
-        ),
-        RuntimeException::class,
-        'al menos un administrador',
-        'Se pudo inactivar al nuevo ultimo administrador activo.'
-    );
-    fwrite(STDOUT, "[OK] protecciones: auto-degradacion, auto-bloqueo y ultimo administrador.\n");
+    fwrite(STDOUT, "[OK] protecciones: roles base protegidos, auto-bloqueo y ultimo administrador.\n");
 
     TenantContext::set([
         'id' => $tenantId,
