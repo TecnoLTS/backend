@@ -120,6 +120,50 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             assigned_at timestamp without time zone DEFAULT NOW() NOT NULL,
             PRIMARY KEY (tenant_id, user_id, role_id)
         )',
+        'CREATE TABLE IF NOT EXISTS tenant_role_navigation_grants (
+            tenant_id text NOT NULL,
+            role_id text NOT NULL,
+            menu_option_key text NOT NULL,
+            action_key text NOT NULL,
+            assigned_by_user_id text,
+            granted_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, role_id, menu_option_key, action_key),
+            CONSTRAINT tenant_role_navigation_grants_action_check
+                CHECK (action_key IN (
+                    \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
+                    \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\'
+                )),
+            CONSTRAINT tenant_role_navigation_grants_role_fk
+                FOREIGN KEY (tenant_id, role_id)
+                REFERENCES tenant_roles (tenant_id, role_id)
+                ON DELETE RESTRICT
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_access_audit_events (
+            id bigserial PRIMARY KEY,
+            tenant_id text NOT NULL,
+            actor_user_id text,
+            event_type text NOT NULL,
+            target_type text NOT NULL,
+            target_id text,
+            metadata jsonb NOT NULL DEFAULT \'{}\'::jsonb,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL
+        )',
+        'CREATE TABLE IF NOT EXISTS tenant_user_sessions (
+            tenant_id text NOT NULL,
+            user_id text NOT NULL,
+            session_id text NOT NULL,
+            auth_surface text NOT NULL DEFAULT \'dashboard\',
+            ip_address text,
+            user_agent text,
+            expires_at timestamp without time zone NOT NULL,
+            revoked_at timestamp without time zone,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            last_seen_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            PRIMARY KEY (tenant_id, user_id, session_id),
+            CONSTRAINT tenant_user_sessions_surface_check
+                CHECK (auth_surface IN (\'dashboard\', \'ecommerce\'))
+        )',
         'CREATE TABLE IF NOT EXISTS "Product" (
             id text PRIMARY KEY,
             tenant_id text,
@@ -357,6 +401,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             tenant_id text NOT NULL,
             user_id text NOT NULL,
             token_hash text NOT NULL,
+            purpose text NOT NULL DEFAULT \'password_reset\',
+            created_by_user_id text,
             expires_at timestamp without time zone NOT NULL,
             used_at timestamp without time zone,
             request_ip text,
@@ -371,6 +417,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             tenant_id text NOT NULL,
             user_id text NOT NULL,
             token_hash text NOT NULL,
+            purpose text NOT NULL DEFAULT \'password_reset\',
+            created_by_user_id text,
             expires_at timestamp without time zone NOT NULL,
             used_at timestamp without time zone,
             request_ip text,
@@ -524,6 +572,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS login_locked_until timestamp',
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS last_login_at timestamp',
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS active_token_id text',
+        'ALTER TABLE "PasswordResetToken" ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAULT \'password_reset\'',
+        'ALTER TABLE "PasswordResetToken" ADD COLUMN IF NOT EXISTS created_by_user_id text',
         'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS addresses jsonb',
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS profile jsonb',
@@ -537,6 +587,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS login_locked_until timestamp',
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS last_login_at timestamp',
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS active_token_id text',
+        'ALTER TABLE "CustomerPasswordResetToken" ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAULT \'password_reset\'',
+        'ALTER TABLE "CustomerPasswordResetToken" ADD COLUMN IF NOT EXISTS created_by_user_id text',
         'ALTER TABLE "Customer" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS product_type text',
@@ -709,6 +761,60 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS tenant_memberships_identity_idx ON tenant_memberships (tenant_id, identity_type, status)',
         'CREATE INDEX IF NOT EXISTS tenant_roles_system_idx ON tenant_roles (tenant_id, system_role)',
         'CREATE INDEX IF NOT EXISTS tenant_user_roles_role_idx ON tenant_user_roles (tenant_id, role_id)',
+        'CREATE INDEX IF NOT EXISTS tenant_user_roles_user_idx ON tenant_user_roles (tenant_id, user_id, assigned_at DESC)',
+        'CREATE INDEX IF NOT EXISTS tenant_role_navigation_grants_role_idx ON tenant_role_navigation_grants (tenant_id, role_id, menu_option_key)',
+        'CREATE INDEX IF NOT EXISTS tenant_role_navigation_grants_option_idx ON tenant_role_navigation_grants (tenant_id, menu_option_key, action_key)',
+        'CREATE INDEX IF NOT EXISTS tenant_access_audit_events_created_idx ON tenant_access_audit_events (tenant_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS tenant_access_audit_events_actor_idx ON tenant_access_audit_events (tenant_id, actor_user_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS tenant_access_audit_events_target_idx ON tenant_access_audit_events (tenant_id, target_type, target_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS tenant_user_sessions_active_idx ON tenant_user_sessions (tenant_id, user_id, expires_at DESC) WHERE revoked_at IS NULL',
+        'UPDATE tenant_memberships
+            SET identity_type = CASE
+                WHEN identity_type IN (\'platform\', \'tenant_staff\', \'customer\', \'service\') THEN identity_type
+                ELSE \'customer\'
+            END,
+            status = CASE
+                WHEN status IN (\'invited\', \'active\', \'inactive\', \'blocked\') THEN status
+                ELSE \'inactive\'
+            END',
+        'DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = \'tenant_memberships_identity_type_check\'
+            ) THEN
+                ALTER TABLE tenant_memberships
+                    ADD CONSTRAINT tenant_memberships_identity_type_check
+                    CHECK (identity_type IN (\'platform\', \'tenant_staff\', \'customer\', \'service\'));
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = \'tenant_memberships_status_check\'
+            ) THEN
+                ALTER TABLE tenant_memberships
+                    ADD CONSTRAINT tenant_memberships_status_check
+                    CHECK (status IN (\'invited\', \'active\', \'inactive\', \'blocked\'));
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = \'tenant_user_roles_role_fk\'
+            ) THEN
+                ALTER TABLE tenant_user_roles
+                    ADD CONSTRAINT tenant_user_roles_role_fk
+                    FOREIGN KEY (tenant_id, role_id)
+                    REFERENCES tenant_roles (tenant_id, role_id)
+                    ON DELETE RESTRICT
+                    NOT VALID;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = \'tenant_role_navigation_grants_action_check\'
+            ) THEN
+                ALTER TABLE tenant_role_navigation_grants
+                    ADD CONSTRAINT tenant_role_navigation_grants_action_check
+                    CHECK (action_key IN (
+                        \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
+                        \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\'
+                    ));
+            END IF;
+        END
+        $$',
         'INSERT INTO tenant_memberships (tenant_id, user_id, identity_type, status, created_at, updated_at)
             SELECT
                 COALESCE(u.tenant_id, \'' . str_replace("'", "''", $defaultTenant) . '\'),
@@ -812,8 +918,33 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
     ];
 
     $skipConstraints = array_flip(array_map('strval', $options['skip_constraints'] ?? []));
+    $identityOwnerIsRemote = (bool)$pdo->query("
+        SELECT 1
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'tenant_roles'
+          AND relation.relkind = 'f'
+        LIMIT 1
+    ")->fetchColumn();
+    $identityContractTables = [
+        'tenant_module_entitlements',
+        'tenant_memberships',
+        'tenant_roles',
+        'tenant_user_roles',
+        'tenant_role_navigation_grants',
+        'tenant_access_audit_events',
+        'tenant_user_sessions',
+    ];
 
     foreach ($statements as $sql) {
+        if ($identityOwnerIsRemote) {
+            foreach ($identityContractTables as $identityTable) {
+                if (str_contains($sql, $identityTable)) {
+                    continue 2;
+                }
+            }
+        }
         foreach ($skipConstraints as $constraintName => $_) {
             if ($constraintName !== '' && str_contains($sql, $constraintName)) {
                 continue 2;

@@ -2,6 +2,7 @@
 
 namespace App\Modules\LoyaltyRewards\Infrastructure;
 
+use App\Modules\LoyaltyRewards\Domain\LoyaltyNavigationCatalog;
 use PDO;
 
 final class LoyaltySchema {
@@ -10,8 +11,10 @@ final class LoyaltySchema {
     public function ensure(): void {
         $this->createCoreTables();
         $this->createOperationalTables();
+        $this->createNavigationTables();
         $this->addCompatibilityColumns();
         $this->createIndexes();
+        $this->seedNavigationCatalog();
     }
 
     public function defaultSettings(): array {
@@ -358,6 +361,184 @@ final class LoyaltySchema {
             ON loyalty_wallet_campaign_recipients (tenant_id, status)');
     }
 
+    private function createNavigationTables(): void {
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_navigation_items (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            item_key text NOT NULL,
+            parent_item_key text,
+            item_kind text NOT NULL,
+            label text NOT NULL,
+            icon text,
+            route_key text,
+            sort_order integer NOT NULL DEFAULT 0,
+            depth smallint NOT NULL DEFAULT 1,
+            mandatory boolean NOT NULL DEFAULT false,
+            status text NOT NULL DEFAULT \'active\',
+            catalog_version text NOT NULL,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            UNIQUE (tenant_id, item_key),
+            CONSTRAINT loyalty_navigation_items_kind_check
+                CHECK (item_kind IN (\'section\', \'group\', \'page\')),
+            CONSTRAINT loyalty_navigation_items_status_check
+                CHECK (status IN (\'active\', \'inactive\')),
+            CONSTRAINT loyalty_navigation_items_depth_check
+                CHECK (depth BETWEEN 0 AND 3),
+            CONSTRAINT loyalty_navigation_items_section_shape_check
+                CHECK (
+                    (item_kind = \'section\' AND parent_item_key IS NULL AND depth = 0 AND route_key IS NULL)
+                    OR
+                    (item_kind <> \'section\' AND parent_item_key IS NOT NULL AND depth BETWEEN 1 AND 3)
+                ),
+            CONSTRAINT loyalty_navigation_items_page_route_check
+                CHECK (item_kind <> \'page\' OR route_key IS NOT NULL),
+            CONSTRAINT loyalty_navigation_items_parent_fk
+                FOREIGN KEY (tenant_id, parent_item_key)
+                REFERENCES loyalty_navigation_items (tenant_id, item_key)
+                DEFERRABLE INITIALLY DEFERRED
+        )');
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_navigation_item_actions (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            item_key text NOT NULL,
+            action_key text NOT NULL,
+            permission_key text NOT NULL,
+            label text NOT NULL,
+            dangerous boolean NOT NULL DEFAULT false,
+            sort_order integer NOT NULL DEFAULT 0,
+            status text NOT NULL DEFAULT \'active\',
+            catalog_version text NOT NULL,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            UNIQUE (tenant_id, item_key, action_key),
+            UNIQUE (tenant_id, permission_key),
+            CONSTRAINT loyalty_navigation_actions_action_check
+                CHECK (action_key IN (
+                    \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
+                    \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\'
+                )),
+            CONSTRAINT loyalty_navigation_actions_status_check
+                CHECK (status IN (\'active\', \'inactive\')),
+            CONSTRAINT loyalty_navigation_actions_item_fk
+                FOREIGN KEY (tenant_id, item_key)
+                REFERENCES loyalty_navigation_items (tenant_id, item_key)
+                ON DELETE CASCADE
+        )');
+    }
+
+    private function seedNavigationCatalog(): void {
+        $tenantId = LoyaltyNavigationCatalog::INITIAL_TENANT_ID;
+        $version = LoyaltyNavigationCatalog::VERSION;
+        $ownsTransaction = !$this->pdo->inTransaction();
+        if ($ownsTransaction) {
+            $this->pdo->beginTransaction();
+        }
+
+        try {
+            // Las acciones no son editables por administradores. Se reconstruyen
+            // de forma atomica para que una version futura pueda mover una
+            // permission_key entre opciones sin chocar con el UNIQUE tenant.
+            $deleteActions = $this->pdo->prepare(
+                'DELETE FROM loyalty_navigation_item_actions WHERE tenant_id = :tenant_id'
+            );
+            $deleteActions->execute(['tenant_id' => $tenantId]);
+
+            $itemStatement = $this->pdo->prepare(
+                'INSERT INTO loyalty_navigation_items
+                    (id, tenant_id, item_key, parent_item_key, item_kind, label, icon, route_key,
+                     sort_order, depth, mandatory, status, catalog_version)
+                 VALUES
+                    (:id, :tenant_id, :item_key, :parent_item_key, :item_kind, :label, :icon, :route_key,
+                     :sort_order, :depth, :mandatory, \'active\', :catalog_version)
+                 ON CONFLICT (tenant_id, item_key) DO UPDATE SET
+                    parent_item_key = EXCLUDED.parent_item_key,
+                    item_kind = EXCLUDED.item_kind,
+                    label = EXCLUDED.label,
+                    icon = EXCLUDED.icon,
+                    route_key = EXCLUDED.route_key,
+                    sort_order = EXCLUDED.sort_order,
+                    depth = EXCLUDED.depth,
+                    mandatory = EXCLUDED.mandatory,
+                    status = \'active\',
+                    catalog_version = EXCLUDED.catalog_version,
+                    updated_at = NOW()'
+            );
+            $actionStatement = $this->pdo->prepare(
+                'INSERT INTO loyalty_navigation_item_actions
+                    (id, tenant_id, item_key, action_key, permission_key, label, dangerous,
+                     sort_order, status, catalog_version)
+                 VALUES
+                    (:id, :tenant_id, :item_key, :action_key, :permission_key, :label, :dangerous,
+                     :sort_order, \'active\', :catalog_version)
+                 ON CONFLICT (tenant_id, item_key, action_key) DO UPDATE SET
+                    permission_key = EXCLUDED.permission_key,
+                    label = EXCLUDED.label,
+                    dangerous = EXCLUDED.dangerous,
+                    sort_order = EXCLUDED.sort_order,
+                    status = \'active\',
+                    catalog_version = EXCLUDED.catalog_version,
+                    updated_at = NOW()'
+            );
+
+            foreach (LoyaltyNavigationCatalog::definitions() as $definition) {
+                $itemKey = (string)$definition['key'];
+                $itemStatement->execute([
+                    'id' => $this->navigationId('nav', $tenantId, $itemKey),
+                    'tenant_id' => $tenantId,
+                    'item_key' => $itemKey,
+                    'parent_item_key' => $definition['parentKey'],
+                    'item_kind' => $definition['kind'],
+                    'label' => $definition['label'],
+                    'icon' => $definition['icon'],
+                    'route_key' => $definition['routeKey'],
+                    'sort_order' => $definition['sortOrder'],
+                    'depth' => $definition['depth'],
+                    'mandatory' => !empty($definition['mandatory']) ? 'true' : 'false',
+                    'catalog_version' => $version,
+                ]);
+
+                foreach ($definition['actions'] as $actionOrder => $action) {
+                    $actionKey = (string)$action['key'];
+                    $actionStatement->execute([
+                        'id' => $this->navigationId('nav_action', $tenantId, $itemKey . ':' . $actionKey),
+                        'tenant_id' => $tenantId,
+                        'item_key' => $itemKey,
+                        'action_key' => $actionKey,
+                        'permission_key' => $action['permissionKey'],
+                        'label' => $action['label'],
+                        'dangerous' => !empty($action['dangerous']) ? 'true' : 'false',
+                        'sort_order' => ($actionOrder + 1) * 10,
+                        'catalog_version' => $version,
+                    ]);
+                }
+            }
+
+            $deactivateItems = $this->pdo->prepare(
+                'UPDATE loyalty_navigation_items
+                 SET status = \'inactive\', updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND catalog_version <> :catalog_version'
+            );
+            $deactivateItems->execute(['tenant_id' => $tenantId, 'catalog_version' => $version]);
+
+            $deactivateActions = $this->pdo->prepare(
+                'UPDATE loyalty_navigation_item_actions
+                 SET status = \'inactive\', updated_at = NOW()
+                 WHERE tenant_id = :tenant_id AND catalog_version <> :catalog_version'
+            );
+            $deactivateActions->execute(['tenant_id' => $tenantId, 'catalog_version' => $version]);
+
+            if ($ownsTransaction) {
+                $this->pdo->commit();
+            }
+        } catch (\Throwable $exception) {
+            if ($ownsTransaction && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            throw $exception;
+        }
+    }
+
     private function addCompatibilityColumns(): void {
         $this->addColumnIfMissing('loyalty_point_ledger', 'source_reference', 'text');
         $this->addColumnIfMissing('loyalty_point_ledger', 'reversed_at', 'timestamp without time zone');
@@ -406,6 +587,8 @@ final class LoyaltySchema {
         $this->createIndexIfMissing('loyalty_api_clients_hash_idx', 'CREATE INDEX loyalty_api_clients_hash_idx ON loyalty_api_clients (tenant_id, key_hash)');
         $this->createIndexIfMissing('loyalty_audit_tenant_created_idx', 'CREATE INDEX loyalty_audit_tenant_created_idx ON loyalty_audit_events (tenant_id, created_at DESC)');
         $this->createIndexIfMissing('loyalty_risk_tenant_created_idx', 'CREATE INDEX loyalty_risk_tenant_created_idx ON loyalty_risk_events (tenant_id, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_navigation_items_tenant_tree_idx', 'CREATE INDEX loyalty_navigation_items_tenant_tree_idx ON loyalty_navigation_items (tenant_id, status, parent_item_key, sort_order)');
+        $this->createIndexIfMissing('loyalty_navigation_actions_tenant_item_idx', 'CREATE INDEX loyalty_navigation_actions_tenant_item_idx ON loyalty_navigation_item_actions (tenant_id, status, item_key, sort_order)');
     }
 
     private function addColumnIfMissing(string $table, string $column, string $definition): void {
@@ -465,5 +648,9 @@ final class LoyaltySchema {
         } catch (\Throwable) {
             // Optional index that depends on extension availability or DB privileges.
         }
+    }
+
+    private function navigationId(string $prefix, string $tenantId, string $key): string {
+        return $prefix . '_' . substr(hash('sha256', $tenantId . '|' . $key), 0, 24);
     }
 }

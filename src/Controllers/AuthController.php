@@ -12,6 +12,7 @@ use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 use App\Services\MailService;
 use App\Services\SessionSettingsService;
+use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
 use Firebase\JWT\JWT;
 use App\Core\Auth;
 use App\Core\AuthSurface;
@@ -473,6 +474,13 @@ class AuthController {
 
         $this->userRepository->markSuccessfulLogin($user['id']);
         $this->userRepository->setActiveTokenId($user['id'], $tokenId);
+        $this->userRepository->registerSession(
+            (string)$user['id'],
+            $tokenId,
+            $expiresAt,
+            $this->getClientIp(),
+            $this->getUserAgent()
+        );
         $jwt = JWT::encode($payload, $secretKey, 'HS256');
         Response::noStore();
         Response::setAuthCookie($jwt, $expiresAt);
@@ -510,6 +518,7 @@ class AuthController {
         ];
 
         $jwt = JWT::encode($refreshedPayload, $secretKey, 'HS256');
+        $this->userRepository->refreshSessionExpiry((string)$user['id'], $tokenId, $expiresAt);
         Response::setAuthCookie($jwt, $expiresAt);
         Response::ensureCsrfCookie($expiresAt);
     }
@@ -575,6 +584,15 @@ class AuthController {
                 ]);
             }
             Response::error('Credenciales inválidas', 401, 'AUTH_LOGIN_INVALID');
+            return;
+        }
+
+        $accountStatus = strtolower(trim((string)($user['account_status'] ?? '')));
+        if ($this->authSurface === AuthSurface::DASHBOARD && $accountStatus !== '' && $accountStatus !== 'active') {
+            $this->recordAuthEvent($user, 'login_account_disabled', 'blocked', [
+                'account_status' => $accountStatus,
+            ]);
+            Response::error('La cuenta no está activa. Contacta al administrador del tenant.', 403, 'AUTH_ACCOUNT_NOT_ACTIVE');
             return;
         }
 
@@ -679,7 +697,10 @@ class AuthController {
     public function logout() {
         $payload = Auth::optionalUser();
         if ($payload && !empty($payload['sub'])) {
-            $this->userRepository->clearActiveTokenId((string)$payload['sub']);
+            $this->userRepository->revokeSession(
+                (string)$payload['sub'],
+                (string)($payload['jti'] ?? '')
+            );
         }
         Response::noStore();
         Response::clearAuthCookie();
@@ -1167,18 +1188,59 @@ class AuthController {
                 return;
             }
 
-            $this->userRepository->resetPasswordAfterRecovery(
-                $userId,
-                password_hash($password, PASSWORD_DEFAULT),
-                bin2hex(random_bytes(16))
-            );
-            $this->passwordResetTokenRepository->markUsed(
-                (string)$resetToken['id'],
-                $this->getClientIp(),
-                $this->getUserAgent()
-            );
+            $this->passwordResetTokenRepository->beginTransaction();
+            try {
+                $resetToken = $this->passwordResetTokenRepository->consumeValidToken(
+                    $this->tokenHash($token),
+                    $this->getClientIp(),
+                    $this->getUserAgent()
+                );
+                if (!$resetToken) {
+                    throw new \RuntimeException('PASSWORD_RESET_TOKEN_REUSED');
+                }
 
-            $this->recordAuthEvent($user, 'password_reset_completed', 'success');
+                $isDashboardInvitation = $this->authSurface === AuthSurface::DASHBOARD
+                    && strtolower((string)($resetToken['purpose'] ?? 'password_reset')) === 'invitation';
+                if ($isDashboardInvitation) {
+                    $activated = (new IdentityAccessRepository())->activateInvitedMembership(
+                        $userId,
+                        (string)($resetToken['created_by_user_id'] ?? '')
+                    );
+                    if (!$activated) {
+                        throw new \RuntimeException('INVITATION_ACCOUNT_STATE_CHANGED');
+                    }
+                }
+
+                $this->userRepository->resetPasswordAfterRecovery(
+                    $userId,
+                    password_hash($password, PASSWORD_DEFAULT),
+                    bin2hex(random_bytes(16))
+                );
+                if ($isDashboardInvitation) {
+                    $this->userRepository->markManagedEmailVerified($userId);
+                }
+
+                $this->recordAuthEvent($user, 'password_reset_completed', 'success');
+                $this->passwordResetTokenRepository->commit();
+            } catch (\Throwable $transactionException) {
+                $this->passwordResetTokenRepository->rollBack();
+                if ($transactionException->getMessage() === 'PASSWORD_RESET_TOKEN_REUSED') {
+                    $this->recordAuthEvent($user, 'password_reset_token_reused', 'failure');
+                    Response::error('El enlace de recuperación es inválido o expiró.', 400, 'AUTH_PASSWORD_RESET_TOKEN_INVALID');
+                    return;
+                }
+                if ($transactionException->getMessage() === 'INVITATION_ACCOUNT_STATE_CHANGED') {
+                    $this->recordAuthEvent($user, 'invitation_account_state_changed', 'failure');
+                    Response::error(
+                        'La invitación dejó de ser válida porque cambió el estado de la cuenta.',
+                        400,
+                        'AUTH_PASSWORD_RESET_TOKEN_INVALID'
+                    );
+                    return;
+                }
+                throw $transactionException;
+            }
+
             Response::json(['passwordReset' => true], 200, null, 'Contraseña restablecida correctamente. Inicia sesión con tu nueva contraseña.');
         } catch (\Throwable $exception) {
             error_log('[PASSWORD_RESET_CONFIRM_FAILED] ' . $exception->getMessage());

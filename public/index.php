@@ -539,6 +539,9 @@ if ($requiresAuth) {
         || str_starts_with($uri, '/api/reports/')
         || $uri === '/api/users'
         || str_starts_with($uri, '/api/users/')
+        || $uri === '/api/roles'
+        || str_starts_with($uri, '/api/roles/')
+        || $uri === '/api/access/audit'
         || $uri === '/api/shipments';
     if ($adminOnly) {
         $adminIpMode = trim((string)($_ENV['ADMIN_IP_MODE'] ?? 'off'));
@@ -581,13 +584,23 @@ if ($requiresAuth) {
                 exit;
             }
 
-            $permission = (string)($accessDecision['permission'] ?? '');
-            if (!$tenantAccess->userHasPermission($currentUser, TenantContext::get() ?? [], $permission)) {
+            $requiredPermissions = is_array($accessDecision['permissions'] ?? null)
+                ? $accessDecision['permissions']
+                : [(string)($accessDecision['permission'] ?? '')];
+            $missingPermission = null;
+            foreach ($requiredPermissions as $permission) {
+                $permission = (string)$permission;
+                if (!$tenantAccess->userHasPermission($currentUser, TenantContext::get() ?? [], $permission)) {
+                    $missingPermission = $permission;
+                    break;
+                }
+            }
+            if ($missingPermission !== null) {
                 Response::error(
                     'No tienes permiso para usar esta función del módulo.',
                     403,
                     'TENANT_MODULE_PERMISSION_DENIED',
-                    ['permission' => $permission, 'module' => $moduleKey]
+                    ['permission' => $missingPermission, 'module' => $moduleKey]
                 );
                 exit;
             }

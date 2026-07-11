@@ -126,7 +126,8 @@
       "Las tablas foraneas FDW son una capa de compatibilidad para consultas existentes, no ownership funcional.",
       "Billing SRI corre dentro del Core API y usa la base logica facturacion como store fiscal.",
       "Mailer corre dentro del Core API y usa la base logica dashboard para mensajes, outbox y logs.",
-      "LoyaltyRewards corre dentro del Core API y usa la base logica loyalty para saldos, ledger, canjes y pases wallet."
+      "LoyaltyRewards corre dentro del Core API y usa la base logica loyalty para saldos, ledger, canjes, pases wallet y el catalogo versionado de navegacion de Fidepuntos.",
+      "IdentityPlatform conserva usuarios, passwords, sesiones, roles, asignaciones y grants; Loyalty no almacena identidades ni hashes de password."
     ],
     "identityAccessModel": {
       "owner": "identity-platform",
@@ -143,9 +144,12 @@
         "tenant_module_entitlements",
         "tenant_memberships",
         "tenant_roles",
-        "tenant_user_roles"
+        "tenant_user_roles",
+        "tenant_role_navigation_grants",
+        "tenant_access_audit_events",
+        "tenant_user_sessions"
       ],
-      "permissionFormat": "module.action"
+      "permissionFormat": "module.action para compatibilidad y identity.<resource>.<action>/loyalty.<routeKey>.<action> para RBAC granular"
     }
   },
   "integration": {
@@ -187,6 +191,21 @@
         "roles.create",
         "roles.update",
         "roles.delete",
+        "identity.users.view",
+        "identity.users.create",
+        "identity.users.update",
+        "identity.users.assign_roles",
+        "identity.users.unlock",
+        "identity.users.invite",
+        "identity.users.revoke_sessions",
+        "identity.roles.view",
+        "identity.roles.create",
+        "identity.roles.update",
+        "identity.roles.delete",
+        "identity.roles.assign_roles",
+        "identity.account-security.view",
+        "identity.account-security.update",
+        "identity.account-security.revoke_sessions",
         "platform-admin"
       ],
       "standaloneRequires": [
@@ -252,7 +271,8 @@
         "loyalty-points.read",
         "loyalty-points.create",
         "loyalty-points.update",
-        "loyalty-points.delete"
+        "loyalty-points.delete",
+        "loyalty.<routeKey>.<action>"
       ],
       "moduleProfiles": [
         "loyalty-manager",

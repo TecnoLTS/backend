@@ -4,6 +4,7 @@ namespace App\Modules\IdentityPlatform\Application;
 
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
+use App\Modules\LoyaltyRewards\Application\LoyaltyNavigationService;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 
@@ -161,7 +162,7 @@ class TenantAccessService {
         $normalized = [];
         foreach ($permissions as $permission) {
             $permission = strtolower(trim((string)$permission));
-            if ($permission !== '' && isset($allowed[$permission])) {
+            if ($permission !== self::PLATFORM_ADMIN_PERMISSION && isset($allowed[$permission])) {
                 $normalized[] = $permission;
             }
         }
@@ -213,52 +214,24 @@ class TenantAccessService {
     }
 
     public function customRoles(array $enabledModules): array {
-        $stored = $this->settingsRepository->getJson(self::ROLES_KEY, ['roles' => []]);
-        $roles = is_array($stored) && is_array($stored['roles'] ?? null) ? $stored['roles'] : [];
-        $normalized = [];
-
-        foreach ($roles as $role) {
-            if (!is_array($role) || ($role['system'] ?? false)) {
-                continue;
-            }
-
-            $roleId = strtolower(trim((string)($role['id'] ?? '')));
-            $name = $this->nullableText($role['name'] ?? null);
-            if ($roleId === '' || $name === null) {
-                continue;
-            }
-
-            $createdAt = $this->nullableText($role['createdAt'] ?? null) ?? gmdate('c');
-            $updatedAt = $this->nullableText($role['updatedAt'] ?? null) ?? $createdAt;
-            $normalizedRole = [
-                'id' => $roleId,
-                'name' => $name,
-                'description' => $this->nullableText($role['description'] ?? null) ?? 'Rol personalizado del tenant.',
-                'permissions' => $this->normalizePermissions($role['permissions'] ?? [], $enabledModules),
-                'system' => false,
-                'createdAt' => $createdAt,
-                'updatedAt' => $updatedAt,
-            ];
-            $normalized[] = $normalizedRole;
-            $this->identityAccessRepository->syncRole($normalizedRole);
-        }
-
         foreach ($this->systemRoles($enabledModules) as $systemRole) {
             $this->identityAccessRepository->syncRole($systemRole);
         }
 
-        return $normalized;
+        return array_values(array_filter(
+            $this->identityAccessRepository->roles(),
+            static fn (array $role): bool => empty($role['system'])
+        ));
     }
 
     public function allRoles(array $enabledModules): array {
-        return array_values(array_merge($this->systemRoles($enabledModules), $this->customRoles($enabledModules)));
+        $this->customRoles($enabledModules);
+        return $this->identityAccessRepository->roles();
     }
 
     public function saveCustomRoles(array $roles): void {
-        $roles = array_values($roles);
-        $this->settingsRepository->setJson(self::ROLES_KEY, ['roles' => $roles]);
         foreach ($roles as $role) {
-            if (is_array($role)) {
+            if (is_array($role) && empty($role['system'])) {
                 $this->identityAccessRepository->syncRole($role);
             }
         }
@@ -269,29 +242,43 @@ class TenantAccessService {
     }
 
     public function rolesForTenantUser(array $user, array $enabledModules): array {
+        $userId = trim((string)($user['id'] ?? $user['sub'] ?? ''));
+        if ($userId === '') {
+            return [];
+        }
+
+        $storedRoles = $this->identityAccessRepository->rolesForUser($userId);
+        if ($storedRoles !== [] || $this->identityAccessRepository->membershipForUser($userId) !== null) {
+            return $storedRoles;
+        }
+
+        // Fidepuntos ya hizo cutover relacional: una membresía ausente no puede
+        // resucitar permisos desde User.profile.roleIds ni desde User.role.
+        if ($this->usesGranularNavigationAccess()) {
+            return [];
+        }
+
+        // Compatibilidad de migración únicamente: materializa una asignación legacy una sola vez.
         $tenantSlug = TenantContext::slug() ?: 'tenant';
+        foreach ($this->systemRoles($enabledModules, $tenantSlug) as $systemRole) {
+            $this->identityAccessRepository->syncRole($systemRole);
+        }
         $profile = $this->decodeProfile($user['profile'] ?? null);
         $requestedRoleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
+        $availableIds = array_flip(array_map(
+            static fn (array $role): string => (string)$role['id'],
+            $this->identityAccessRepository->roles()
+        ));
+        $requestedRoleIds = array_values(array_filter(
+            $requestedRoleIds,
+            static fn (string $roleId): bool => isset($availableIds[$roleId])
+                && !in_array($roleId, ['platform_admin', 'superadmin'], true)
+        ));
         if ($requestedRoleIds === []) {
             $requestedRoleIds = ["{$tenantSlug}_reader"];
         }
-
-        $availableRoles = [];
-        foreach (array_merge([$this->tenantRole($tenantSlug, $enabledModules, false)], $this->customRoles($enabledModules)) as $role) {
-            $roleId = (string)($role['id'] ?? '');
-            if ($roleId !== '') {
-                $availableRoles[$roleId] = $role;
-            }
-        }
-
-        $resolved = [];
-        foreach ($requestedRoleIds as $roleId) {
-            if (isset($availableRoles[$roleId])) {
-                $resolved[] = $availableRoles[$roleId];
-            }
-        }
-
-        return $resolved !== [] ? $resolved : [$this->tenantRole($tenantSlug, $enabledModules, false)];
+        $this->identityAccessRepository->syncMembership($userId, 'tenant_staff', $requestedRoleIds, 'active');
+        return $this->identityAccessRepository->rolesForUser($userId);
     }
 
     public function permissionsFromRoles(array $roles): array {
@@ -309,8 +296,26 @@ class TenantAccessService {
     }
 
     public function identityTypeForUser(array $user, array $tenant = []): string {
+        $userId = trim((string)($user['id'] ?? $user['sub'] ?? ''));
+        if ($userId !== '') {
+            $membership = $this->identityAccessRepository->membershipForUser($userId);
+            $storedType = strtolower(trim((string)($membership['identity_type'] ?? '')));
+            if (in_array($storedType, ['platform', 'tenant_staff', 'customer', 'service'], true)) {
+                return $storedType;
+            }
+        }
+
         $profile = $this->decodeProfile($user['profile'] ?? null);
         $explicitType = strtolower(trim((string)($profile['identityType'] ?? $profile['identity_type'] ?? '')));
+        if ($this->usesGranularNavigationAccess()) {
+            if ($explicitType === 'platform' && $this->isPlatformAdmin($user, null, $tenant)) {
+                return 'platform';
+            }
+            if ($explicitType === 'service' && strtolower(trim((string)($user['role'] ?? ''))) === 'service') {
+                return 'service';
+            }
+            return 'customer';
+        }
         if (in_array($explicitType, ['platform', 'tenant_staff', 'customer', 'service'], true)) {
             return $explicitType;
         }
@@ -335,6 +340,12 @@ class TenantAccessService {
         $role = strtolower(trim((string)($role ?? ($user['role'] ?? 'customer'))));
         if ($role === 'service') {
             return true;
+        }
+
+        if ($this->usesGranularNavigationAccess()) {
+            // En Fidepuntos la plataforma se reconoce por su identidad global
+            // central, nunca por roleIds/position/dominio conservados en profile.
+            return strtolower(trim((string)($user['tenant_id'] ?? ''))) === 'platform';
         }
 
         $profile = $this->decodeProfile($user['profile'] ?? null);
@@ -366,6 +377,17 @@ class TenantAccessService {
     }
 
     public function isManagedTenantStaff(array $user): bool {
+        $userId = trim((string)($user['id'] ?? $user['sub'] ?? ''));
+        if ($userId !== '') {
+            $membership = $this->identityAccessRepository->membershipForUser($userId);
+            if ($membership !== null) {
+                return ($membership['identity_type'] ?? '') === 'tenant_staff';
+            }
+        }
+        if ($this->usesGranularNavigationAccess()) {
+            return false;
+        }
+
         $profile = $this->decodeProfile($user['profile'] ?? null);
         $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
 
@@ -392,22 +414,35 @@ class TenantAccessService {
             return;
         }
 
-        $profile = $this->decodeProfile($user['profile'] ?? null);
-        $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
-        if ($roleIds === []) {
+        $identityType = $this->identityTypeForUser($user, $tenant);
+        if ($this->usesGranularNavigationAccess()) {
+            $profile = $this->decodeProfile($user['profile'] ?? null);
+            $explicitType = strtolower(trim((string)($profile['identityType'] ?? $profile['identity_type'] ?? '')));
+            if (in_array($explicitType, ['platform', 'tenant_staff', 'customer', 'service'], true)) {
+                $identityType = $explicitType;
+            }
+        }
+        $existingMembership = $this->identityAccessRepository->membershipForUser($userId);
+        $roleIds = $this->identityAccessRepository->roleIdsForUser($userId);
+        if ($roleIds === [] && $identityType !== 'customer') {
+            foreach ($this->systemRoles($this->enabledModulesForTenant($tenant), TenantContext::slug() ?: 'tenant') as $systemRole) {
+                $this->identityAccessRepository->syncRole($systemRole);
+            }
+            $profile = $this->decodeProfile($user['profile'] ?? null);
+            $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
+        }
+        if ($roleIds === [] && $identityType !== 'customer') {
             $databaseRole = strtolower(trim((string)($user['role'] ?? 'customer')));
             $roleIds = [
-                $this->identityTypeForUser($user, $tenant) === 'customer'
-                    ? 'customer'
-                    : ($databaseRole === 'admin' ? $this->defaultRoleId('admin') : $this->defaultRoleId('reader'))
+                $databaseRole === 'admin' ? $this->defaultRoleId('admin') : $this->defaultRoleId('reader')
             ];
         }
 
         $this->identityAccessRepository->syncMembership(
             $userId,
-            $this->identityTypeForUser($user, $tenant),
+            $identityType,
             $roleIds,
-            $status ?? 'active'
+            (string)($existingMembership['status'] ?? ($status ?? 'active'))
         );
     }
 
@@ -427,10 +462,60 @@ class TenantAccessService {
         }
 
         if ($capability === 'users.admin') {
-            $resource = str_starts_with($uri, '/api/roles') ? 'roles' : 'users';
+            if (str_starts_with($uri, '/api/access/audit')) {
+                return [
+                    'requiresPermission' => true,
+                    'permission' => 'identity.users.view',
+                    'module' => 'users',
+                ];
+            }
+            if (str_starts_with($uri, '/api/roles')) {
+                if ($method === 'POST' && $uri === '/api/roles') {
+                    $decision = [
+                        'requiresPermission' => true,
+                        'permission' => 'identity.roles.create',
+                        'module' => 'users',
+                    ];
+                    if ($this->usesGranularNavigationAccess()) {
+                        $decision['permissions'] = ['identity.roles.create', 'identity.roles.assign_roles'];
+                    }
+                    return $decision;
+                }
+                $action = match (true) {
+                    $method === 'DELETE' => 'delete',
+                    $method === 'PUT' && str_ends_with($uri, '/navigation-grants') => 'assign_roles',
+                    in_array($method, ['PUT', 'PATCH'], true) => 'update',
+                    default => 'view',
+                };
+                return [
+                    'requiresPermission' => true,
+                    'permission' => "identity.roles.{$action}",
+                    'module' => 'users',
+                ];
+            }
+            if ($method === 'POST' && $uri === '/api/users') {
+                $decision = [
+                    'requiresPermission' => true,
+                    'permission' => 'identity.users.create',
+                    'module' => 'users',
+                ];
+                if ($this->usesGranularNavigationAccess()) {
+                    $decision['permissions'] = ['identity.users.create', 'identity.users.assign_roles'];
+                }
+                return $decision;
+            }
+            $action = match (true) {
+                str_ends_with($uri, '/roles') => 'assign_roles',
+                str_ends_with($uri, '/unlock') => 'unlock',
+                str_ends_with($uri, '/invitation') => 'invite',
+                str_ends_with($uri, '/sessions/revoke') => 'revoke_sessions',
+                str_ends_with($uri, '/password-reset') => 'invite',
+                in_array($method, ['PUT', 'PATCH'], true) => 'update',
+                default => 'view',
+            };
             return [
                 'requiresPermission' => true,
-                'permission' => $this->permissionForMethod($resource, $method),
+                'permission' => "identity.users.{$action}",
                 'module' => 'users',
             ];
         }
@@ -484,10 +569,14 @@ class TenantAccessService {
         }
 
         if ($capability === 'loyalty.admin' || str_starts_with($uri, '/api/admin/loyalty')) {
+            $permission = (new LoyaltyNavigationService())->requiredPermissionForRequest($method, $uri)
+                ?? LoyaltyNavigationService::DENY_PERMISSION;
             return [
                 'requiresPermission' => true,
-                'permission' => $this->permissionForMethod('loyalty-points', $method),
-                'module' => 'loyalty-points',
+                'permission' => $permission,
+                'module' => str_starts_with($uri, '/api/admin/loyalty/navigation/catalog')
+                    ? 'users'
+                    : 'loyalty-points',
             ];
         }
 
@@ -517,13 +606,47 @@ class TenantAccessService {
             return [self::PLATFORM_ADMIN_PERMISSION];
         }
 
-        $profile = $this->decodeProfile($user['profile'] ?? null);
-        $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
-        if ($role === 'admin' && ($roleIds === [] || in_array($this->defaultRoleId('admin'), $roleIds, true))) {
-            return $this->tenantAdminPermissions($enabledModules);
+        $permissions = $this->permissionsFromRoles($this->rolesForTenantUser($user, $enabledModules));
+        $userId = trim((string)($user['id'] ?? $user['sub'] ?? ''));
+        if ($userId !== '') {
+            $permissions = array_merge(
+                $permissions,
+                $this->identityAccessRepository->navigationPermissionsForUser($userId)
+            );
         }
-
-        return $this->permissionsFromRoles($this->rolesForTenantUser($user, $enabledModules));
+        $legacyAliases = [
+            'users.read' => 'identity.users.view',
+            'users.create' => 'identity.users.create',
+            'users.update' => 'identity.users.update',
+            'users.delete' => 'identity.users.delete',
+            'roles.read' => 'identity.roles.view',
+            'roles.create' => 'identity.roles.create',
+            'roles.update' => 'identity.roles.update',
+            'roles.delete' => 'identity.roles.delete',
+        ];
+        $tenantId = strtolower(trim((string)($tenant['id'] ?? $tenant['slug'] ?? TenantContext::id() ?? '')));
+        if ($tenantId === 'fidepuntos') {
+            $permissions = array_merge($permissions, [
+                'identity.account-security.view',
+                'identity.account-security.update',
+                'identity.account-security.revoke_sessions',
+            ]);
+        } else {
+            foreach ($legacyAliases as $legacy => $current) {
+                if (in_array($legacy, $permissions, true)) {
+                    $permissions[] = $current;
+                }
+            }
+            if (in_array('users.update', $permissions, true)) {
+                $permissions = array_merge($permissions, [
+                    'identity.users.assign_roles',
+                    'identity.users.unlock',
+                    'identity.users.invite',
+                    'identity.users.revoke_sessions',
+                ]);
+            }
+        }
+        return array_values(array_unique($permissions));
     }
 
     public function moduleEnabledForTenant(?string $moduleKey, array $tenant): bool {
@@ -545,6 +668,14 @@ class TenantAccessService {
             || in_array($permission, $permissions, true);
     }
 
+    public function accessVersion(?string $tenantId = null): string {
+        return $this->identityAccessRepository->accessVersion($tenantId);
+    }
+
+    public function navigationGrantsForUser(string $userId, ?string $tenantId = null): array {
+        return $this->identityAccessRepository->navigationGrantsForUser($userId, $tenantId);
+    }
+
     private function normalizeKnownModuleList(array $modules): array {
         $normalized = [];
         foreach ($modules as $moduleKey) {
@@ -561,6 +692,10 @@ class TenantAccessService {
         }
 
         return array_values(array_unique($normalized));
+    }
+
+    private function usesGranularNavigationAccess(): bool {
+        return strtolower((string)(TenantContext::slug() ?? TenantContext::id() ?? '')) === 'fidepuntos';
     }
 
     private function permissionForMethod(string $resource, string $method): string {

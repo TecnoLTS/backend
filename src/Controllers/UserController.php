@@ -8,17 +8,27 @@ use App\Core\Response;
 use App\Core\Auth;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
+use App\Repositories\PasswordResetTokenRepository;
+use App\Services\MailService;
+use InvalidArgumentException;
 
 class UserController {
     protected $userRepository;
     protected $customerRepository;
     protected TenantAccessService $tenantAccessService;
+    protected IdentityAccessRepository $identityAccessRepository;
     protected bool $manageEcommerceCustomers = false;
 
     public function __construct() {
         $this->userRepository = new UserRepository();
         $this->customerRepository = new CustomerRepository();
         $this->tenantAccessService = new TenantAccessService();
+        $this->identityAccessRepository = new IdentityAccessRepository();
+        $enabledModules = $this->tenantAccessService->enabledModulesForTenant(TenantContext::get() ?? []);
+        foreach ($this->tenantAccessService->systemRoles($enabledModules, TenantContext::slug() ?: 'tenant') as $systemRole) {
+            $this->identityAccessRepository->syncRole($systemRole);
+        }
     }
 
     private function managementRepository(): UserRepository {
@@ -100,17 +110,9 @@ class UserController {
             return $profile;
         }
 
-        $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
-        if ($roleIds !== []) {
-            $profile['roleIds'] = $roleIds;
-        } elseif (empty($profile['roleIds'])) {
-            $profile['roleIds'] = [
-                $databaseRole === 'admin'
-                    ? $this->defaultRoleId('admin')
-                    : $this->defaultRoleId('reader')
-            ];
-        }
-        $profile['identityType'] = $this->managedIdentityTypeFromRoleIds($profile['roleIds']);
+        // roleIds se conserva únicamente como dato legacy para rollback; las escrituras
+        // nuevas usan tenant_user_roles como única fuente efectiva.
+        $profile['identityType'] = 'tenant_staff';
 
         return $profile;
     }
@@ -129,10 +131,22 @@ class UserController {
         }
 
         $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
-        $role = $this->manageEcommerceCustomers
-            ? 'customer'
-            : ($roleIds !== [] ? $this->databaseRoleFromRoleIds($roleIds) : $this->normalizeRole($data['role'] ?? 'customer'));
-        $password = trim((string)($data['password'] ?? ''));
+        if (!$this->manageEcommerceCustomers && !$isCreate && $roleIds === [] && !empty($existingUser['id'])) {
+            $roleIds = $this->identityAccessRepository->roleIdsForUser((string)$existingUser['id']);
+        }
+        if (!$this->manageEcommerceCustomers && $roleIds === []) {
+            $roleIds = [$this->defaultRoleId('reader')];
+        }
+        if (!$this->manageEcommerceCustomers) {
+            try {
+                $roleIds = $this->identityAccessRepository->validateAssignableRoleIds($roleIds);
+            } catch (InvalidArgumentException $e) {
+                Response::error($e->getMessage(), 400, 'USER_ROLES_INVALID');
+                exit;
+            }
+        }
+        $role = $this->manageEcommerceCustomers ? 'customer' : 'admin';
+        $password = $this->manageEcommerceCustomers ? trim((string)($data['password'] ?? '')) : '';
         if ($isCreate && $password === '') {
             $password = bin2hex(random_bytes(24));
         }
@@ -163,11 +177,14 @@ class UserController {
             'email' => $email,
             'role' => $role,
             'password' => $password,
-            'email_verified' => $this->isTruthyDbValue($data['emailVerified'] ?? ($data['email_verified'] ?? true)),
+            'email_verified' => $this->manageEcommerceCustomers
+                ? $this->isTruthyDbValue($data['emailVerified'] ?? ($data['email_verified'] ?? true))
+                : (!$isCreate && $this->isTruthyDbValue($existingUser['email_verified'] ?? false)),
             'document_type' => $documentType,
             'document_number' => $documentNumber,
             'business_name' => $this->normalizeText($data['businessName'] ?? ($data['business_name'] ?? null), 180),
             'profile' => $this->normalizeManagedProfile($data, $existingProfile, $role),
+            'roleIds' => $roleIds,
         ];
     }
 
@@ -179,6 +196,7 @@ class UserController {
             $search = strtolower(trim((string)($query['search'] ?? '')));
             $scope = strtolower(trim((string)($query['scope'] ?? 'tenant')));
             $status = strtolower(trim((string)($query['status'] ?? 'all')));
+            $roleId = strtolower(trim((string)($query['roleId'] ?? '')));
             $page = max(1, (int)($query['page'] ?? 1));
             $pageSize = max(1, min(100, (int)($query['pageSize'] ?? 10)));
             $managedUsers = array_values(array_filter(
@@ -200,8 +218,14 @@ class UserController {
                 }));
             }
 
-            if (in_array($status, ['active', 'inactive', 'blocked'], true)) {
+            if (in_array($status, ['invited', 'active', 'inactive', 'blocked'], true)) {
                 $users = array_values(array_filter($users, static fn (array $user): bool => ($user['status'] ?? '') === $status));
+            }
+            if ($roleId !== '') {
+                $users = array_values(array_filter(
+                    $users,
+                    static fn (array $user): bool => in_array($roleId, $user['roles'] ?? [], true)
+                ));
             }
 
             $totalItems = count($users);
@@ -291,7 +315,26 @@ class UserController {
 
         try {
             $created = $repository->createManaged($payload);
-            Response::json($this->managedUserResponse($created), 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
+            $delivery = null;
+            if (!$this->manageEcommerceCustomers) {
+                $this->identityAccessRepository->replaceUserRoles(
+                    (string)$created['id'],
+                    $payload['roleIds'],
+                    (string)($admin['sub'] ?? '')
+                );
+                $this->identityAccessRepository->updateMembershipStatus(
+                    (string)$created['id'],
+                    'invited',
+                    (string)($admin['sub'] ?? '')
+                );
+                $delivery = $this->issueAccountLink($created, 'invitation', (string)($admin['sub'] ?? ''));
+                $created = $repository->getAdminUserById((string)$created['id']);
+            }
+            $response = $this->managedUserResponse($created);
+            if ($delivery !== null) {
+                $response['invitation'] = $delivery;
+            }
+            Response::json($response, 201, null, sprintf('Usuario creado correctamente por %s.', $admin['name'] ?? 'administrador'));
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_CREATE_FAILED');
         }
@@ -305,6 +348,7 @@ class UserController {
             Response::error('Carga inválida', 400, 'USER_PAYLOAD_INVALID');
             return;
         }
+        $this->requireRoleAssignmentPermissionIfRequested($admin, $data);
 
         $repository = $this->managementRepository();
         $existingUser = $repository->getAdminUserById($id);
@@ -314,6 +358,10 @@ class UserController {
         }
 
         $payload = $this->validateManagedPayload($data, false, $existingUser);
+
+        if (!$this->manageEcommerceCustomers) {
+            $this->assertRoleTransitionAllowed($admin, (string)$id, $payload['roleIds']);
+        }
 
         if (!$this->manageEcommerceCustomers && ($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
             Response::error('No puedes quitarte tu propio rol de administrador desde aquí', 400, 'USER_SELF_ROLE_CHANGE_FORBIDDEN');
@@ -327,6 +375,24 @@ class UserController {
 
         try {
             $updated = $repository->updateManaged($id, $payload);
+            if (!$this->manageEcommerceCustomers) {
+                $this->identityAccessRepository->replaceUserRoles(
+                    (string)$id,
+                    $payload['roleIds'],
+                    (string)($admin['sub'] ?? '')
+                );
+                if (
+                    array_key_exists('roles', $data)
+                    || array_key_exists('roleIds', $data)
+                    || strtolower((string)($existingUser['email'] ?? '')) !== strtolower($payload['email'])
+                ) {
+                    $repository->revokeSessions((string)$id);
+                }
+                if (strtolower((string)($existingUser['email'] ?? '')) !== strtolower($payload['email'])) {
+                    $this->invalidateAccountLinks((string)$id);
+                }
+                $updated = $repository->getAdminUserById((string)$id);
+            }
             Response::json($this->managedUserResponse($updated), 200, null, 'Usuario actualizado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UPDATE_FAILED');
@@ -341,6 +407,7 @@ class UserController {
             Response::error('Carga inválida', 400, 'USER_PAYLOAD_INVALID');
             return;
         }
+        $this->requireRoleAssignmentPermissionIfRequested($admin, $data);
 
         $repository = $this->managementRepository();
         $existingUser = $repository->getAdminUserById($id);
@@ -362,15 +429,15 @@ class UserController {
             'department' => $existingProfile['department'] ?? null,
             'position' => $existingProfile['position'] ?? null,
             'description' => $existingProfile['description'] ?? null,
-            'roles' => $existingProfile['roleIds'] ?? null,
+            'roles' => $this->identityAccessRepository->roleIdsForUser((string)$id),
         ];
         $merged = array_replace($merged, $data);
 
-        if (isset($data['status']) && in_array($data['status'], ['active', 'inactive'], true)) {
-            $merged['email_verified'] = $data['status'] === 'active';
-        }
-
         $payload = $this->validateManagedPayload($merged, false, $existingUser);
+
+        if (!$this->manageEcommerceCustomers) {
+            $this->assertRoleTransitionAllowed($admin, (string)$id, $payload['roleIds']);
+        }
 
         if (!$this->manageEcommerceCustomers && ($admin['sub'] ?? null) === $id && $payload['role'] !== 'admin') {
             Response::error('No puedes quitarte tu propio rol de administrador desde aquí', 400, 'USER_SELF_ROLE_CHANGE_FORBIDDEN');
@@ -384,7 +451,27 @@ class UserController {
 
         try {
             $updated = $repository->updateManaged($id, $payload);
-            if (isset($data['status'])) {
+            if (!$this->manageEcommerceCustomers) {
+                $this->identityAccessRepository->replaceUserRoles(
+                    (string)$id,
+                    $payload['roleIds'],
+                    (string)($admin['sub'] ?? '')
+                );
+                if (isset($data['status'])) {
+                    $this->applyAccountStatus($admin, (string)$id, (string)$data['status']);
+                }
+                if (
+                    array_key_exists('roles', $data)
+                    || array_key_exists('roleIds', $data)
+                    || strtolower((string)($existingUser['email'] ?? '')) !== strtolower($payload['email'])
+                ) {
+                    $repository->revokeSessions((string)$id);
+                }
+                if (strtolower((string)($existingUser['email'] ?? '')) !== strtolower($payload['email'])) {
+                    $this->invalidateAccountLinks((string)$id);
+                }
+                $updated = $repository->getAdminUserById((string)$id);
+            } elseif (isset($data['status'])) {
                 $updated = $repository->setManagedStatus($id, (string)$data['status']);
             }
             Response::json($this->managedUserResponse($updated), 200, null, 'Usuario actualizado correctamente.');
@@ -394,7 +481,7 @@ class UserController {
     }
 
     public function unlock($id) {
-        Auth::requireAdmin();
+        $actor = Auth::requireAdmin();
 
         $repository = $this->managementRepository();
         $existingUser = $repository->getAdminUserById($id);
@@ -405,10 +492,198 @@ class UserController {
 
         try {
             $updated = $repository->unlockManagedUser($id);
+            if (!$this->manageEcommerceCustomers) {
+                $this->identityAccessRepository->recordAuditEvent(
+                    (string)($actor['sub'] ?? ''),
+                    'user.security_lock.cleared',
+                    'user',
+                    (string)$id
+                );
+            }
             Response::json($this->managedUserResponse($updated), 200, null, 'Usuario desbloqueado correctamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_UNLOCK_FAILED');
         }
+    }
+
+    public function updateRoles($id): void {
+        $actor = Auth::requireAdmin();
+        $data = json_decode(file_get_contents('php://input'), true);
+        if (!is_array($data) || !is_array($data['roleIds'] ?? $data['roles'] ?? null)) {
+            Response::error('Debes enviar roleIds como una lista.', 400, 'USER_ROLES_INVALID');
+            return;
+        }
+        $user = $this->userRepository->getAdminUserById((string)$id);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+
+        try {
+            $roleIds = $this->identityAccessRepository->validateAssignableRoleIds($data['roleIds'] ?? $data['roles']);
+            $this->assertRoleTransitionAllowed($actor, (string)$id, $roleIds);
+            $roles = $this->identityAccessRepository->replaceUserRoles(
+                (string)$id,
+                $roleIds,
+                (string)($actor['sub'] ?? '')
+            );
+            $this->userRepository->revokeSessions((string)$id);
+            Response::json([
+                'userId' => (string)$id,
+                'roleIds' => array_values(array_map(static fn (array $role): string => (string)$role['id'], $roles)),
+                'roles' => $roles,
+                'sessionsRevoked' => true,
+            ], 200, null, 'Roles actualizados. El usuario deberá iniciar sesión nuevamente.');
+        } catch (InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'USER_ROLES_INVALID');
+        } catch (\RuntimeException $e) {
+            Response::error($e->getMessage(), 409, 'LAST_TENANT_ADMIN_REQUIRED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'USER_ROLES_UPDATE_FAILED');
+        }
+    }
+
+    public function updateStatus($id): void {
+        $actor = Auth::requireAdmin();
+        $data = json_decode(file_get_contents('php://input'), true);
+        if (!is_array($data)) {
+            Response::error('Carga inválida', 400, 'USER_STATUS_INVALID');
+            return;
+        }
+        try {
+            $membership = $this->applyAccountStatus($actor, (string)$id, (string)($data['accountStatus'] ?? $data['status'] ?? ''));
+            $updated = $this->userRepository->getAdminUserById((string)$id);
+            $response = $updated ? $this->dashboardUser($updated) : ['id' => (string)$id];
+            $response['accountStatus'] = $membership['status'];
+            Response::json($response, 200, null, 'Estado de cuenta actualizado.');
+        } catch (InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'USER_STATUS_INVALID');
+        } catch (\RuntimeException $e) {
+            Response::error($e->getMessage(), 409, 'LAST_TENANT_ADMIN_REQUIRED');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'USER_STATUS_UPDATE_FAILED');
+        }
+    }
+
+    public function invitation($id): void {
+        $actor = Auth::requireAdmin();
+        $user = $this->userRepository->getAdminUserById((string)$id);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+
+        try {
+            $currentMembership = $this->identityAccessRepository->membershipForUser((string)$id);
+            if (($currentMembership['status'] ?? '') !== 'invited') {
+                Response::error(
+                    'Solo se puede reenviar una invitación mientras la cuenta está invitada.',
+                    409,
+                    'USER_NOT_INVITED'
+                );
+                return;
+            }
+            $this->userRepository->revokeSessions((string)$id);
+            $delivery = $this->issueAccountLink($user, 'invitation', (string)($actor['sub'] ?? ''));
+            Response::json($delivery, 200, null, 'Invitación generada.');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'USER_INVITATION_FAILED');
+        }
+    }
+
+    public function passwordReset($id): void {
+        $actor = Auth::requireAdmin();
+        $user = $this->userRepository->getAdminUserById((string)$id);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+
+        try {
+            $this->userRepository->revokeSessions((string)$id);
+            $delivery = $this->issueAccountLink($user, 'password_reset', (string)($actor['sub'] ?? ''));
+            Response::json($delivery, 200, null, 'Enlace de restablecimiento generado.');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'USER_PASSWORD_RESET_FAILED');
+        }
+    }
+
+    public function revokeSessions($id): void {
+        $actor = Auth::requireAdmin();
+        $user = $this->userRepository->getAdminUserById((string)$id);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            Response::error('Usuario no encontrado', 404, 'USER_NOT_FOUND');
+            return;
+        }
+        $this->userRepository->revokeSessions((string)$id);
+        $this->identityAccessRepository->recordAuditEvent(
+            (string)($actor['sub'] ?? ''),
+            'user.sessions.revoked',
+            'user',
+            (string)$id
+        );
+        Response::json(['sessionsRevoked' => true, 'requiresLogin' => true]);
+    }
+
+    public function revokeOwnSessions(): void {
+        $user = $this->authenticate();
+        $repository = $this->accountRepositoryForPayload($user);
+        $isFidepuntosDashboard = ($user['auth_surface'] ?? $user['aud'] ?? '') === 'dashboard'
+            && strtolower((string)(TenantContext::slug() ?? TenantContext::id() ?? '')) === 'fidepuntos';
+        $revokedCount = $isFidepuntosDashboard
+            ? $repository->revokeOtherSessions((string)$user['sub'], (string)($user['jti'] ?? ''))
+            : 0;
+        if (!$isFidepuntosDashboard) {
+            $repository->revokeSessions((string)$user['sub']);
+        }
+        if (($user['auth_surface'] ?? $user['aud'] ?? '') === 'dashboard') {
+            $this->identityAccessRepository->recordAuditEvent(
+                (string)$user['sub'],
+                'user.sessions.revoked.self',
+                'user',
+                (string)$user['sub'],
+                ['scope' => $isFidepuntosDashboard ? 'other-sessions' : 'all', 'revokedCount' => $revokedCount]
+            );
+        }
+        Response::json([
+            'sessionsRevoked' => true,
+            'revokedCount' => $revokedCount,
+            'requiresLogin' => !$isFidepuntosDashboard,
+            'scope' => $isFidepuntosDashboard ? 'other-sessions' : 'all',
+        ], 200, null, $isFidepuntosDashboard
+            ? 'Las demás sesiones activas fueron cerradas.'
+            : 'Las sesiones fueron revocadas. Inicia sesión nuevamente.');
+    }
+
+    public function ownSessions(): void {
+        $user = $this->authenticate();
+        $repository = $this->accountRepositoryForPayload($user);
+        Response::noStore();
+        Response::json($repository->sessionSummary(
+            (string)$user['sub'],
+            (string)($user['jti'] ?? '')
+        ));
+    }
+
+    public function accessAudit(): void {
+        Auth::requireAdmin();
+        Response::noStore();
+        $filters = [
+            'actorUserId' => $_GET['actorUserId'] ?? null,
+            'targetType' => $_GET['targetType'] ?? null,
+            'targetId' => $_GET['targetId'] ?? null,
+            'eventType' => $_GET['eventType'] ?? null,
+            'limit' => $_GET['pageSize'] ?? $_GET['limit'] ?? 50,
+            'offset' => max(0, ((int)($_GET['page'] ?? 1) - 1) * max(1, (int)($_GET['pageSize'] ?? 50))),
+        ];
+        if (trim((string)($_GET['userId'] ?? '')) !== '') {
+            $filters['targetType'] = 'user';
+            $filters['targetId'] = $_GET['userId'];
+        } elseif (trim((string)($_GET['roleId'] ?? '')) !== '') {
+            $filters['targetType'] = 'role';
+            $filters['targetId'] = $_GET['roleId'];
+        }
+        Response::json($this->identityAccessRepository->auditEvents($filters));
     }
 
     public function getAddresses() {
@@ -523,6 +798,7 @@ class UserController {
 
         $currentPassword = trim((string)($data['currentPassword'] ?? ''));
         $newPassword = trim((string)($data['newPassword'] ?? ''));
+        $confirmation = trim((string)($data['confirmPassword'] ?? $data['newPasswordConfirmation'] ?? ''));
 
         if ($currentPassword === '' || $newPassword === '') {
             Response::error('La contraseña actual y la nueva son obligatorias', 400, 'USER_PASSWORD_REQUIRED');
@@ -536,6 +812,11 @@ class UserController {
 
         if ($currentPassword === $newPassword) {
             Response::error('La nueva contraseña debe ser diferente a la actual', 400, 'USER_PASSWORD_SAME');
+            return;
+        }
+
+        if ($confirmation === '' || !hash_equals($newPassword, $confirmation)) {
+            Response::error('La confirmación no coincide con la nueva contraseña', 400, 'USER_PASSWORD_CONFIRMATION_MISMATCH');
             return;
         }
 
@@ -553,27 +834,202 @@ class UserController {
                 password_hash($newPassword, PASSWORD_DEFAULT),
                 $newTokenId
             );
+            if (($user['auth_surface'] ?? $user['aud'] ?? '') === 'dashboard') {
+                $this->invalidateAccountLinks((string)$user['sub']);
+            }
 
-            Response::json(['passwordUpdated' => true], 200, null, 'Contraseña actualizada correctamente.');
+            if (($user['auth_surface'] ?? $user['aud'] ?? '') === 'dashboard') {
+                $this->identityAccessRepository->recordAuditEvent(
+                    (string)$user['sub'],
+                    'user.password.changed.self',
+                    'user',
+                    (string)$user['sub']
+                );
+            }
+
+            Response::json([
+                'passwordUpdated' => true,
+                'sessionsRevoked' => true,
+                'requiresLogin' => true,
+            ], 200, null, 'Contraseña actualizada. Inicia sesión nuevamente.');
         } catch (\Exception $e) {
             Response::error($e->getMessage(), 500, 'USER_PASSWORD_UPDATE_FAILED');
         }
     }
 
+    private function assertRoleTransitionAllowed(array $actor, string $userId, array $nextRoleIds): void {
+        $adminRoleId = $this->defaultRoleId('admin');
+        $currentRoleIds = $this->identityAccessRepository->roleIdsForUser($userId);
+        $removesAdmin = in_array($adminRoleId, $currentRoleIds, true)
+            && !in_array($adminRoleId, $nextRoleIds, true);
+        if (!$removesAdmin) {
+            return;
+        }
+        if ((string)($actor['sub'] ?? '') === $userId) {
+            throw new \RuntimeException('No puedes retirar tu propio rol de administrador.');
+        }
+        if ($this->identityAccessRepository->countActiveUsersWithRole($adminRoleId, null, $userId) < 1) {
+            throw new \RuntimeException('El tenant debe conservar al menos un administrador activo.');
+        }
+    }
+
+    private function requireRoleAssignmentPermissionIfRequested(array $actor, array $payload): void {
+        if ($this->manageEcommerceCustomers || (!array_key_exists('roles', $payload) && !array_key_exists('roleIds', $payload))) {
+            return;
+        }
+        $actorUser = $this->userRepository->getById((string)($actor['sub'] ?? ''));
+        if (
+            !$actorUser
+            || !$this->tenantAccessService->userHasPermission(
+                $actorUser,
+                TenantContext::get() ?? [],
+                'identity.users.assign_roles'
+            )
+        ) {
+            Response::error('No tienes permiso para asignar roles.', 403, 'USER_ROLE_ASSIGNMENT_FORBIDDEN');
+            exit;
+        }
+    }
+
+    private function applyAccountStatus(array $actor, string $userId, string $status): array {
+        $status = strtolower(trim($status));
+        if (!in_array($status, ['invited', 'active', 'inactive', 'blocked'], true)) {
+            throw new InvalidArgumentException('Estado de cuenta no permitido.');
+        }
+        $user = $this->userRepository->getAdminUserById($userId);
+        if (!$user || !$this->isManagedWorkspaceUserRecord($user)) {
+            throw new InvalidArgumentException('Usuario no encontrado en el tenant activo.');
+        }
+        $currentMembership = $this->identityAccessRepository->membershipForUser($userId);
+        if (
+            $status === 'active'
+            && (
+                strtolower((string)($currentMembership['status'] ?? '')) === 'invited'
+                || !$this->isTruthyDbValue($user['email_verified'] ?? false)
+            )
+        ) {
+            throw new InvalidArgumentException(
+                'Una cuenta invitada o sin correo verificado solo puede activarse al completar su enlace seguro.'
+            );
+        }
+        if ((string)($actor['sub'] ?? '') === $userId && $status !== 'active') {
+            throw new \RuntimeException('No puedes bloquear o desactivar tu propia cuenta.');
+        }
+
+        $adminRoleId = $this->defaultRoleId('admin');
+        $roleIds = $this->identityAccessRepository->roleIdsForUser($userId);
+        if (
+            $status !== 'active'
+            && in_array($adminRoleId, $roleIds, true)
+            && $this->identityAccessRepository->countActiveUsersWithRole($adminRoleId, null, $userId) < 1
+        ) {
+            throw new \RuntimeException('El tenant debe conservar al menos un administrador activo.');
+        }
+
+        $membership = $this->identityAccessRepository->updateMembershipStatus(
+            $userId,
+            $status,
+            (string)($actor['sub'] ?? '')
+        );
+        $this->invalidateAccountLinks($userId);
+        if ($status !== 'active') {
+            $this->userRepository->revokeSessions($userId);
+        }
+        return $membership;
+    }
+
+    private function invalidateAccountLinks(string $userId): void {
+        (new PasswordResetTokenRepository())->invalidateForUser($userId);
+    }
+
+    private function issueAccountLink(array $user, string $purpose, string $actorUserId): array {
+        $purpose = $purpose === 'invitation' ? 'invitation' : 'password_reset';
+        $email = strtolower(trim((string)($user['email'] ?? '')));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new InvalidArgumentException('El usuario no tiene un correo válido para recibir el enlace.');
+        }
+
+        $ttlMinutes = max(10, min(1440, (int)($_ENV['PASSWORD_RESET_TTL_MINUTES'] ?? 30)));
+        $token = bin2hex(random_bytes(32));
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + ($ttlMinutes * 60));
+        $tokens = new PasswordResetTokenRepository();
+        $tokens->deleteExpired();
+        $tokens->create(
+            (string)$user['id'],
+            hash('sha256', $token),
+            $expiresAt,
+            $this->clientIp(),
+            substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 500) ?: null,
+            $purpose,
+            $actorUserId !== '' ? $actorUserId : null
+        );
+
+        $baseUrl = TenantContext::publicBaseUrl()
+            ?? TenantContext::appUrl()
+            ?? ($_ENV['APP_URL'] ?? '');
+        if (trim((string)$baseUrl) === '') {
+            throw new \RuntimeException('No existe una URL pública configurada para el tenant.');
+        }
+        $resetPath = strtolower((string)(TenantContext::slug() ?? '')) === 'fidepuntos'
+            ? '/reset-password'
+            : '/dashboard/reset-password';
+        $url = rtrim((string)$baseUrl, '/') . $resetPath . '?token=' . urlencode($token);
+        $name = trim((string)($user['name'] ?? '')) ?: 'Usuario';
+        $subject = $purpose === 'invitation'
+            ? 'Completa tu acceso a Fidepuntos'
+            : 'Restablece tu contraseña de Fidepuntos';
+        $message = "Hola {$name},\n\n";
+        $message .= $purpose === 'invitation'
+            ? "Te invitaron a administrar Fidepuntos. Define tu contraseña desde este enlace:\n"
+            : "Un administrador solicitó restablecer tu contraseña. Usa este enlace:\n";
+        $message .= "{$url}\n\nEl enlace vence en {$ttlMinutes} minutos y solo puede usarse una vez.\n";
+        $sent = MailService::send($email, $subject, $message, null, null, [
+            'category' => $purpose === 'invitation' ? 'identity-invitation' : 'identity-password-reset',
+            'tenant_id' => TenantContext::id(),
+            'user_id' => (string)$user['id'],
+        ]);
+
+        $this->identityAccessRepository->recordAuditEvent(
+            $actorUserId,
+            $purpose === 'invitation' ? 'user.invitation.sent' : 'user.password_reset.sent',
+            'user',
+            (string)$user['id'],
+            ['delivery' => $sent ? 'sent' : 'failed', 'expiresAt' => $expiresAt]
+        );
+
+        return [
+            'sent' => $sent,
+            'purpose' => $purpose,
+            'expiresAt' => gmdate('c', strtotime($expiresAt) ?: time()),
+        ];
+    }
+
+    private function clientIp(): ?string {
+        $candidate = trim((string)($_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? ''));
+        if (str_contains($candidate, ',')) {
+            $candidate = trim(explode(',', $candidate)[0]);
+        }
+        return filter_var($candidate, FILTER_VALIDATE_IP) ? $candidate : null;
+    }
+
     private function dashboardUser(array $user): array {
         $managedUser = $this->isManagedWorkspaceUserRecord($user);
         $profile = $this->decodeProfile($user['profile'] ?? null);
-        $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
-        if ($roleIds === []) {
-            $roleIds = $managedUser
-                ? [($user['role'] ?? 'customer') === 'admin' ? $this->defaultRoleId('admin') : $this->defaultRoleId('reader')]
-                : ['customer'];
+        $userId = (string)($user['id'] ?? '');
+        $roleIds = $managedUser ? $this->identityAccessRepository->roleIdsForUser($userId) : ['customer'];
+        $membership = $managedUser ? $this->identityAccessRepository->membershipForUser($userId) : null;
+        $accountStatus = strtolower(trim((string)($membership['status'] ?? '')));
+        if (!in_array($accountStatus, ['invited', 'active', 'inactive', 'blocked'], true)) {
+            $accountStatus = $this->dashboardUserStatus($user);
         }
+        $lockedUntil = strtotime((string)($user['login_locked_until'] ?? ''));
+        $securityLocked = $lockedUntil !== false && $lockedUntil > time();
 
         return [
-            'id' => (string)($user['id'] ?? ''),
+            'id' => $userId,
             'name' => (string)($user['name'] ?? 'Usuario'),
             'email' => (string)($user['email'] ?? ''),
+            'emailVerified' => $this->isTruthyDbValue($user['email_verified'] ?? false),
             'phone' => $this->normalizeText($profile['phone'] ?? null, 60),
             'department' => $this->normalizeText($profile['department'] ?? null, 120)
                 ?? ($managedUser
@@ -583,13 +1039,21 @@ class UserController {
                 ?? ($managedUser
                     ? (($user['role'] ?? '') === 'admin' ? 'Administrador' : 'Usuario gestionado')
                     : 'Cliente'),
-            'status' => $this->dashboardUserStatus($user),
+            'status' => $accountStatus,
+            'accountStatus' => $accountStatus,
+            'securityLock' => [
+                'isLocked' => $securityLocked,
+                'failedAttempts' => (int)($user['failed_login_attempts'] ?? 0),
+                'lockedUntil' => $securityLocked ? gmdate('c', $lockedUntil) : null,
+            ],
             'roles' => $roleIds,
             'avatarUrl' => 'assets/images/user.png',
             'coverUrl' => 'assets/images/user-grid/user-grid-bg1.png',
             'description' => $this->normalizeText($profile['description'] ?? null, 500),
             'createdAt' => $this->formatDate($user['created_at'] ?? null),
             'updatedAt' => $this->formatDate($user['updated_at'] ?? null),
+            'lastLoginAt' => $this->nullableDate($user['last_login_at'] ?? null),
+            'invitationStatus' => $accountStatus === 'invited' ? 'pending' : null,
         ];
     }
 
@@ -782,6 +1246,11 @@ class UserController {
     private function formatDate($value): string {
         $timestamp = strtotime((string)($value ?? ''));
         return $timestamp !== false ? gmdate('c', $timestamp) : gmdate('c');
+    }
+
+    private function nullableDate($value): ?string {
+        $timestamp = strtotime((string)($value ?? ''));
+        return $timestamp !== false ? gmdate('c', $timestamp) : null;
     }
 
     private function isTruthyDbValue($value): bool {

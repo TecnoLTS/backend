@@ -257,7 +257,18 @@ class Auth {
         }
 
         $activeTokenId = $state['active_token_id'] ?? null;
-        if (!$activeTokenId || !$jti || $activeTokenId !== $jti) {
+        $relationalSessionActive = $jti
+            ? $repo->relationalSessionIsActive((string)$sub, (string)$jti)
+            : false;
+        if (
+            $relationalSessionActive === false
+            || ($relationalSessionActive === null && (!$activeTokenId || !$jti || $activeTokenId !== $jti))
+        ) {
+            throw new \RuntimeException('AUTH_TOKEN_REVOKED');
+        }
+
+        $accountStatus = strtolower(trim((string)($state['account_status'] ?? '')));
+        if ($surface === AuthSurface::DASHBOARD && $accountStatus !== '' && $accountStatus !== 'active') {
             throw new \RuntimeException('AUTH_TOKEN_REVOKED');
         }
 

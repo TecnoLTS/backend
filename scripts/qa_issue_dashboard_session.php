@@ -80,14 +80,14 @@ if (!in_array($issuerEnabled, ['1', 'true', 'yes', 'on'], true)) {
 }
 
 $email = strtolower(trim((string)qaSessionArg('email')));
-$tenantId = trim((string)(qaSessionArg('tenant-id') ?? ($_ENV['DEFAULT_TENANT'] ?? $_ENV['PUBLIC_TENANT_SLUG'] ?? 'paramascotasec')));
+$requestedTenantId = trim((string)(qaSessionArg('tenant-id') ?? ($_ENV['DEFAULT_TENANT'] ?? $_ENV['PUBLIC_TENANT_SLUG'] ?? 'paramascotasec')));
 $surface = strtolower(trim((string)(qaSessionArg('surface') ?? AuthSurface::DASHBOARD)));
 
 if ($email === '') {
     qaSessionFail('Missing --email=<value>');
 }
 
-if ($tenantId === '') {
+if ($requestedTenantId === '') {
     qaSessionFail('Missing tenant id');
 }
 
@@ -100,9 +100,9 @@ if (!in_array($surface, [AuthSurface::DASHBOARD, AuthSurface::ECOMMERCE], true))
 }
 
 $tenants = require dirname(__DIR__) . '/config/tenants.php';
-$tenant = $tenants[$tenantId] ?? null;
+$tenant = $tenants[$requestedTenantId] ?? null;
 if (!is_array($tenant)) {
-    qaSessionFail("Unknown tenant {$tenantId}");
+    qaSessionFail("Unknown tenant {$requestedTenantId}");
 }
 
 TenantContext::set($tenant);
@@ -143,7 +143,7 @@ $payload = [
     'email' => (string)$user['email'],
     'name' => (string)($user['name'] ?? 'QA User'),
     'role' => (string)($user['role'] ?? 'customer'),
-    'tenant_id' => (string)($tenant['id'] ?? $tenantId),
+    'tenant_id' => (string)($tenant['id'] ?? $requestedTenantId),
     'aud' => $surface,
     'auth_surface' => $surface,
     'jti' => $tokenId,
@@ -158,6 +158,6 @@ echo json_encode([
     'csrfCookieName' => $csrfCookieName,
     'csrfCookieValue' => $csrfToken,
     'expiresAt' => $expiresAt,
-    'tenantId' => (string)($tenant['id'] ?? $tenantId),
+    'tenantId' => (string)($tenant['id'] ?? $requestedTenantId),
     'surface' => $surface,
 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

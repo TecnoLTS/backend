@@ -6,6 +6,8 @@ use App\Core\Auth;
 use App\Core\Response;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\LoyaltyRewards\Application\LoyaltyNavigationService;
+use App\Modules\LoyaltyRewards\Domain\LoyaltyNavigationCatalog;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 
@@ -41,7 +43,7 @@ class TenantController {
 
         if (!empty($payload['service_auth'])) {
             Response::noStore();
-            Response::json([
+            Response::json(array_merge([
                 'tenant' => $this->tenantIdentity($tenant),
                 'enabledModules' => $this->platformAdminContextModules($tenantModules),
                 'permissions' => ['platform-admin'],
@@ -54,7 +56,7 @@ class TenantController {
                     'permissions' => ['platform-admin'],
                 ],
                 'branding' => $branding,
-            ]);
+            ], $this->dynamicAccessContext($tenant, ['platform-admin'])));
             return;
         }
 
@@ -72,18 +74,14 @@ class TenantController {
             $enabledModules = $this->platformAdminContextModules($tenantModules);
             $roles = [$this->platformAdminRole()];
             $permissions = ['platform-admin'];
-        } elseif ($role === 'admin' && $this->usesImplicitTenantAdminRole($user)) {
-            $enabledModules = $tenantModules;
-            $roles = [$this->tenantRole(TenantContext::slug() ?: 'tenant', $enabledModules, true)];
-            $permissions = $roles[0]['permissions'];
         } else {
             $enabledModules = $tenantModules;
             $roles = $this->rolesForTenantUser($user, $enabledModules);
-            $permissions = $this->permissionsFromRoles($roles);
+            $permissions = $this->tenantAccessService->userPermissions($user, $tenant);
         }
 
         Response::noStore();
-        Response::json([
+        Response::json(array_merge([
             'tenant' => $this->tenantIdentity($tenant),
             'enabledModules' => $enabledModules,
             'permissions' => $permissions,
@@ -96,7 +94,7 @@ class TenantController {
                 'permissions' => $permissions,
             ],
             'branding' => $branding,
-        ]);
+        ], $this->dynamicAccessContext($tenant, $permissions)));
     }
 
     public function adminIndex() {
@@ -540,60 +538,50 @@ class TenantController {
         return $this->tenantAccessService->rolesForTenantUser($user, $enabledModules);
     }
 
-    private function usesImplicitTenantAdminRole(array $user): bool {
-        $profile = $this->decodeProfile($user['profile'] ?? null);
-        $roleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
-        if ($roleIds === []) {
-            return true;
+    /**
+     * Fidepuntos obtiene su menu operativo desde Loyalty y sus concesiones desde
+     * IdentityPlatform. Cualquier falla de lectura devuelve un arbol vacio para
+     * que el dashboard falle cerrado y conserve solo su salida local de cuenta.
+     */
+    private function dynamicAccessContext(array $tenant, array $permissions): array {
+        $tenantId = strtolower(trim((string)($tenant['id'] ?? $tenant['slug'] ?? TenantContext::id() ?? '')));
+        if ($tenantId !== LoyaltyNavigationCatalog::INITIAL_TENANT_ID) {
+            return ['effectivePermissions' => array_values(array_unique($permissions))];
         }
 
-        return in_array($this->defaultRoleId('admin'), $roleIds, true);
-    }
+        try {
+            $navigation = (new LoyaltyNavigationService())->effectiveNavigation($tenantId, $permissions);
 
-    private function customRoles(array $enabledModules): array {
-        return $this->tenantAccessService->customRoles($enabledModules);
-    }
+            return [
+                'navigation' => [
+                    'version' => (string)$navigation['version'],
+                    'sections' => $navigation['sections'],
+                ],
+                'accessVersion' => $this->tenantAccessService->accessVersion($tenantId),
+                'effectivePermissions' => array_values(array_unique($permissions)),
+            ];
+        } catch (\Throwable $exception) {
+            error_log(sprintf(
+                '[TENANT_NAVIGATION_UNAVAILABLE] tenant=%s error=%s',
+                $tenantId,
+                $exception->getMessage()
+            ));
 
-    private function permissionsFromRoles(array $roles): array {
-        return $this->tenantAccessService->permissionsFromRoles($roles);
-    }
-
-    private function decodeProfile($profile): array {
-        if (is_array($profile)) {
-            return $profile;
-        }
-
-        if (!is_string($profile) || trim($profile) === '') {
-            return [];
-        }
-
-        $decoded = json_decode($profile, true);
-        return is_array($decoded) ? $decoded : [];
-    }
-
-    private function normalizeRoleIds($value): array {
-        if (!is_array($value)) {
-            return [];
-        }
-
-        $roleIds = [];
-        foreach ($value as $roleId) {
-            $normalized = strtolower(trim((string)$roleId));
-            if ($normalized !== '') {
-                $roleIds[] = $normalized;
+            $safePermissions = ['identity.account-security.view'];
+            foreach (['identity.account-security.update', 'identity.account-security.revoke_sessions'] as $permission) {
+                if (in_array('platform-admin', $permissions, true) || in_array($permission, $permissions, true)) {
+                    $safePermissions[] = $permission;
+                }
             }
+            return [
+                'navigation' => [
+                    'version' => LoyaltyNavigationCatalog::VERSION . '-unavailable',
+                    'sections' => [],
+                ],
+                'accessVersion' => 'unavailable',
+                'effectivePermissions' => $safePermissions,
+            ];
         }
-
-        return array_values(array_unique($roleIds));
-    }
-
-    private function tenantRole(string $tenantSlug, array $enabledModules, bool $admin): array {
-        return $this->tenantAccessService->tenantRole($tenantSlug, $enabledModules, $admin);
-    }
-
-    private function defaultRoleId(string $type): string {
-        $tenantSlug = TenantContext::slug() ?: 'tenant';
-        return "{$tenantSlug}_{$type}";
     }
 
     private function platformAdminRole(): array {

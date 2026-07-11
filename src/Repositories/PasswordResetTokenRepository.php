@@ -37,6 +37,24 @@ class PasswordResetTokenRepository {
         return $this->db->exec($this->rewriteSql($sql));
     }
 
+    public function beginTransaction(): void {
+        if (!$this->db->inTransaction()) {
+            $this->db->beginTransaction();
+        }
+    }
+
+    public function commit(): void {
+        if ($this->db->inTransaction()) {
+            $this->db->commit();
+        }
+    }
+
+    public function rollBack(): void {
+        if ($this->db->inTransaction()) {
+            $this->db->rollBack();
+        }
+    }
+
     private function normalizedTableName(): string {
         return trim($this->tableName, '"');
     }
@@ -67,6 +85,8 @@ class PasswordResetTokenRepository {
                     tenant_id text NOT NULL,
                     user_id text NOT NULL,
                     token_hash text NOT NULL,
+                    purpose text NOT NULL DEFAULT \'password_reset\',
+                    created_by_user_id text,
                     expires_at timestamp without time zone NOT NULL,
                     used_at timestamp without time zone,
                     request_ip text,
@@ -94,15 +114,33 @@ class PasswordResetTokenRepository {
         string $tokenHash,
         string $expiresAt,
         ?string $requestIp,
-        ?string $requestUserAgent
+        ?string $requestUserAgent,
+        string $purpose = 'password_reset',
+        ?string $createdByUserId = null
     ): void {
         $this->ensureSchema();
+        $purpose = in_array($purpose, ['password_reset', 'invitation'], true) ? $purpose : 'password_reset';
+        $invalidate = $this->prepare('
+            UPDATE "PasswordResetToken"
+            SET used_at = NOW(), updated_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id = :user_id
+              AND purpose = :purpose
+              AND used_at IS NULL
+        ');
+        $invalidate->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => $userId,
+            'purpose' => $purpose,
+        ]);
         $stmt = $this->prepare('
             INSERT INTO "PasswordResetToken" (
                 id,
                 tenant_id,
                 user_id,
                 token_hash,
+                purpose,
+                created_by_user_id,
                 expires_at,
                 request_ip,
                 request_user_agent,
@@ -113,6 +151,8 @@ class PasswordResetTokenRepository {
                 :tenant_id,
                 :user_id,
                 :token_hash,
+                :purpose,
+                :created_by_user_id,
                 :expires_at,
                 :request_ip,
                 :request_user_agent,
@@ -126,6 +166,8 @@ class PasswordResetTokenRepository {
             'tenant_id' => $this->getTenantId(),
             'user_id' => $userId,
             'token_hash' => $tokenHash,
+            'purpose' => $purpose,
+            'created_by_user_id' => $createdByUserId,
             'expires_at' => $expiresAt,
             'request_ip' => $requestIp,
             'request_user_agent' => $requestUserAgent,
@@ -144,7 +186,7 @@ class PasswordResetTokenRepository {
               AND tenant_id = :tenant_id
               AND used_at IS NULL
               AND expires_at > NOW()
-            RETURNING id, user_id, expires_at
+            RETURNING id, user_id, purpose, created_by_user_id, expires_at
         ');
 
         $stmt->execute([
@@ -158,10 +200,38 @@ class PasswordResetTokenRepository {
         return $row ?: null;
     }
 
+    public function invalidateForUser(string $userId, ?string $purpose = null): int {
+        $this->ensureSchema();
+        $purpose = $purpose !== null ? strtolower(trim($purpose)) : null;
+        if ($purpose !== null && !in_array($purpose, ['password_reset', 'invitation'], true)) {
+            throw new \InvalidArgumentException('Propósito de enlace de cuenta no permitido.');
+        }
+
+        $sql = '
+            UPDATE "PasswordResetToken"
+            SET used_at = COALESCE(used_at, NOW()), updated_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id = :user_id
+              AND used_at IS NULL
+        ';
+        $params = [
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+        ];
+        if ($purpose !== null) {
+            $sql .= ' AND purpose = :purpose';
+            $params['purpose'] = $purpose;
+        }
+
+        $stmt = $this->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->rowCount();
+    }
+
     public function getValidToken(string $tokenHash): ?array {
         $this->ensureSchema();
         $stmt = $this->prepare('
-            SELECT id, user_id, expires_at
+            SELECT id, user_id, purpose, created_by_user_id, expires_at
             FROM "PasswordResetToken"
             WHERE token_hash = :token_hash
               AND tenant_id = :tenant_id

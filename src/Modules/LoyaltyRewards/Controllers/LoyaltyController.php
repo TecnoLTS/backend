@@ -21,6 +21,11 @@ final class LoyaltyController {
         $this->respond(fn() => $this->repository->dashboard($month), 'LOYALTY_DASHBOARD_FAILED');
     }
 
+    public function dashboardCustomers(): void {
+        Auth::requireAdmin();
+        $this->respond(fn() => $this->lookupCustomers(), 'LOYALTY_DASHBOARD_CUSTOMERS_FAILED');
+    }
+
     public function customers(): void {
         Auth::requireAdmin();
         $filters = [
@@ -136,6 +141,21 @@ final class LoyaltyController {
         );
     }
 
+    /**
+     * Datos de apoyo estrictamente necesarios para registrar una compra. No
+     * expone el detalle/ledger de Clientes ni la configuracion de seguridad.
+     */
+    public function purchaseContext(): void {
+        Auth::requireAdmin();
+        $this->respond(
+            fn() => [
+                'customers' => $this->lookupCustomers(),
+                'rules' => $this->earningRulesSnapshot(),
+            ],
+            'LOYALTY_PURCHASE_CONTEXT_FAILED'
+        );
+    }
+
     public function reversePurchase(string $reference): void {
         $user = Auth::requireAdmin();
         $payload = $this->jsonPayload();
@@ -156,6 +176,31 @@ final class LoyaltyController {
         );
     }
 
+    /** Lookup acotado para caja: socios operables y premios canjeables. */
+    public function redemptionContext(): void {
+        Auth::requireAdmin();
+        $this->respond(
+            fn() => [
+                'customers' => $this->lookupCustomers(),
+                'rewards' => $this->repository->rewards([
+                    'q' => isset($_GET['rewardQuery']) ? trim((string)$_GET['rewardQuery']) : null,
+                    'status' => 'active',
+                    'stock' => 'available',
+                ]),
+            ],
+            'LOYALTY_REDEMPTION_CONTEXT_FAILED'
+        );
+    }
+
+    /** Lookup de audiencia individual sin conceder la pantalla Clientes. */
+    public function notificationContext(): void {
+        Auth::requireAdmin();
+        $this->respond(
+            fn() => $this->lookupCustomers(),
+            'LOYALTY_NOTIFICATION_CONTEXT_FAILED'
+        );
+    }
+
     public function updateWallet(string $memberId): void {
         Auth::requireAdmin();
         $payload = $this->jsonPayload();
@@ -165,6 +210,18 @@ final class LoyaltyController {
     public function passPreview(string $memberId): void {
         Auth::requireAdmin();
         $this->respond(fn() => $this->repository->passPreview($memberId), 'LOYALTY_PASS_PREVIEW_FAILED');
+    }
+
+    /** Lookup acotado para emitir/revisar tarjetas digitales. */
+    public function walletContext(): void {
+        Auth::requireAdmin();
+        $this->respond(
+            fn() => [
+                'customers' => $this->lookupCustomers(),
+                'rules' => $this->earningRulesSnapshot(),
+            ],
+            'LOYALTY_WALLET_CONTEXT_FAILED'
+        );
     }
 
     public function googleWalletLink(): void {
@@ -1078,6 +1135,19 @@ HTML;
         $this->respond(fn() => $this->repository->reportsCatalog(), 'LOYALTY_REPORTS_CATALOG_FAILED');
     }
 
+    public function reportCatalog(string $reportKey): void {
+        Auth::requireAdmin();
+        $this->respond(function () use ($reportKey): array {
+            foreach ($this->repository->reportsCatalog() as $report) {
+                if (($report['key'] ?? null) === $reportKey) {
+                    return [$report];
+                }
+            }
+
+            throw new \InvalidArgumentException('Reporte no reconocido.');
+        }, 'LOYALTY_REPORT_CATALOG_FAILED');
+    }
+
     public function report(string $reportKey): void {
         Auth::requireAdmin();
         $filters = $this->queryFilters();
@@ -1279,6 +1349,42 @@ HTML;
         } catch (\Throwable $e) {
             Response::error($e->getMessage(), 500, $code);
         }
+    }
+
+    /** @return array{items: array, total: int, limit: int, offset: int, hasMore: bool} */
+    private function lookupCustomers(): array {
+        $page = $this->repository->customersPage([
+            'q' => isset($_GET['q']) ? trim((string)$_GET['q']) : null,
+            'status' => 'active',
+            'sort' => 'recent',
+            'count' => '0',
+            'limit' => isset($_GET['limit']) ? min(50, max(10, (int)$_GET['limit'])) : 25,
+            'offset' => isset($_GET['offset']) ? max(0, (int)$_GET['offset']) : 0,
+        ]);
+        $allowedKeys = [
+            'id', 'name', 'account_id', 'email', 'tier', 'status',
+            'wallet_platform', 'points', 'last_activity_at',
+        ];
+        $page['items'] = array_map(
+            static fn(array $customer): array => array_intersect_key($customer, array_flip($allowedKeys)),
+            is_array($page['items'] ?? null) ? $page['items'] : []
+        );
+
+        return $page;
+    }
+
+    /** @return array{settings: array, tiers: array} */
+    private function earningRulesSnapshot(): array {
+        $rules = $this->repository->rules();
+        $settings = is_array($rules['settings'] ?? null) ? $rules['settings'] : [];
+
+        return [
+            'settings' => [
+                'program' => is_array($settings['program'] ?? null) ? $settings['program'] : [],
+                'earning' => is_array($settings['earning'] ?? null) ? $settings['earning'] : [],
+            ],
+            'tiers' => is_array($rules['tiers'] ?? null) ? $rules['tiers'] : [],
+        ];
     }
 
     private function jsonPayload(): array {

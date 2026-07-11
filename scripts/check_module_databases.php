@@ -15,6 +15,9 @@ const MODULE_OWNER_TABLES = [
         'tenant_memberships',
         'tenant_roles',
         'tenant_user_roles',
+        'tenant_role_navigation_grants',
+        'tenant_access_audit_events',
+        'tenant_user_sessions',
         'AuthSecurityEvent',
         'PasswordResetToken',
         'Setting',
@@ -81,6 +84,8 @@ const MODULE_OWNER_TABLES = [
         'loyalty_risk_events',
         'loyalty_point_expirations',
         'loyalty_reversals',
+        'loyalty_navigation_items',
+        'loyalty_navigation_item_actions',
     ],
 ];
 
@@ -142,10 +147,18 @@ const FDW_COMPATIBILITY_TABLES = [
     'loyalty_risk_events',
     'loyalty_point_expirations',
     'loyalty_reversals',
+    'loyalty_navigation_items',
+    'loyalty_navigation_item_actions',
 ];
 
 const LOCAL_RELKINDS = ['r', 'p'];
-const LOCAL_AUTH_ONLY_TABLES = ['User', 'AuthSecurityEvent', 'PasswordResetToken'];
+const LOCAL_AUTH_ONLY_TABLES = [
+    'User',
+    'AuthSecurityEvent',
+    'PasswordResetToken',
+    'tenant_role_navigation_grants',
+    'tenant_access_audit_events',
+];
 
 function fail(string $message): void
 {

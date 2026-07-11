@@ -131,7 +131,15 @@ class UserRepository {
     public function getByEmail($email) {
         $email = strtolower(trim((string)$email));
         $stmt = $this->prepare('
-            SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, failed_login_attempts, login_locked_until
+            SELECT "User".id, "User".tenant_id, "User".name, "User".email, "User".password,
+                   "User".email_verified, "User".role, "User".document_type,
+                   "User".document_number, "User".business_name, "User".profile,
+                   "User".addresses, "User".failed_login_attempts, "User".login_locked_until,
+                   (SELECT membership.status
+                    FROM tenant_memberships membership
+                    WHERE membership.tenant_id = "User".tenant_id
+                      AND membership.user_id = "User".id
+                    LIMIT 1) AS account_status
             FROM "User"
             WHERE (
                 lower(email) = :email
@@ -155,7 +163,16 @@ class UserRepository {
     public function getByEmailWithOtp($email) {
         $email = strtolower(trim((string)$email));
         $stmt = $this->prepare('
-            SELECT id, tenant_id, name, email, password, email_verified, role, document_type, document_number, business_name, profile, addresses, otp_code, otp_expires_at, otp_attempts, failed_login_attempts, login_locked_until
+            SELECT "User".id, "User".tenant_id, "User".name, "User".email, "User".password,
+                   "User".email_verified, "User".role, "User".document_type,
+                   "User".document_number, "User".business_name, "User".profile,
+                   "User".addresses, "User".otp_code, "User".otp_expires_at,
+                   "User".otp_attempts, "User".failed_login_attempts, "User".login_locked_until,
+                   (SELECT membership.status
+                    FROM tenant_memberships membership
+                    WHERE membership.tenant_id = "User".tenant_id
+                      AND membership.user_id = "User".id
+                    LIMIT 1) AS account_status
             FROM "User"
             WHERE (
                 lower(email) = :email
@@ -307,7 +324,13 @@ class UserRepository {
 
     public function getAuthState($id) {
         $stmt = $this->prepare('
-            SELECT id, tenant_id, name, email, role, profile, active_token_id
+            SELECT "User".id, "User".tenant_id, "User".name, "User".email,
+                   "User".role, "User".profile, "User".active_token_id,
+                   (SELECT membership.status
+                    FROM tenant_memberships membership
+                    WHERE membership.tenant_id = "User".tenant_id
+                      AND membership.user_id = "User".id
+                    LIMIT 1) AS account_status
             FROM "User"
             WHERE id = :id
               AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
@@ -405,6 +428,7 @@ class UserRepository {
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
+        $this->revokeRelationalSessions((string)$userId);
     }
 
     public function resetPasswordAfterRecovery(string $userId, string $newPasswordHash, string $newTokenId): void {
@@ -428,6 +452,7 @@ class UserRepository {
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
+        $this->revokeRelationalSessions($userId);
     }
 
     public function setOtpForEmail($email, $code, $expiresAt) {
@@ -546,6 +571,202 @@ class UserRepository {
         ]);
     }
 
+    public function registerSession(
+        string $userId,
+        string $sessionId,
+        int $expiresAt,
+        ?string $ipAddress = null,
+        ?string $userAgent = null
+    ): void {
+        if (!$this->usesRelationalDashboardSessions()) {
+            return;
+        }
+        $stmt = $this->prepare('
+            INSERT INTO tenant_user_sessions (
+                tenant_id, user_id, session_id, auth_surface, ip_address,
+                user_agent, expires_at, revoked_at, created_at, last_seen_at
+            ) VALUES (
+                :tenant_id, :user_id, :session_id, \'dashboard\', :ip_address,
+                :user_agent, :expires_at, NULL, NOW(), NOW()
+            )
+            ON CONFLICT (tenant_id, user_id, session_id) DO UPDATE SET
+                ip_address = EXCLUDED.ip_address,
+                user_agent = EXCLUDED.user_agent,
+                expires_at = EXCLUDED.expires_at,
+                revoked_at = NULL,
+                last_seen_at = NOW()
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+            'session_id' => trim($sessionId),
+            'ip_address' => $ipAddress,
+            'user_agent' => $userAgent !== null ? mb_substr($userAgent, 0, 500) : null,
+            'expires_at' => gmdate('Y-m-d H:i:s', $expiresAt),
+        ]);
+    }
+
+    public function relationalSessionIsActive(string $userId, string $sessionId): ?bool {
+        if (!$this->usesRelationalDashboardSessions()) {
+            return null;
+        }
+        try {
+            $stmt = $this->prepare('
+                SELECT revoked_at IS NULL AND expires_at > NOW() AS active
+                FROM tenant_user_sessions
+                WHERE tenant_id = :tenant_id AND user_id = :user_id AND session_id = :session_id
+                LIMIT 1
+            ');
+            $stmt->execute([
+                'tenant_id' => $this->getTenantId(),
+                'user_id' => trim($userId),
+                'session_id' => trim($sessionId),
+            ]);
+            $active = $stmt->fetchColumn();
+            if ($active !== false) {
+                return in_array($active, [true, 1, '1', 't', 'true'], true);
+            }
+
+            $existing = $this->prepare('
+                SELECT 1 FROM tenant_user_sessions
+                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                LIMIT 1
+            ');
+            $existing->execute([
+                'tenant_id' => $this->getTenantId(),
+                'user_id' => trim($userId),
+            ]);
+            // Sin filas aún se acepta el active_token_id previo al despliegue.
+            return $existing->fetchColumn() === false ? null : false;
+        } catch (\PDOException $e) {
+            if ((string)$e->getCode() === '42P01') {
+                return null;
+            }
+            throw $e;
+        }
+    }
+
+    public function refreshSessionExpiry(string $userId, string $sessionId, int $expiresAt): void {
+        if (!$this->usesRelationalDashboardSessions()) {
+            return;
+        }
+        $stmt = $this->prepare('
+            UPDATE tenant_user_sessions
+            SET expires_at = :expires_at, last_seen_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id = :user_id
+              AND session_id = :session_id
+              AND revoked_at IS NULL
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+            'session_id' => trim($sessionId),
+            'expires_at' => gmdate('Y-m-d H:i:s', $expiresAt),
+        ]);
+    }
+
+    public function revokeSession(string $userId, string $sessionId): int {
+        if (!$this->usesRelationalDashboardSessions()) {
+            $this->clearActiveTokenId($userId);
+            return 1;
+        }
+        $stmt = $this->prepare('
+            UPDATE tenant_user_sessions
+            SET revoked_at = COALESCE(revoked_at, NOW()), last_seen_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id = :user_id
+              AND session_id = :session_id
+              AND revoked_at IS NULL
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+            'session_id' => trim($sessionId),
+        ]);
+        $revoked = $stmt->rowCount();
+        if ($revoked < 1) {
+            // Compatibilidad de rollout: un JWT emitido antes de crear la tabla
+            // solo vive en active_token_id y también debe quedar invalidado.
+            $this->clearActiveTokenIdIfMatches($userId, $sessionId);
+        }
+        return $revoked;
+    }
+
+    public function revokeOtherSessions(string $userId, string $currentSessionId): int {
+        if (!$this->usesRelationalDashboardSessions()) {
+            return 0;
+        }
+        $stmt = $this->prepare('
+            UPDATE tenant_user_sessions
+            SET revoked_at = COALESCE(revoked_at, NOW()), last_seen_at = NOW()
+            WHERE tenant_id = :tenant_id
+              AND user_id = :user_id
+              AND session_id <> :current_session_id
+              AND revoked_at IS NULL
+              AND expires_at > NOW()
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+            'current_session_id' => trim($currentSessionId),
+        ]);
+        return $stmt->rowCount();
+    }
+
+    public function sessionSummary(string $userId, string $currentSessionId): array {
+        if (!$this->usesRelationalDashboardSessions()) {
+            $active = $this->getActiveTokenId($userId);
+            $currentActive = $active !== null && $active !== '' && hash_equals((string)$active, $currentSessionId);
+            return [
+                'currentSessionActive' => $currentActive,
+                'activeSessions' => $currentActive ? 1 : 0,
+                'otherActiveSessions' => 0,
+                'currentExpiresAt' => null,
+            ];
+        }
+
+        $stmt = $this->prepare('
+            SELECT
+                COUNT(*) FILTER (WHERE revoked_at IS NULL AND expires_at > NOW())::int AS active_sessions,
+                COUNT(*) FILTER (
+                    WHERE revoked_at IS NULL AND expires_at > NOW() AND session_id <> :current_session_count
+                )::int AS other_active_sessions,
+                BOOL_OR(
+                    session_id = :current_session_active AND revoked_at IS NULL AND expires_at > NOW()
+                ) AS current_active,
+                MAX(expires_at) FILTER (WHERE session_id = :current_session_expiry) AS current_expires_at
+            FROM tenant_user_sessions
+            WHERE tenant_id = :tenant_id AND user_id = :user_id
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'user_id' => trim($userId),
+            'current_session_count' => trim($currentSessionId),
+            'current_session_active' => trim($currentSessionId),
+            'current_session_expiry' => trim($currentSessionId),
+        ]);
+        $row = $stmt->fetch() ?: [];
+        $activeSessions = (int)($row['active_sessions'] ?? 0);
+        if ($activeSessions === 0 && $this->relationalSessionIsActive($userId, $currentSessionId) === null) {
+            $legacyActive = (string)($this->getActiveTokenId($userId) ?? '') === trim($currentSessionId);
+            return [
+                'currentSessionActive' => $legacyActive,
+                'activeSessions' => $legacyActive ? 1 : 0,
+                'otherActiveSessions' => 0,
+                'currentExpiresAt' => null,
+            ];
+        }
+
+        $expiresAt = strtotime((string)($row['current_expires_at'] ?? ''));
+        return [
+            'currentSessionActive' => in_array($row['current_active'] ?? false, [true, 1, '1', 't', 'true'], true),
+            'activeSessions' => $activeSessions,
+            'otherActiveSessions' => (int)($row['other_active_sessions'] ?? 0),
+            'currentExpiresAt' => $expiresAt !== false ? gmdate('c', $expiresAt) : null,
+        ];
+    }
+
     public function clearActiveTokenId($userId) {
         $stmt = $this->prepare('
             UPDATE "User"
@@ -557,6 +778,23 @@ class UserRepository {
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
             'platform_tenant_id' => self::PLATFORM_TENANT_ID,
+        ]);
+    }
+
+    public function revokeSessions(string $userId): void {
+        $this->clearActiveTokenId($userId);
+        $this->revokeRelationalSessions($userId);
+    }
+
+    public function markManagedEmailVerified(string $userId): void {
+        $stmt = $this->prepare('
+            UPDATE "User"
+            SET email_verified = TRUE, verification_token = NULL, updated_at = NOW()
+            WHERE id = :id AND tenant_id = :tenant_id
+        ');
+        $stmt->execute([
+            'id' => $userId,
+            'tenant_id' => $this->getTenantId(),
         ]);
     }
 
@@ -725,12 +963,19 @@ class UserRepository {
             'business_name' => $data['business_name'] ?? null,
             'profile' => json_encode($data['profile'] ?? (object)[]),
         ]);
+        $membershipProfile = is_array($data['profile'] ?? null) ? $data['profile'] : [];
+        if (is_array($data['roleIds'] ?? null)) {
+            // La asignación efectiva se persiste en tenant_user_roles. Este valor
+            // solo evita que el alta transitoria caiga en el rol admin por el
+            // campo legacy User.role antes de que el controlador reconcilie roles.
+            $membershipProfile['roleIds'] = $data['roleIds'];
+        }
         $this->syncIdentityMembership([
             'id' => $id,
             'name' => $data['name'],
             'email' => $data['email'],
             'role' => $data['role'],
-            'profile' => json_encode($data['profile'] ?? (object)[]),
+            'profile' => json_encode($membershipProfile ?: (object)[]),
         ], !empty($data['email_verified']) ? 'active' : 'inactive');
 
         return $this->getAdminUserById($id);
@@ -984,6 +1229,51 @@ class UserRepository {
 
     private function getTenantId() {
         return TenantContext::id() ?? ($_ENV['DEFAULT_TENANT'] ?? 'paramascotasec');
+    }
+
+    private function usesRelationalDashboardSessions(): bool {
+        return $this->userTable === '"User"'
+            && strtolower((string)$this->getTenantId()) === 'fidepuntos';
+    }
+
+    private function revokeRelationalSessions(string $userId): void {
+        if (!$this->usesRelationalDashboardSessions()) {
+            return;
+        }
+        try {
+            $stmt = $this->prepare('
+                UPDATE tenant_user_sessions
+                SET revoked_at = COALESCE(revoked_at, NOW()), last_seen_at = NOW()
+                WHERE tenant_id = :tenant_id AND user_id = :user_id AND revoked_at IS NULL
+            ');
+            $stmt->execute([
+                'tenant_id' => $this->getTenantId(),
+                'user_id' => trim($userId),
+            ]);
+        } catch (\PDOException $e) {
+            if ((string)$e->getCode() !== '42P01') {
+                throw $e;
+            }
+        }
+    }
+
+    private function clearActiveTokenIdIfMatches(string $userId, string $sessionId): void {
+        if (trim($sessionId) === '') {
+            return;
+        }
+        $stmt = $this->prepare('
+            UPDATE "User"
+            SET active_token_id = NULL, updated_at = NOW()
+            WHERE id = :id
+              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+              AND active_token_id = :session_id
+        ');
+        $stmt->execute([
+            'id' => trim($userId),
+            'tenant_id' => $this->getTenantId(),
+            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
+            'session_id' => trim($sessionId),
+        ]);
     }
 
     private function syncIdentityMembership(array $user, string $status = 'active'): void {

@@ -6,111 +6,133 @@ use App\Core\Auth;
 use App\Core\Response;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
 use App\Repositories\SettingsRepository;
+use App\Repositories\UserRepository;
+use InvalidArgumentException;
+use RuntimeException;
 
 class RoleController {
     private SettingsRepository $settingsRepository;
     private TenantAccessService $tenantAccessService;
+    private IdentityAccessRepository $identityAccessRepository;
 
     private const TENANT_ADMIN_OVERRIDES_KEY = TenantAccessService::TENANT_ADMIN_OVERRIDES_KEY;
 
     public function __construct() {
         $this->settingsRepository = new SettingsRepository();
-        $this->tenantAccessService = new TenantAccessService($this->settingsRepository);
+        $this->identityAccessRepository = new IdentityAccessRepository();
+        $this->tenantAccessService = new TenantAccessService(
+            $this->settingsRepository,
+            $this->identityAccessRepository
+        );
     }
 
-    public function index() {
+    public function index(): void {
         Auth::requireAdmin();
         Response::noStore();
 
-        $query = $_GET;
-        $search = strtolower(trim((string)($query['search'] ?? '')));
-        $page = max(1, (int)($query['page'] ?? 1));
-        $pageSize = max(1, min(100, (int)($query['pageSize'] ?? 20)));
+        $search = strtolower(trim((string)($_GET['search'] ?? '')));
+        $page = max(1, (int)($_GET['page'] ?? 1));
+        $pageSize = max(1, min(100, (int)($_GET['pageSize'] ?? 20)));
         $roles = $this->allRoles();
 
         if ($search !== '') {
             $roles = array_values(array_filter($roles, static function (array $role) use ($search): bool {
-                $haystack = strtolower(($role['name'] ?? '') . ' ' . ($role['description'] ?? ''));
-                return str_contains($haystack, $search);
+                return str_contains(strtolower(implode(' ', [
+                    (string)($role['name'] ?? ''),
+                    (string)($role['description'] ?? ''),
+                    (string)($role['id'] ?? ''),
+                ])), $search);
             }));
         }
 
         $totalItems = count($roles);
         $totalPages = max(1, (int)ceil($totalItems / $pageSize));
         $page = min($page, $totalPages);
-        $offset = ($page - 1) * $pageSize;
-
         Response::json(
-            array_slice($roles, $offset, $pageSize),
+            array_slice($roles, ($page - 1) * $pageSize, $pageSize),
             200,
-            [
-                'page' => $page,
-                'pageSize' => $pageSize,
-                'totalItems' => $totalItems,
-                'totalPages' => $totalPages,
-            ]
+            compact('page', 'pageSize', 'totalItems', 'totalPages')
         );
     }
 
-    public function show(string $roleId) {
+    public function show(string $roleId): void {
         Auth::requireAdmin();
         Response::noStore();
-
-        $role = $this->findRole($roleId);
-        if ($role === null) {
+        $role = $this->identityAccessRepository->role($this->normalizeId($roleId));
+        if (!$role) {
             Response::error('Rol no encontrado.', 404, 'ROLE_NOT_FOUND');
             return;
         }
-
         Response::json($role);
     }
 
-    public function store() {
-        Auth::requireAdmin();
+    public function store(): void {
+        $actor = Auth::requireAdmin();
         $data = $this->requestJson();
-        $now = gmdate('c');
         $name = $this->requiredText($data['name'] ?? null, 'El nombre del rol es obligatorio.');
         if ($name === null) {
             return;
         }
 
-        $description = $this->nullableText($data['description'] ?? null) ?? 'Rol personalizado del tenant.';
-        $permissions = $this->normalizePermissions($data['permissions'] ?? []);
-
-        $customRoles = $this->customRoles();
         $role = [
             'id' => $this->newRoleId($name),
             'name' => $name,
-            'description' => $description,
-            'permissions' => $permissions,
+            'description' => $this->nullableText($data['description'] ?? null, 500) ?? 'Rol personalizado del tenant.',
+            // Fidepuntos escribe acceso granular solo en navigation grants. Los
+            // demas tenants conservan el contrato legacy durante esta primera fase.
+            'permissions' => $this->isFidepuntos()
+                ? []
+                : $this->normalizePermissions($data['permissions'] ?? []),
             'system' => false,
-            'createdAt' => $now,
-            'updatedAt' => $now,
         ];
 
-        $customRoles[] = $role;
-        $this->saveCustomRoles($customRoles);
+        try {
+            $navigationGrants = $this->isFidepuntos() && is_array($data['navigationGrants'] ?? null)
+                ? $this->identityAccessRepository->validateRoleNavigationGrants($data['navigationGrants'])
+                : [];
+            $this->identityAccessRepository->syncRole($role);
+            $this->identityAccessRepository->recordAuditEvent(
+                (string)($actor['sub'] ?? ''),
+                'role.created',
+                'role',
+                $role['id'],
+                ['name' => $role['name'], 'permissions' => $role['permissions']]
+            );
+            $created = $this->identityAccessRepository->role($role['id']);
 
-        Response::json($role, 201);
+            if ($navigationGrants !== []) {
+                $this->identityAccessRepository->replaceRoleNavigationGrants(
+                    $role['id'],
+                    $navigationGrants,
+                    (string)($actor['sub'] ?? '')
+                );
+                $created = $this->identityAccessRepository->role($role['id']);
+            }
+            Response::json($created ?: $role, 201);
+        } catch (InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'ROLE_PAYLOAD_INVALID');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'ROLE_CREATE_FAILED');
+        }
     }
 
-    public function update(string $roleId) {
-        Auth::requireAdmin();
+    public function update(string $roleId): void {
+        $actor = Auth::requireAdmin();
         $data = $this->requestJson();
-        $customRoles = $this->customRoles();
-        $index = $this->customRoleIndex($customRoles, $roleId);
-
-        if ($index === null) {
-            if ($this->findSystemRole($roleId) !== null) {
-                Response::error('Los roles de sistema no se pueden modificar desde esta pantalla.', 409, 'ROLE_SYSTEM_IMMUTABLE');
-                return;
-            }
+        $roleId = $this->normalizeId($roleId);
+        $existing = $this->identityAccessRepository->role($roleId);
+        if (!$existing) {
             Response::error('Rol no encontrado.', 404, 'ROLE_NOT_FOUND');
             return;
         }
+        if (!empty($existing['system'])) {
+            Response::error('Los roles de sistema no se pueden modificar.', 409, 'ROLE_SYSTEM_IMMUTABLE');
+            return;
+        }
 
-        $role = $customRoles[$index];
+        $role = $existing;
         if (array_key_exists('name', $data)) {
             $name = $this->requiredText($data['name'], 'El nombre del rol es obligatorio.');
             if ($name === null) {
@@ -119,95 +141,115 @@ class RoleController {
             $role['name'] = $name;
         }
         if (array_key_exists('description', $data)) {
-            $role['description'] = $this->nullableText($data['description']) ?? 'Rol personalizado del tenant.';
+            $role['description'] = $this->nullableText($data['description'], 500) ?? 'Rol personalizado del tenant.';
         }
-        if (array_key_exists('permissions', $data)) {
+        if (!$this->isFidepuntos() && array_key_exists('permissions', $data)) {
             $role['permissions'] = $this->normalizePermissions($data['permissions']);
         }
-        $role['updatedAt'] = gmdate('c');
-
-        $customRoles[$index] = $role;
-        $this->saveCustomRoles($customRoles);
-
-        Response::json($role);
+        try {
+            $this->identityAccessRepository->syncRole($role);
+            $this->identityAccessRepository->recordAuditEvent(
+                (string)($actor['sub'] ?? ''),
+                'role.updated',
+                'role',
+                $roleId,
+                ['name' => $role['name'], 'permissions' => $role['permissions']]
+            );
+            Response::json($this->identityAccessRepository->role($roleId));
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'ROLE_UPDATE_FAILED');
+        }
     }
 
-    public function destroy(string $roleId) {
-        Auth::requireAdmin();
-        $customRoles = $this->customRoles();
-        $index = $this->customRoleIndex($customRoles, $roleId);
-
-        if ($index === null) {
-            if ($this->findSystemRole($roleId) !== null) {
-                Response::error('Los roles de sistema no se pueden eliminar desde esta pantalla.', 409, 'ROLE_SYSTEM_IMMUTABLE');
-                return;
-            }
+    public function destroy(string $roleId): void {
+        $actor = Auth::requireAdmin();
+        $roleId = $this->normalizeId($roleId);
+        $existing = $this->identityAccessRepository->role($roleId);
+        if (!$existing) {
             Response::error('Rol no encontrado.', 404, 'ROLE_NOT_FOUND');
             return;
         }
+        if (!empty($existing['system'])) {
+            Response::error('Los roles de sistema no se pueden eliminar.', 409, 'ROLE_SYSTEM_IMMUTABLE');
+            return;
+        }
 
-        array_splice($customRoles, $index, 1);
-        $this->saveCustomRoles($customRoles);
-        $this->tenantAccessService->deleteCustomRole($roleId);
+        try {
+            if (!$this->identityAccessRepository->deleteRole($roleId)) {
+                Response::error('Rol no encontrado.', 404, 'ROLE_NOT_FOUND');
+                return;
+            }
+            $this->identityAccessRepository->recordAuditEvent(
+                (string)($actor['sub'] ?? ''),
+                'role.deleted',
+                'role',
+                $roleId,
+                ['name' => $existing['name'] ?? $roleId]
+            );
+            http_response_code(204);
+        } catch (RuntimeException $e) {
+            Response::error($e->getMessage(), 409, 'ROLE_IN_USE');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'ROLE_DELETE_FAILED');
+        }
+    }
 
-        http_response_code(204);
+    public function updateNavigationGrants(string $roleId): void {
+        $actor = Auth::requireAdmin();
+        $data = $this->requestJson();
+        $grants = $data['navigationGrants'] ?? $data['grants'] ?? null;
+        if (!is_array($grants)) {
+            Response::error('navigationGrants debe ser una lista.', 400, 'ROLE_GRANTS_INVALID');
+            return;
+        }
+
+        try {
+            $affectedUsers = $this->identityAccessRepository->usersForRole($this->normalizeId($roleId));
+            $this->identityAccessRepository->replaceRoleNavigationGrants(
+                $this->normalizeId($roleId),
+                $grants,
+                (string)($actor['sub'] ?? '')
+            );
+            $users = new UserRepository();
+            foreach ($affectedUsers as $affectedUser) {
+                $userId = trim((string)($affectedUser['id'] ?? ''));
+                if ($userId !== '') {
+                    $users->revokeSessions($userId);
+                }
+            }
+            Response::json($this->identityAccessRepository->role($this->normalizeId($roleId)));
+        } catch (InvalidArgumentException $e) {
+            Response::error($e->getMessage(), 400, 'ROLE_GRANTS_INVALID');
+        } catch (RuntimeException $e) {
+            Response::error($e->getMessage(), 409, 'ROLE_SYSTEM_IMMUTABLE');
+        } catch (\Throwable $e) {
+            Response::error($e->getMessage(), 500, 'ROLE_GRANTS_UPDATE_FAILED');
+        }
+    }
+
+    public function users(string $roleId): void {
+        Auth::requireAdmin();
+        $roleId = $this->normalizeId($roleId);
+        if (!$this->identityAccessRepository->role($roleId)) {
+            Response::error('Rol no encontrado.', 404, 'ROLE_NOT_FOUND');
+            return;
+        }
+        Response::noStore();
+        Response::json($this->identityAccessRepository->usersForRole($roleId));
     }
 
     private function requestJson(): array {
         $rawInput = file_get_contents('php://input');
         $data = is_string($rawInput) && trim($rawInput) !== '' ? json_decode($rawInput, true) : [];
         if (!is_array($data)) {
-            Response::error('JSON invalido.', 400, 'INVALID_JSON');
+            Response::error('JSON inválido.', 400, 'INVALID_JSON');
             exit;
         }
-
         return $data;
     }
 
     private function allRoles(): array {
-        return array_values(array_merge($this->systemRoles(), $this->customRoles()));
-    }
-
-    private function findRole(string $roleId): ?array {
-        foreach ($this->allRoles() as $role) {
-            if (($role['id'] ?? '') === $roleId) {
-                return $role;
-            }
-        }
-
-        return null;
-    }
-
-    private function findSystemRole(string $roleId): ?array {
-        foreach ($this->systemRoles() as $role) {
-            if (($role['id'] ?? '') === $roleId) {
-                return $role;
-            }
-        }
-
-        return null;
-    }
-
-    private function customRoleIndex(array $roles, string $roleId): ?int {
-        foreach ($roles as $index => $role) {
-            if (($role['id'] ?? '') === $roleId) {
-                return $index;
-            }
-        }
-
-        return null;
-    }
-
-    private function systemRoles(): array {
-        return $this->tenantAccessService->systemRoles($this->enabledModules(), TenantContext::slug() ?: 'tenant');
-    }
-
-    private function customRoles(): array {
-        return $this->tenantAccessService->customRoles($this->enabledModules());
-    }
-
-    private function saveCustomRoles(array $roles): void {
-        $this->tenantAccessService->saveCustomRoles(array_values($roles));
+        return $this->tenantAccessService->allRoles($this->enabledModules());
     }
 
     private function enabledModules(): array {
@@ -220,47 +262,29 @@ class RoleController {
         if ($tenantId === '') {
             return $tenant;
         }
-
         $overrides = $this->settingsRepository->getJson(self::TENANT_ADMIN_OVERRIDES_KEY, ['tenants' => []]);
-        if (!is_array($overrides) || !is_array($overrides['tenants'] ?? null)) {
-            return $tenant;
-        }
-
-        $storedTenant = $overrides['tenants'][$tenantId] ?? null;
-        if (!is_array($storedTenant)) {
-            return $tenant;
-        }
-
-        if (is_array($storedTenant['enabled_modules'] ?? null)) {
+        $storedTenant = is_array($overrides) && is_array($overrides['tenants'] ?? null)
+            ? ($overrides['tenants'][$tenantId] ?? null)
+            : null;
+        if (is_array($storedTenant) && is_array($storedTenant['enabled_modules'] ?? null)) {
             $tenant['enabled_modules'] = $storedTenant['enabled_modules'];
         }
-
         return $tenant;
-    }
-
-    private function tenantAdminPermissions(array $enabledModules): array {
-        return $this->tenantAccessService->tenantAdminPermissions($enabledModules);
-    }
-
-    private function readOnlyPermissions(array $enabledModules): array {
-        return $this->tenantAccessService->readOnlyPermissions($enabledModules);
-    }
-
-    private function allowedPermissions(): array {
-        return $this->tenantAdminPermissions($this->enabledModules());
     }
 
     private function normalizePermissions($permissions): array {
         return $this->tenantAccessService->normalizePermissions($permissions, $this->enabledModules());
     }
 
+    private function isFidepuntos(): bool {
+        return strtolower((string)(TenantContext::slug() ?? TenantContext::id() ?? '')) === 'fidepuntos';
+    }
+
     private function requiredText($value, string $message): ?string {
         $text = $this->nullableText($value, 160);
         if ($text === null) {
             Response::error($message, 400, 'ROLE_FIELD_REQUIRED');
-            return null;
         }
-
         return $text;
     }
 
@@ -269,12 +293,7 @@ class RoleController {
         if ($text === '') {
             return null;
         }
-
-        if (mb_strlen($text) > $maxLength) {
-            $text = mb_substr($text, 0, $maxLength);
-        }
-
-        return $text;
+        return mb_strlen($text) > $maxLength ? mb_substr($text, 0, $maxLength) : $text;
     }
 
     private function normalizeId($value): string {
@@ -283,22 +302,20 @@ class RoleController {
 
     private function newRoleId(string $name): string {
         $tenantSlug = TenantContext::slug() ?: 'tenant';
-        $slug = strtolower(trim($name));
-        $slug = preg_replace('/[^a-z0-9-]+/', '-', $slug) ?? '';
-        $slug = trim($slug, '-');
-        if ($slug === '') {
-            $slug = 'rol';
-        }
-
+        $slug = trim((string)(preg_replace('/[^a-z0-9-]+/', '-', strtolower($name)) ?? ''), '-');
+        $slug = $slug !== '' ? $slug : 'rol';
         $base = "{$tenantSlug}_{$slug}";
-        $existingIds = array_flip(array_map(static fn (array $role): string => (string)($role['id'] ?? ''), $this->allRoles()));
-        $candidate = $base;
-        $suffix = 2;
-        while (isset($existingIds[$candidate])) {
-            $candidate = "{$base}-{$suffix}";
-            $suffix++;
+        if (in_array($base, ['platform_admin', 'superadmin'], true)) {
+            $base = "{$tenantSlug}_rol";
         }
-
+        $existingIds = array_flip(array_map(
+            static fn (array $role): string => (string)($role['id'] ?? ''),
+            $this->allRoles()
+        ));
+        $candidate = $base;
+        for ($suffix = 2; isset($existingIds[$candidate]); $suffix++) {
+            $candidate = "{$base}-{$suffix}";
+        }
         return $candidate;
     }
 }
