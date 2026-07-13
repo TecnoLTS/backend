@@ -80,10 +80,21 @@ const MODULE_OWNER_TABLES = [
         'loyalty_tier_rules',
         'loyalty_api_clients',
         'loyalty_idempotency_keys',
+        'loyalty_api_rate_limit_counters',
+        'loyalty_api_usage_daily',
         'loyalty_audit_events',
         'loyalty_risk_events',
         'loyalty_point_expirations',
         'loyalty_reversals',
+        'loyalty_debt_ledger',
+        'loyalty_command_journal',
+        'loyalty_earning_rule_versions',
+        'loyalty_api_request_nonces',
+        'loyalty_portal_otp_challenges',
+        'loyalty_portal_sessions',
+        'loyalty_portal_form_nonces',
+        'loyalty_wallet_campaigns',
+        'loyalty_wallet_campaign_recipients',
         'loyalty_navigation_items',
         'loyalty_navigation_item_actions',
     ],
@@ -143,10 +154,21 @@ const FDW_COMPATIBILITY_TABLES = [
     'loyalty_tier_rules',
     'loyalty_api_clients',
     'loyalty_idempotency_keys',
+    'loyalty_api_rate_limit_counters',
+    'loyalty_api_usage_daily',
     'loyalty_audit_events',
     'loyalty_risk_events',
     'loyalty_point_expirations',
     'loyalty_reversals',
+    'loyalty_debt_ledger',
+    'loyalty_command_journal',
+    'loyalty_earning_rule_versions',
+    'loyalty_api_request_nonces',
+    'loyalty_portal_otp_challenges',
+    'loyalty_portal_sessions',
+    'loyalty_portal_form_nonces',
+    'loyalty_wallet_campaigns',
+    'loyalty_wallet_campaign_recipients',
     'loyalty_navigation_items',
     'loyalty_navigation_item_actions',
 ];
@@ -377,6 +399,34 @@ function assertNoCrossDomainForeignKeys(PDO $pdo, string $moduleKey, array $owne
     }
 }
 
+function assertBillingTenantIsolation(PDO $pdo): void
+{
+    $requiredColumns = (int)$pdo->query(
+        "SELECT COUNT(*)
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND (table_name, column_name) IN (
+               ('invoice_headers', 'tenant_id'),
+               ('invoice_headers', 'billing_customer_id'),
+               ('billing_customers', 'tenant_id')
+           )"
+    )->fetchColumn();
+    if ($requiredColumns !== 3) {
+        fail('billing tenant isolation columns are incomplete');
+    }
+
+    $mismatches = (int)$pdo->query(
+        'SELECT COUNT(*)
+         FROM invoice_headers ih
+         JOIN billing_customers bc ON bc.id = ih.billing_customer_id
+         WHERE ih.tenant_id IS NOT NULL
+           AND ih.tenant_id <> bc.tenant_id'
+    )->fetchColumn();
+    if ($mismatches !== 0) {
+        fail("billing contains {$mismatches} invoice/customer tenant mismatches");
+    }
+}
+
 $ownerMap = tableOwnerMap();
 $ownerDatabaseMap = ownerDatabaseMap();
 $checkedOwners = [];
@@ -396,6 +446,9 @@ foreach (MODULE_CONNECTIONS as $moduleKey => $expectation) {
     assertForeignServerAccess($pdo, $ownerModule);
     assertCompatibilityTablesReadable($pdo, $ownerModule, $ownerMap, $ownerDatabaseMap);
     assertNoCrossDomainForeignKeys($pdo, $ownerModule, $ownerMap, $ownerDatabaseMap);
+    if ($ownerModule === 'billing') {
+        assertBillingTenantIsolation($pdo);
+    }
     $checkedOwners[$ownerModule] = true;
 }
 

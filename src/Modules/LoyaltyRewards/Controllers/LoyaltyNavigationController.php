@@ -14,9 +14,12 @@ final class LoyaltyNavigationController {
         Auth::requireAdmin();
 
         try {
-            $tenantId = TenantContext::id() ?: (TenantContext::slug() ?: 'default');
+            $tenantId = TenantContext::id() ?: TenantContext::slug();
+            if (!is_string($tenantId) || trim($tenantId) === '') {
+                throw new \RuntimeException('Tenant Loyalty no resuelto.');
+            }
             $service = $this->service ?? new LoyaltyNavigationService();
-            Response::json($service->catalog($tenantId));
+            Response::json($service->catalog(trim($tenantId)));
         } catch (\Throwable $exception) {
             error_log(sprintf('[LOYALTY_NAVIGATION_ERROR] catalog failed: %s', $exception->getMessage()));
             Response::error(

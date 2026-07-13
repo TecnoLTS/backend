@@ -19,7 +19,7 @@ if (is_readable($envDir . '/.env')) {
 
 TenantContext::set(['id' => 'fidepuntos', 'slug' => 'fidepuntos', 'name' => 'Fidepuntos']);
 $pdo = Database::getModuleInstance(LoyaltyRewardsDomain::KEY);
-$repository = new LoyaltyRepository($pdo); // dispara ensureSchema()
+$repository = new LoyaltyRepository($pdo);
 
 $checks = [];
 $assert = static function (string $name, bool $ok) use (&$checks): void {
@@ -145,6 +145,84 @@ if ($previewAllForDrain >= 1) {
     $workerAfter = $repository->getNotificationCampaign($worker['id']);
     $assert('campaña worker quedo completed', ($workerAfter['status'] ?? '') === 'completed');
     $assert('sent_count de worker coincide', (int)$workerAfter['sent_count'] === $previewAllForDrain);
+}
+
+// Carrera at-most-once: el reaper puede declarar delivery_unknown mientras la
+// llamada remota sigue en vuelo. Si luego llega una respuesta exitosa tardia,
+// el worker debe conservar el estado terminal y no sumar tambien sent_count.
+$previewForLateResult = $repository->previewNotificationAudience(['audience_type' => 'all'])['recipients'];
+if ($previewForLateResult >= 1) {
+    $lateCampaign = $repository->createNotificationCampaign([
+        'audience_type' => 'all',
+        'title' => 'Resultado tardio',
+        'body' => 'Debe conservar delivery_unknown',
+    ], 'exercise-user');
+    $lateService = new class($pdo, (string)$lateCampaign['id']) implements WalletMessenger {
+        public function __construct(private readonly PDO $pdo, private readonly string $campaignId) {}
+
+        public function addMessage(string $accountId, string $header, string $body): array {
+            $recipient = $this->pdo->prepare(
+                "UPDATE loyalty_wallet_campaign_recipients
+                 SET status = 'delivery_unknown',
+                     last_error = 'simulacion de reaper concurrente',
+                     updated_at = NOW()
+                 WHERE campaign_id = :campaign_id AND status = 'sending'"
+            );
+            $recipient->execute(['campaign_id' => $this->campaignId]);
+            $changed = $recipient->rowCount();
+            if ($changed > 0) {
+                $campaign = $this->pdo->prepare(
+                    'UPDATE loyalty_wallet_campaigns
+                     SET delivery_unknown_count = delivery_unknown_count + :changed,
+                         failed_count = failed_count + :changed
+                     WHERE id = :campaign_id'
+                );
+                $campaign->execute(['changed' => $changed, 'campaign_id' => $this->campaignId]);
+            }
+
+            return ['objectId' => 'obj_' . $accountId, 'messageId' => 'late_success'];
+        }
+    };
+
+    $lateTally = $processor->drainCampaign((string)$lateCampaign['id'], $lateService);
+    $lateAfter = $repository->getNotificationCampaign((string)$lateCampaign['id']);
+    $assert('respuesta tardia conserva delivery_unknown', $lateTally['delivery_unknown'] === $previewForLateResult);
+    $assert('respuesta tardia no incrementa sent_count', (int)($lateAfter['sent_count'] ?? -1) === 0);
+    $assert('respuesta tardia no duplica contador terminal', (int)($lateAfter['delivery_unknown_count'] ?? -1) === $previewForLateResult);
+    $assert('respuesta tardia mantiene failed_count consistente', (int)($lateAfter['failed_count'] ?? -1) === $previewForLateResult);
+}
+
+// At-most-once: un proceso que murio despues de reclamar destinatarios no debe
+// reenviarlos. Al superar la ventana de recuperacion quedan delivery_unknown.
+$previewForUnknown = $repository->previewNotificationAudience(['audience_type' => 'all'])['recipients'];
+if ($previewForUnknown >= 1) {
+    $unknownCampaign = $repository->createNotificationCampaign([
+        'audience_type' => 'all',
+        'title' => 'Resultado ambiguo',
+        'body' => 'No debe reenviarse',
+    ], 'exercise-user');
+    $markStale = $pdo->prepare(
+        "UPDATE loyalty_wallet_campaign_recipients
+         SET status = 'sending', attempts = attempts + 1, updated_at = NOW() - INTERVAL '20 minutes'
+         WHERE campaign_id = :campaign_id AND status = 'pending'"
+    );
+    $markStale->execute(['campaign_id' => $unknownCampaign['id']]);
+
+    $mustNotSend = new class implements WalletMessenger {
+        public int $calls = 0;
+        public function addMessage(string $accountId, string $header, string $body): array {
+            $this->calls++;
+            return ['objectId' => 'unexpected', 'messageId' => 'unexpected'];
+        }
+    };
+    $unknownTally = $processor->drainCampaign($unknownCampaign['id'], $mustNotSend);
+    $assert('stale sending no se reenvia', $mustNotSend->calls === 0 && $unknownTally['processed'] === 0);
+    $unknownAfter = $repository->getNotificationCampaign($unknownCampaign['id']);
+    $assert('stale sending queda delivery_unknown', (int)($unknownAfter['delivery_unknown_count'] ?? 0) === $previewForUnknown);
+    $assert('resultado ambiguo cierra con errores', ($unknownAfter['status'] ?? '') === 'completed_with_errors');
+
+    $processor->drainCampaign($unknownCampaign['id'], $mustNotSend);
+    $assert('delivery_unknown no se reintenta', $mustNotSend->calls === 0);
 }
 
 $failed = array_keys(array_filter($checks, static fn($v) => !$v));

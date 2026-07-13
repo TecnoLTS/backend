@@ -4,7 +4,7 @@
   "name": "Paramascotas Core API",
   "kind": "service",
   "repoPath": "backend",
-  "description": "API principal multi-tenant para ecommerce, administracion, RBAC, catalogo, pedidos, reportes y coordinacion operativa del tenant.",
+  "description": "API principal multi-tenant para ecommerce, administracion, RBAC, LoyaltyRewards, catalogo, pedidos, reportes y coordinacion operativa del tenant.",
   "lifecycle": {
     "status": "active",
     "currentTopology": "shared-backend",
@@ -22,7 +22,7 @@
       "operationFlow": [
         "Expone su API multi-tenant y resuelve tenant, autenticacion y permisos desde el propio runtime.",
         "Aplica reglas de negocio de ecommerce, administracion, RBAC y operaciones generales.",
-        "Lee y escribe cada bounded context en dashboard, ecommerce o facturacion mediante ConnectionRegistry.",
+        "Lee y escribe cada bounded context en dashboard, ecommerce, facturacion o loyalty mediante ConnectionRegistry.",
         "Publica contratos HTTP para el sitio publico, el dashboard y otros consumidores autorizados."
       ],
       "sourceOfTruth": "owner-runtime",
@@ -31,7 +31,7 @@
     },
     "orchestrated": {
       "supported": true,
-      "summary": "Sirve como backend operativo unico para dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, ReportingFinance y Mailer sobre bases logicas agrupadas por servicio.",
+      "summary": "Sirve como backend operativo unico para dashboard y sitio publico con IdentityPlatform, CatalogInventory, Commerce, Billing, LoyaltyRewards, ReportingFinance y Mailer sobre bases logicas agrupadas por servicio.",
       "requires": [
         "dashboard como orquestador visual",
         "gatewayapisix/APISIX para contrato publico",
@@ -40,7 +40,7 @@
       "operationFlow": [
         "El dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
         "La UI consume el Core API por proxy dashboard o por el contrato publico de gatewayapisix.",
-        "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a dashboard, ecommerce o facturacion.",
+        "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a dashboard, ecommerce, facturacion o loyalty.",
         "El dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
       ],
       "sourceOfTruth": "owner-runtime",
@@ -70,6 +70,11 @@
         "key": "public-billing-api",
         "path": "/${PUBLIC_TENANT_SLUG}/${PUBLIC_BILLING_SERVICE_SEGMENT}/${PUBLIC_BILLING_ENV_SEGMENT}/v1",
         "notes": "Contrato publico fiscal APISIX; reescribe hacia /api/{test|production}/v1 dentro de platform-core/Billing."
+      },
+      {
+        "key": "public-loyalty-api",
+        "path": "/${PUBLIC_TENANT_SLUG}/${PUBLIC_LOYALTY_SERVICE_SEGMENT}/v1",
+        "notes": "Contrato publico Loyalty APISIX por tenant; reescribe hacia /api/loyalty/v1 dentro de platform-core/LoyaltyRewards y exige API key o Bearer."
       }
     ]
   },
@@ -164,6 +169,7 @@
       "No crear runtimes nuevos hasta que el dominio tenga module.json, health, migraciones y backup/restore propios.",
       "Retirar gradualmente las tablas FDW de compatibilidad cuando las consultas cross-domain migren a contratos API o snapshots.",
       "Billing puede extraerse luego como runtime propio, pero hoy no existe dependencia HTTP fiscal paralela en modo orquestado.",
+      "LoyaltyRewards puede extraerse luego como runtime propio; mientras tanto su contrato publico y su base loyalty permanecen centralizados en platform-core.",
       "Mailer puede crecer como runtime propio de correo; hasta entonces vive como modulo tecnico interno del Core API con base dashboard."
     ]
   },

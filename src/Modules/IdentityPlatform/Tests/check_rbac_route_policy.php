@@ -83,7 +83,7 @@ assertDecision(
 );
 assertDecision(
     $access->routeAccessDecision('loyalty.admin', 'POST', '/api/admin/loyalty/adjustments'),
-    'loyalty.customers.update',
+    'loyalty.customers.adjust_points',
     'loyalty-points'
 );
 assertDecision(

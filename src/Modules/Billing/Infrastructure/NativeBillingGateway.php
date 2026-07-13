@@ -3,6 +3,7 @@
 namespace App\Modules\Billing\Infrastructure;
 
 use App\Core\Database;
+use App\Core\TenantContext;
 use App\Modules\Billing\Application\BillingGateway;
 use App\Modules\Billing\Domain\BillingDomain;
 use App\Services\BillingApiException;
@@ -440,6 +441,10 @@ final class NativeBillingGateway implements BillingGateway {
             throw new \InvalidArgumentException($message);
         }
 
+        $tenantId = TenantContext::id() ?: TenantContext::slug();
+        $context['tenant_id'] = is_string($tenantId) && trim($tenantId) !== ''
+            ? trim($tenantId)
+            : null;
         $this->apiKeys->touchUsage((int)$context['api_key_id']);
         return $context;
     }

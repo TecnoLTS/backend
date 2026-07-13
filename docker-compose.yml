@@ -37,6 +37,7 @@ services:
       TZ: America/Guayaquil
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      PUBLIC_LOYALTY_SERVICE_SEGMENT: ${PUBLIC_LOYALTY_SERVICE_SEGMENT:-fidelizacion}
       PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
       PRIMARY_SITE_DOMAIN: ${PRIMARY_SITE_DOMAIN:-paramascotasec.com}
       PRIMARY_SITE_ALIASES: ${PRIMARY_SITE_ALIASES:-www.paramascotasec.com}

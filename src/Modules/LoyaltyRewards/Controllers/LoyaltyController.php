@@ -5,14 +5,23 @@ namespace App\Modules\LoyaltyRewards\Controllers;
 use App\Core\Auth;
 use App\Core\Response;
 use App\Core\TenantContext;
+use App\Modules\LoyaltyRewards\Application\LoyaltyReportService;
+use App\Modules\LoyaltyRewards\Domain\ExternalApiAccessException;
+use App\Modules\LoyaltyRewards\Domain\ExternalApiConflictException;
+use App\Modules\LoyaltyRewards\Domain\LoyaltyReportExportTooLargeException;
+use App\Modules\LoyaltyRewards\Domain\LoyaltyResourceNotFoundException;
+use App\Modules\LoyaltyRewards\Domain\PurchaseVerificationException;
 use App\Modules\LoyaltyRewards\Infrastructure\LoyaltyRepository;
 use App\Modules\LoyaltyRewards\Infrastructure\RewardImageStorage;
 
 final class LoyaltyController {
     private LoyaltyRepository $repository;
+    private LoyaltyReportService $reportService;
+    private ?string $rawRequestBody = null;
 
     public function __construct() {
         $this->repository = new LoyaltyRepository();
+        $this->reportService = new LoyaltyReportService();
     }
 
     public function dashboard(): void {
@@ -103,6 +112,9 @@ final class LoyaltyController {
 
     public function rewardImage(string $tenantId, string $fileName): void {
         try {
+            if (!hash_equals($this->tenantId(), trim($tenantId))) {
+                throw new \RuntimeException('Imagen no encontrada.');
+            }
             (new RewardImageStorage())->send($tenantId, $fileName);
         } catch (\Throwable) {
             Response::error('Imagen no encontrada.', 404, 'LOYALTY_REWARD_IMAGE_NOT_FOUND');
@@ -133,7 +145,7 @@ final class LoyaltyController {
 
     public function registerPurchase(): void {
         $user = Auth::requireAdmin();
-        $payload = $this->jsonPayload();
+        $payload = $this->withCommandId($this->jsonPayload());
         $this->respond(
             fn() => $this->repository->registerPurchase($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
             'LOYALTY_PURCHASE_REGISTER_FAILED',
@@ -158,7 +170,7 @@ final class LoyaltyController {
 
     public function reversePurchase(string $reference): void {
         $user = Auth::requireAdmin();
-        $payload = $this->jsonPayload();
+        $payload = $this->withCommandId($this->jsonPayload());
         $this->respond(
             fn() => $this->repository->reversePurchase($reference, $payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
             'LOYALTY_PURCHASE_REVERSE_FAILED',
@@ -168,7 +180,7 @@ final class LoyaltyController {
 
     public function redeemReward(): void {
         $user = Auth::requireAdmin();
-        $payload = $this->jsonPayload();
+        $payload = $this->withCommandId($this->jsonPayload());
         $this->respond(
             fn() => $this->repository->redeemReward($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
             'LOYALTY_REDEMPTION_FAILED',
@@ -243,11 +255,10 @@ final class LoyaltyController {
     }
 
     public function externalGoogleWalletLink(string $accountId): void {
-        $client = $this->externalClient('wallet:link');
-        $this->respond(
-            fn() => $this->repository->googleWalletLinkForAccount($accountId, $client),
-            'LOYALTY_EXTERNAL_WALLET_LINK_FAILED'
-        );
+        $this->handleExternal(function () use ($accountId): void {
+            $client = $this->externalClient('wallet:link');
+            Response::json($this->repository->googleWalletLinkForAccount($accountId, $client));
+        }, 'LOYALTY_EXTERNAL_WALLET_LINK_FAILED');
     }
 
     public function publicGoogleWalletLanding(string $token): void {
@@ -336,10 +347,11 @@ final class LoyaltyController {
 
     public function publicRewardsPortal(string $token): void {
         try {
-            $portal = $this->repository->publicRewardsPortal($token);
+            $exchange = $this->repository->exchangePortalSession($token);
+            $this->setPortalSessionCookie($token, 15 * 60);
             Response::noStore();
-            header('Content-Type: text/html; charset=UTF-8');
-            echo $this->renderRewardsPortalPage($portal);
+            http_response_code(303);
+            header('Location: ' . (string)$exchange['portalPath']);
         } catch (\InvalidArgumentException $e) {
             $this->respondWalletLandingError($e->getMessage(), 422);
         } catch (\Throwable $e) {
@@ -347,7 +359,22 @@ final class LoyaltyController {
         }
     }
 
-    public function publicRewardsClaim(string $token): void {
+    public function publicRewardsPortalSession(): void {
+        try {
+            $portal = $this->repository->publicRewardsPortal($this->portalSessionCookie());
+            Response::noStore();
+            header('Content-Type: text/html; charset=UTF-8');
+            echo $this->renderRewardsPortalPage($portal);
+        } catch (\InvalidArgumentException $e) {
+            $this->clearPortalSessionCookie();
+            $this->respondWalletLandingError($e->getMessage(), 422);
+        } catch (\Throwable $e) {
+            $this->respondWalletLandingError('No se pudo abrir el portal de premios.', 500);
+        }
+    }
+
+    public function publicRewardsClaimSession(): void {
+        $token = $this->portalSessionCookie();
         try {
             $payload = $this->requestPayload();
             $result = $this->repository->createPortalClaim($token, $payload);
@@ -363,7 +390,8 @@ final class LoyaltyController {
         }
     }
 
-    public function publicRewardsCancel(string $token, string $redemptionId): void {
+    public function publicRewardsCancelSession(string $redemptionId): void {
+        $token = $this->portalSessionCookie();
         try {
             $payload = $this->requestPayload();
             $result = $this->repository->cancelPortalClaim($token, $redemptionId, $payload);
@@ -377,6 +405,14 @@ final class LoyaltyController {
         } catch (\Throwable $e) {
             $this->respondRewardsPortalFeedback($token, $this->portalClaimErrorFeedback('No se pudo cancelar la solicitud.'), 500);
         }
+    }
+
+    public function publicRewardsClaim(string $token): void {
+        Response::error('La URL con token solo puede consumirse una vez mediante GET.', 410, 'LOYALTY_PORTAL_TOKEN_CONSUMED');
+    }
+
+    public function publicRewardsCancel(string $token, string $redemptionId): void {
+        Response::error('La URL con token solo puede consumirse una vez mediante GET.', 410, 'LOYALTY_PORTAL_TOKEN_CONSUMED');
     }
 
     public function redemptionClaims(): void {
@@ -866,12 +902,14 @@ HTML;
         $image = $this->rewardImageHtml($reward, $name, $points);
         $canClaim = (bool)($reward['canClaim'] ?? false);
         $blockReason = trim((string)($reward['blockReason'] ?? ''));
+        $formNonce = $this->e((string)($reward['formNonce'] ?? ''));
         $action = $this->e(rtrim($portalPath, '/') . '/claims');
         $form = '';
         if ($canClaim && $mode === 'in_store') {
             $form = <<<HTML
 <form method="post" action="{$action}">
   <input type="hidden" name="rewardId" value="{$id}">
+  <input type="hidden" name="formNonce" value="{$formNonce}">
   <input type="hidden" name="fulfillmentType" value="in_store">
   <button class="btn btn-primary" type="submit">Solicitar premio</button>
 </form>
@@ -883,6 +921,7 @@ HTML;
   <summary class="btn btn-primary">Solicitar premio</summary>
 <form method="post" action="{$action}">
   <input type="hidden" name="rewardId" value="{$id}">
+  <input type="hidden" name="formNonce" value="{$formNonce}">
   {$options}
   <label>Telefono de contacto<input name="contactPhone" inputmode="tel" autocomplete="tel"></label>
   <label>Notas para el gestor<textarea name="notes" maxlength="500" placeholder="Horario, referencia de retiro o direccion si aplica"></textarea></label>
@@ -953,8 +992,10 @@ HTML;
         $cancel = '';
         if (in_array($status, ['pending_review', 'ready_for_pickup'], true)) {
             $action = $this->e(rtrim($portalPath, '/') . '/claims/' . rawurlencode((string)$claim['id']) . '/cancel');
+            $formNonce = $this->e((string)($claim['cancelFormNonce'] ?? ''));
             $cancel = <<<HTML
 <form method="post" action="{$action}">
+  <input type="hidden" name="formNonce" value="{$formNonce}">
   <input type="hidden" name="reason" value="Cancelado desde Wallet">
   <button class="btn btn-danger" type="submit">Cancelar solicitud</button>
 </form>
@@ -1122,7 +1163,7 @@ HTML;
 
     public function adjustPoints(): void {
         $user = Auth::requireAdmin();
-        $payload = $this->jsonPayload();
+        $payload = $this->withCommandId($this->jsonPayload());
         $this->respond(
             fn() => $this->repository->adjustPoints($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
             'LOYALTY_POINTS_ADJUST_FAILED',
@@ -1132,13 +1173,22 @@ HTML;
 
     public function reportsCatalog(): void {
         Auth::requireAdmin();
-        $this->respond(fn() => $this->repository->reportsCatalog(), 'LOYALTY_REPORTS_CATALOG_FAILED');
+        $filters = $this->queryFilters();
+        $this->respond(
+            fn() => (($filters['contract'] ?? '') === 'v2')
+                ? $this->reportService->catalog()
+                : $this->repository->reportsCatalog(),
+            'LOYALTY_REPORTS_CATALOG_FAILED'
+        );
     }
 
     public function reportCatalog(string $reportKey): void {
         Auth::requireAdmin();
         $this->respond(function () use ($reportKey): array {
-            foreach ($this->repository->reportsCatalog() as $report) {
+            $reports = (($_GET['contract'] ?? '') === 'v2')
+                ? $this->reportService->catalog()
+                : $this->repository->reportsCatalog();
+            foreach ($reports as $report) {
                 if (($report['key'] ?? null) === $reportKey) {
                     return [$report];
                 }
@@ -1151,33 +1201,90 @@ HTML;
     public function report(string $reportKey): void {
         Auth::requireAdmin();
         $filters = $this->queryFilters();
-        $this->respond(fn() => $this->repository->report($reportKey, $filters), 'LOYALTY_REPORT_FAILED');
+        $this->respond(
+            fn() => (($filters['contract'] ?? '') === 'v2')
+                ? $this->reportService->report($reportKey, $filters)
+                : $this->repository->report($reportKey, $filters),
+            'LOYALTY_REPORT_FAILED'
+        );
     }
 
     public function exportReport(string $reportKey): void {
         Auth::requireAdmin();
+        $temporaryPath = null;
+        $stream = null;
         try {
             $filters = $this->queryFilters();
             $format = strtolower((string)($filters['format'] ?? 'xlsx'));
             unset($filters['format']);
+            if (!in_array($format, ['csv', 'xlsx'], true)) {
+                throw new \InvalidArgumentException('El formato de exportacion debe ser csv o xlsx.');
+            }
+            $v2 = ($filters['contract'] ?? '') === 'v2';
 
             if ($format === 'csv') {
-                $export = $this->repository->reportCsv($reportKey, $filters);
+                $export = $v2
+                    ? $this->reportService->reportCsvFile($reportKey, $filters)
+                    : $this->repository->reportCsv($reportKey, $filters);
                 $contentType = 'text/csv; charset=utf-8';
             } else {
-                $export = $this->repository->reportExcel($reportKey, $filters);
+                $export = $v2
+                    ? $this->reportService->reportExcelFile($reportKey, $filters)
+                    : $this->repository->reportExcel($reportKey, $filters);
                 $contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            }
+
+            if ($v2) {
+                $temporaryPath = is_string($export['path'] ?? null) ? $export['path'] : null;
+                if ($temporaryPath === null || !is_file($temporaryPath) || !is_readable($temporaryPath)) {
+                    throw new \RuntimeException('La exportacion temporal no esta disponible.');
+                }
+                $stream = fopen($temporaryPath, 'rb');
+                if ($stream === false) {
+                    throw new \RuntimeException('No se pudo abrir la exportacion temporal.');
+                }
             }
 
             $filename = preg_replace('/[^a-zA-Z0-9._-]+/', '-', (string)($export['filename'] ?? 'fidepuntos-reporte.xlsx'));
             header('Content-Type: ' . $contentType);
             header('Content-Disposition: attachment; filename="' . $filename . '"');
             header('Cache-Control: no-store, no-cache, must-revalidate');
-            echo (string)($export['content'] ?? '');
+            if ($v2) {
+                header('Content-Length: ' . (int)($export['size'] ?? filesize($temporaryPath)));
+            }
+            if (isset($export['rowCount'])) {
+                header('X-Report-Row-Count: ' . (int)$export['rowCount']);
+            }
+            if (isset($export['generatedAt'])) {
+                header('X-Report-Generated-At: ' . (string)$export['generatedAt']);
+            }
+            if ($v2 && is_resource($stream)) {
+                while (!feof($stream)) {
+                    $chunk = fread($stream, 1048576);
+                    if ($chunk === false) {
+                        throw new \RuntimeException('No se pudo transmitir la exportacion.');
+                    }
+                    echo $chunk;
+                }
+            } else {
+                echo (string)($export['content'] ?? '');
+            }
+        } catch (LoyaltyReportExportTooLargeException $e) {
+            Response::error($e->getMessage(), 422, 'LOYALTY_REPORT_EXPORT_TOO_LARGE');
         } catch (\InvalidArgumentException $e) {
             Response::error($e->getMessage(), 422, 'LOYALTY_REPORT_EXPORT_FAILED');
         } catch (\Throwable $e) {
-            Response::error($e->getMessage(), 500, 'LOYALTY_REPORT_EXPORT_FAILED');
+            $this->logFailure('admin', 'LOYALTY_REPORT_EXPORT_FAILED', $e);
+            if (!headers_sent()) {
+                Response::error('No se pudo generar la exportacion solicitada.', 500, 'LOYALTY_REPORT_EXPORT_FAILED');
+            }
+        } finally {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+            if ($temporaryPath !== null) {
+                @unlink($temporaryPath);
+            }
         }
     }
 
@@ -1233,6 +1340,16 @@ HTML;
         );
     }
 
+    public function rotateApiClient(string $clientId): void {
+        $user = Auth::requireAdmin();
+        $payload = $this->jsonPayload();
+        $this->respond(
+            fn() => $this->repository->rotateApiClient($clientId, $payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            'LOYALTY_API_CLIENT_ROTATE_FAILED',
+            201
+        );
+    }
+
     public function notificationsPreview(): void {
         Auth::requireAdmin();
         $payload = $this->jsonPayload();
@@ -1268,87 +1385,169 @@ HTML;
     }
 
     public function externalProgram(): void {
-        $this->externalClient('program:read');
-        $this->respond(fn() => $this->repository->externalProgram(), 'LOYALTY_EXTERNAL_PROGRAM_FAILED');
+        $this->handleExternal(function (): void {
+            $this->externalClient('program:read');
+            Response::json($this->repository->externalProgram());
+        }, 'LOYALTY_EXTERNAL_PROGRAM_FAILED');
     }
 
     public function externalRewards(): void {
-        $this->externalClient('rewards:read');
-        $this->respond(fn() => $this->repository->rewards(), 'LOYALTY_EXTERNAL_REWARDS_FAILED');
+        $this->handleExternal(function (): void {
+            $this->externalClient('rewards:read');
+            Response::json($this->repository->rewards(['status' => 'active']));
+        }, 'LOYALTY_EXTERNAL_REWARDS_FAILED');
     }
 
     public function externalMember(string $accountId): void {
-        $this->externalClient('members:read');
-        $this->respond(fn() => $this->repository->customersPage(['q' => $accountId, 'limit' => 10, 'offset' => 0]), 'LOYALTY_EXTERNAL_MEMBER_FAILED');
+        $this->handleExternal(function () use ($accountId): void {
+            $this->externalClient('members:read');
+            Response::json($this->repository->externalMember($accountId));
+        }, 'LOYALTY_EXTERNAL_MEMBER_FAILED');
     }
 
     public function externalMemberUpsert(): void {
-        $client = $this->externalClient('members:write');
-        $payload = $this->jsonPayload();
-        $idempotencyKey = $this->header('Idempotency-Key');
-        $result = $this->repository->idempotentExternalMutation(
-            'members.upsert',
-            $idempotencyKey,
-            $payload,
-            fn() => $this->repository->upsertExternalMember($payload, $client)
-        );
-        Response::json($result['payload'], $result['status']);
+        $this->handleExternal(function (): void {
+            $client = $this->externalClient('members:write');
+            $this->verifyExternalPosMutation($client);
+            $payload = $this->withCommandId($this->jsonPayload());
+            $result = $this->repository->idempotentExternalMutation(
+                'members.upsert',
+                $this->header('Idempotency-Key'),
+                $payload,
+                fn() => $this->repository->upsertExternalMember($payload, $client),
+                (string)$client['id']
+            );
+            Response::json($result['payload'], $result['status']);
+        }, 'LOYALTY_EXTERNAL_MEMBER_UPSERT_FAILED');
     }
 
     public function externalPurchase(): void {
-        $client = $this->externalClient('purchases:write');
-        $payload = $this->jsonPayload();
-        $idempotencyKey = $this->header('Idempotency-Key');
-        $result = $this->repository->idempotentExternalMutation(
-            'purchases.create',
-            $idempotencyKey,
-            $payload,
-            fn() => $this->repository->registerPurchase($payload, 'api:' . ($client['id'] ?? 'external'))
-        );
-        Response::json($result['payload'], $result['status']);
+        $this->handleExternal(function (): void {
+            $client = $this->externalClient('purchases:write');
+            $this->verifyExternalPosMutation($client);
+            $payload = $this->withCommandId($this->jsonPayload());
+            $clientSource = strtolower(trim((string)($client['source'] ?? '')));
+            $trustedSource = [
+                'verified' => $clientSource === 'pos',
+                'type' => $clientSource,
+                'clientId' => (string)($client['id'] ?? ''),
+            ];
+            $result = $this->repository->idempotentExternalMutation(
+                'purchases.create',
+                $this->header('Idempotency-Key'),
+                $payload,
+                fn() => $this->repository->registerPurchase($payload, 'api:' . ($client['id'] ?? 'external'), $trustedSource),
+                (string)$client['id']
+            );
+            Response::json($result['payload'], $result['status']);
+        }, 'LOYALTY_EXTERNAL_PURCHASE_FAILED');
     }
 
     public function externalPurchaseReverse(string $reference): void {
-        $client = $this->externalClient('purchases:reverse');
-        $payload = $this->jsonPayload();
-        $idempotencyKey = $this->header('Idempotency-Key');
-        $result = $this->repository->idempotentExternalMutation(
-            'purchases.reverse.' . $reference,
-            $idempotencyKey,
-            $payload,
-            fn() => $this->repository->reversePurchase($reference, $payload, 'api:' . ($client['id'] ?? 'external'))
-        );
-        Response::json($result['payload'], $result['status']);
+        $this->handleExternal(function () use ($reference): void {
+            $client = $this->externalClient('purchases:reverse');
+            $this->verifyExternalPosMutation($client);
+            $payload = $this->withCommandId($this->jsonPayload());
+            $sourceContext = [
+                'clientId' => (string)($client['id'] ?? ''),
+                'source' => strtolower(trim((string)($client['source'] ?? ''))),
+            ];
+            $result = $this->repository->idempotentExternalMutation(
+                'purchases.reverse.' . $reference,
+                $this->header('Idempotency-Key'),
+                $payload,
+                fn() => $this->repository->reversePurchase(
+                    $reference,
+                    $payload,
+                    'api:' . ($client['id'] ?? 'external'),
+                    $sourceContext
+                ),
+                (string)$client['id']
+            );
+            Response::json($result['payload'], $result['status']);
+        }, 'LOYALTY_EXTERNAL_PURCHASE_REVERSE_FAILED');
     }
 
     public function externalRedemption(): void {
-        $client = $this->externalClient('redemptions:write');
-        $payload = $this->jsonPayload();
-        $idempotencyKey = $this->header('Idempotency-Key');
-        $result = $this->repository->idempotentExternalMutation(
-            'redemptions.create',
-            $idempotencyKey,
-            $payload,
-            fn() => $this->repository->redeemReward($payload, 'api:' . ($client['id'] ?? 'external'))
-        );
-        Response::json($result['payload'], $result['status']);
+        $this->handleExternal(function (): void {
+            $client = $this->externalClient('redemptions:write');
+            $this->verifyExternalPosMutation($client);
+            $payload = $this->withCommandId($this->jsonPayload());
+            $result = $this->repository->idempotentExternalMutation(
+                'redemptions.create',
+                $this->header('Idempotency-Key'),
+                $payload,
+                fn() => $this->repository->redeemReward(
+                    $payload,
+                    'api:' . ($client['id'] ?? 'external'),
+                    (string)($client['source'] ?? 'api')
+                ),
+                (string)$client['id']
+            );
+            Response::json($result['payload'], $result['status']);
+        }, 'LOYALTY_EXTERNAL_REDEMPTION_FAILED');
     }
 
     public function externalReport(string $reportKey): void {
-        $this->externalClient('reports:read');
-        $this->respond(fn() => $this->repository->report($reportKey, $this->queryFilters()), 'LOYALTY_EXTERNAL_REPORT_FAILED');
+        $this->handleExternal(function () use ($reportKey): void {
+            $this->externalClient('reports:read');
+            Response::json($this->repository->report($reportKey, $this->queryFilters()));
+        }, 'LOYALTY_EXTERNAL_REPORT_FAILED');
+    }
+
+    private function handleExternal(callable $callback, string $code): void {
+        try {
+            $callback();
+        } catch (ExternalApiAccessException $exception) {
+            if ($exception->httpStatus() === 429) {
+                header('Retry-After: 60');
+            }
+            Response::error(
+                $exception->getMessage(),
+                $exception->httpStatus(),
+                $exception->errorCode()
+            );
+        } catch (ExternalApiConflictException $exception) {
+            Response::error($exception->getMessage(), 409, 'LOYALTY_API_IDEMPOTENCY_CONFLICT');
+        } catch (PurchaseVerificationException $exception) {
+            Response::error($exception->getMessage(), $exception->httpStatus(), 'LOYALTY_PURCHASE_VERIFICATION_FAILED');
+        } catch (\InvalidArgumentException $exception) {
+            Response::error($exception->getMessage(), 422, $code);
+        } catch (LoyaltyResourceNotFoundException $exception) {
+            Response::error($exception->getMessage(), 404, $code);
+        } catch (\Throwable $exception) {
+            $this->logFailure('external', $code, $exception);
+            Response::error('No se pudo procesar la solicitud de fidelizacion.', 500, $code);
+        }
     }
 
     private function respond(callable $callback, string $code, int $status = 200): void {
         try {
             Response::json($callback(), $status);
+        } catch (ExternalApiConflictException $e) {
+            Response::error($e->getMessage(), 409, 'LOYALTY_COMMAND_CONFLICT');
+        } catch (PurchaseVerificationException $e) {
+            Response::error($e->getMessage(), $e->httpStatus(), 'LOYALTY_OPERATION_VERIFICATION_FAILED');
         } catch (\InvalidArgumentException $e) {
             Response::error($e->getMessage(), 422, $code);
-        } catch (\RuntimeException $e) {
+        } catch (LoyaltyResourceNotFoundException $e) {
             Response::error($e->getMessage(), 404, $code);
         } catch (\Throwable $e) {
-            Response::error($e->getMessage(), 500, $code);
+            $this->logFailure('admin', $code, $e);
+            Response::error('No se pudo procesar la solicitud de fidelizacion.', 500, $code);
         }
+    }
+
+    private function logFailure(string $surface, string $code, \Throwable $exception): void {
+        error_log(sprintf(
+            '[LOYALTY_ERROR] surface=%s tenant=%s request_id=%s code=%s exception=%s error=%s',
+            $surface,
+            TenantContext::id() ?? TenantContext::slug() ?? 'unresolved',
+            $this->header('X-Request-ID') ?: 'unavailable',
+            $code,
+            get_class($exception),
+            $exception->getMessage()
+        ));
     }
 
     /** @return array{items: array, total: int, limit: int, offset: int, hasMore: bool} */
@@ -1388,7 +1587,7 @@ HTML;
     }
 
     private function jsonPayload(): array {
-        $raw = file_get_contents('php://input');
+        $raw = $this->rawRequestBody();
         if (!is_string($raw) || trim($raw) === '') {
             return [];
         }
@@ -1399,6 +1598,66 @@ HTML;
         }
 
         return $decoded;
+    }
+
+    private function rawRequestBody(): string {
+        if ($this->rawRequestBody !== null) {
+            return $this->rawRequestBody;
+        }
+        $raw = file_get_contents('php://input');
+        $this->rawRequestBody = is_string($raw) ? $raw : '';
+
+        return $this->rawRequestBody;
+    }
+
+    private function withCommandId(array $payload): array {
+        $headerCommandId = $this->header('Idempotency-Key');
+        if ($headerCommandId === '') {
+            return $payload;
+        }
+        $bodyCommandId = trim((string)($payload['commandId'] ?? $payload['command_id'] ?? ''));
+        if ($bodyCommandId !== '' && !hash_equals($bodyCommandId, $headerCommandId)) {
+            throw new \InvalidArgumentException('commandId e Idempotency-Key deben coincidir.');
+        }
+        $payload['_commandId'] = $headerCommandId;
+
+        return $payload;
+    }
+
+    private function portalSessionCookieName(): string {
+        $tenant = strtolower((string)(TenantContext::slug() ?? TenantContext::id() ?? 'tenant'));
+        $tenant = preg_replace('/[^a-z0-9_]+/', '_', $tenant) ?: 'tenant';
+
+        return 'pm_loyalty_portal_' . $tenant;
+    }
+
+    private function portalSessionCookie(): string {
+        $token = trim((string)($_COOKIE[$this->portalSessionCookieName()] ?? ''));
+        if ($token === '') {
+            throw new \InvalidArgumentException('La sesion del portal no existe o expiro.');
+        }
+
+        return $token;
+    }
+
+    private function setPortalSessionCookie(string $token, int $ttl): void {
+        setcookie($this->portalSessionCookieName(), $token, [
+            'expires' => time() + $ttl,
+            'path' => '/',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    }
+
+    private function clearPortalSessionCookie(): void {
+        setcookie($this->portalSessionCookieName(), '', [
+            'expires' => time() - 3600,
+            'path' => '/',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
     }
 
     private function requestPayload(): array {
@@ -1414,7 +1673,12 @@ HTML;
     }
 
     private function tenantId(): string {
-        return TenantContext::id() ?: (TenantContext::slug() ?: 'default');
+        $tenantId = TenantContext::id() ?: TenantContext::slug();
+        if (!is_string($tenantId) || trim($tenantId) === '') {
+            throw new \RuntimeException('Tenant Loyalty no resuelto.');
+        }
+
+        return trim($tenantId);
     }
 
     private function publicImagePath(string $path): string {
@@ -1449,7 +1713,37 @@ HTML;
             }
         }
 
-        return $this->repository->authenticateExternalClient($rawKey, $scope);
+        $client = $this->repository->authenticateExternalClient($rawKey, $scope);
+        // Solo vive durante esta solicitud y nunca se serializa ni audita.
+        $client['_rawCredential'] = $rawKey;
+
+        return $client;
+    }
+
+    private function verifyExternalPosMutation(array $client): void {
+        if (strtolower(trim((string)($client['source'] ?? ''))) !== 'pos') {
+            return;
+        }
+        if ($this->header('Idempotency-Key') === '') {
+            throw new \InvalidArgumentException('Idempotency-Key es obligatorio para operaciones POS.');
+        }
+        $publicPath = $this->header('X-Original-URI');
+        if ($publicPath === '') {
+            $publicPath = $this->header('X-Forwarded-Uri');
+        }
+        if ($publicPath === '') {
+            $publicPath = (string)($_SERVER['REQUEST_URI'] ?? '');
+        }
+        $this->repository->verifySignedPosRequest(
+            $client,
+            (string)($client['_rawCredential'] ?? ''),
+            (string)($_SERVER['REQUEST_METHOD'] ?? 'POST'),
+            $publicPath,
+            $this->rawRequestBody(),
+            $this->header('X-Loyalty-Timestamp'),
+            $this->header('X-Loyalty-Nonce'),
+            $this->header('X-Loyalty-Signature')
+        );
     }
 
     private function header(string $name): string {

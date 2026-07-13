@@ -27,6 +27,7 @@ final class LoyaltyNavigationCatalog {
         'unlock',
         'invite',
         'revoke_sessions',
+        'adjust_points',
     ];
 
     /**
@@ -102,6 +103,7 @@ final class LoyaltyNavigationCatalog {
                 'view' => 'Ver clientes',
                 'create' => 'Crear cliente',
                 'update' => 'Actualizar cliente',
+                'adjust_points' => ['label' => 'Ajustar puntos', 'dangerous' => true],
             ]),
             self::page('loyalty.customer-card', 'loyalty.customers-group', 'Emitir tarjeta digital', 'solar:smartphone-outline', 'customer-card', 20, 3, [
                 'view' => 'Ver tarjeta',

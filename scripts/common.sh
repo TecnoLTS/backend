@@ -202,7 +202,7 @@ validate_backend_env_for_mode() {
 resolve_env_file() {
   local mode="${1:-qa}"
   local env_file="${ENTORNO_ENV_FILE}"
-  local primary_domain primary_aliases public_scheme tenant_slug public_base_url tenant_name gateway_env
+  local primary_domain primary_aliases public_scheme tenant_slug loyalty_segment public_base_url tenant_name gateway_env
 
   if ! mode="$(canonical_env_mode "${mode}")"; then
     echo "Modo invalido: ${mode}. Usa qa o production." >&2
@@ -217,6 +217,8 @@ resolve_env_file() {
   tenant_slug="$(normalize_env_value "$(read_env_value "${env_file}" "PUBLIC_TENANT_SLUG" || true)")"
   tenant_slug="${tenant_slug:-$(normalize_env_value "$(read_env_value "${env_file}" "DEFAULT_TENANT" || true)")}"
   tenant_slug="${tenant_slug:-paramascotasec}"
+  loyalty_segment="$(normalize_env_value "$(read_env_value "${env_file}" "PUBLIC_LOYALTY_SERVICE_SEGMENT" || true)")"
+  loyalty_segment="${loyalty_segment:-fidelizacion}"
   primary_domain="$(normalize_env_value "$(read_env_value "${env_file}" "PRIMARY_SITE_DOMAIN" || true)")"
   primary_domain="${primary_domain:-paramascotasec.com}"
   primary_aliases="$(normalize_env_value "$(read_env_value "${env_file}" "PRIMARY_SITE_ALIASES" || true)")"
@@ -226,6 +228,8 @@ resolve_env_file() {
   if [[ -f "${gateway_env}" ]]; then
     tenant_slug="$(normalize_env_value "$(read_env_value "${gateway_env}" "PUBLIC_TENANT_SLUG" || true)")"
     tenant_slug="${tenant_slug:-paramascotasec}"
+    loyalty_segment="$(normalize_env_value "$(read_env_value "${gateway_env}" "PUBLIC_LOYALTY_SERVICE_SEGMENT" || true)")"
+    loyalty_segment="${loyalty_segment:-fidelizacion}"
     primary_domain="$(normalize_env_value "$(read_env_value "${gateway_env}" "PRIMARY_SITE_DOMAIN" || true)")"
     primary_domain="${primary_domain:-paramascotasec.com}"
     primary_aliases="$(normalize_env_value "$(read_env_value "${gateway_env}" "PRIMARY_SITE_ALIASES" || true)")"
@@ -243,6 +247,7 @@ resolve_env_file() {
 
   upsert_env_value "${env_file}" "DEFAULT_TENANT" "${tenant_slug}"
   upsert_env_value "${env_file}" "PUBLIC_TENANT_SLUG" "${tenant_slug}"
+  upsert_env_value "${env_file}" "PUBLIC_LOYALTY_SERVICE_SEGMENT" "${loyalty_segment}"
   upsert_env_value "${env_file}" "PUBLIC_SCHEME" "${public_scheme}"
   upsert_env_value "${env_file}" "PRIMARY_SITE_DOMAIN" "${primary_domain}"
   upsert_env_value "${env_file}" "PRIMARY_SITE_ALIASES" "${primary_aliases}"

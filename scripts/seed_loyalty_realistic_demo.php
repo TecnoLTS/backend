@@ -8,6 +8,7 @@ use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
 use App\Modules\LoyaltyRewards\Infrastructure\LoyaltyRepository;
+use App\Modules\LoyaltyRewards\Infrastructure\LoyaltySchema;
 use Dotenv\Dotenv;
 
 $envDir = __DIR__ . '/../entorno';
@@ -22,7 +23,9 @@ TenantContext::set([
 ]);
 
 $pdo = Database::getModuleInstance(LoyaltyRewardsDomain::KEY);
-new LoyaltyRepository($pdo);
+(new LoyaltySchema($pdo))->ensure();
+$repository = new LoyaltyRepository($pdo);
+$repository->settings();
 
 $tenantId = 'fidepuntos';
 $program = fetchOne($pdo, 'SELECT id FROM loyalty_programs WHERE tenant_id = :tenant_id LIMIT 1', ['tenant_id' => $tenantId]);

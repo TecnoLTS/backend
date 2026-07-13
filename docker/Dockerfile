@@ -32,7 +32,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Install PHP extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
-    && docker-php-ext-install gd pdo_pgsql soap zip
+    && docker-php-ext-install bcmath gd pdo_pgsql soap zip
 
 # Configurar zona horaria de PHP
 RUN { \

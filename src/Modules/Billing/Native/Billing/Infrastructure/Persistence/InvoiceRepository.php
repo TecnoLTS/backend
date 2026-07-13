@@ -344,11 +344,17 @@ class InvoiceRepository
 
     public function createDraftInvoice(array $clientContext, Invoice $invoice, array $requestPayload, string $signedXmlPath): int
     {
+        $tenantId = trim((string)($clientContext['tenant_id'] ?? ''));
+        $billingCustomerId = $tenantId !== ''
+            ? $this->upsertBillingCustomer($tenantId, $invoice)
+            : null;
         $statement = $this->connection->prepare(
             'INSERT INTO invoice_headers (
+                tenant_id,
                 client_id,
                 branch_id,
                 api_key_id,
+                billing_customer_id,
                 source_reference,
                 access_key,
                 issue_date,
@@ -371,9 +377,11 @@ class InvoiceRepository
                 raw_request,
                 signed_xml_path
             ) VALUES (
+                :tenant_id,
                 :client_id,
                 :branch_id,
                 :api_key_id,
+                :billing_customer_id,
                 :source_reference,
                 :access_key,
                 :issue_date,
@@ -399,9 +407,11 @@ class InvoiceRepository
         );
 
         $params = [
+            'tenant_id' => $tenantId !== '' ? $tenantId : null,
             'client_id' => (int) $clientContext['client_id'],
             'branch_id' => (int) $clientContext['resolved_branch_id'],
             'api_key_id' => (int) $clientContext['api_key_id'],
+            'billing_customer_id' => $billingCustomerId,
             'source_reference' => $requestPayload['additional_info']['order_id'] ?? null,
             'access_key' => $invoice->accessKey()->value(),
             'issue_date' => $invoice->issueDate()->format('Y-m-d'),
@@ -431,6 +441,35 @@ class InvoiceRepository
         $this->insertInvoiceDetails($invoiceId, $invoice);
 
         return $invoiceId;
+    }
+
+    private function upsertBillingCustomer(string $tenantId, Invoice $invoice): int
+    {
+        $statement = $this->connection->prepare(
+            'INSERT INTO billing_customers (
+                tenant_id, identification, name, email, address, source,
+                first_seen_at, last_seen_at, metadata, created_at, updated_at
+             ) VALUES (
+                :tenant_id, :identification, :name, :email, :address, \'invoice_headers\',
+                NOW(), NOW(), \'{}\'::jsonb, NOW(), NOW()
+             )
+             ON CONFLICT (tenant_id, identification) DO UPDATE SET
+                name = EXCLUDED.name,
+                email = COALESCE(EXCLUDED.email, billing_customers.email),
+                address = COALESCE(EXCLUDED.address, billing_customers.address),
+                last_seen_at = NOW(),
+                updated_at = NOW()
+             RETURNING id'
+        );
+        $statement->execute([
+            'tenant_id' => $tenantId,
+            'identification' => trim($invoice->customerIdentification()->value()),
+            'name' => trim($invoice->customerName()),
+            'email' => trim($invoice->customerEmail()) !== '' ? trim($invoice->customerEmail()) : null,
+            'address' => trim($invoice->customerAddress()) !== '' ? trim($invoice->customerAddress()) : null,
+        ]);
+
+        return (int)$statement->fetchColumn();
     }
 
     public function markInvoiceAsManualReplacement(

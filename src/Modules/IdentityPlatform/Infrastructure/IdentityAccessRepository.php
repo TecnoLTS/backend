@@ -1364,7 +1364,7 @@ class IdentityAccessRepository {
     private function normalizeNavigationGrants(array $grants): array {
         $allowedActions = [
             'view', 'create', 'update', 'delete', 'reverse', 'approve', 'deliver',
-            'cancel', 'export', 'assign_roles', 'unlock', 'invite', 'revoke_sessions',
+            'cancel', 'export', 'assign_roles', 'unlock', 'invite', 'revoke_sessions', 'adjust_points',
         ];
         $permissionMap = $this->navigationPermissionMap($this->tenantId());
         $normalized = [];

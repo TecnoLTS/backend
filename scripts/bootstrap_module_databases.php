@@ -67,10 +67,21 @@ const MODULE_TABLES = [
         'loyalty_tier_rules',
         'loyalty_api_clients',
         'loyalty_idempotency_keys',
+        'loyalty_api_rate_limit_counters',
+        'loyalty_api_usage_daily',
         'loyalty_audit_events',
         'loyalty_risk_events',
         'loyalty_point_expirations',
         'loyalty_reversals',
+        'loyalty_debt_ledger',
+        'loyalty_command_journal',
+        'loyalty_earning_rule_versions',
+        'loyalty_api_request_nonces',
+        'loyalty_portal_otp_challenges',
+        'loyalty_portal_sessions',
+        'loyalty_portal_form_nonces',
+        'loyalty_wallet_campaigns',
+        'loyalty_wallet_campaign_recipients',
         'loyalty_navigation_items',
         'loyalty_navigation_item_actions',
     ],
@@ -125,10 +136,21 @@ const LEGACY_TABLES = [
     'loyalty_tier_rules',
     'loyalty_api_clients',
     'loyalty_idempotency_keys',
+    'loyalty_api_rate_limit_counters',
+    'loyalty_api_usage_daily',
     'loyalty_audit_events',
     'loyalty_risk_events',
     'loyalty_point_expirations',
     'loyalty_reversals',
+    'loyalty_debt_ledger',
+    'loyalty_command_journal',
+    'loyalty_earning_rule_versions',
+    'loyalty_api_request_nonces',
+    'loyalty_portal_otp_challenges',
+    'loyalty_portal_sessions',
+    'loyalty_portal_form_nonces',
+    'loyalty_wallet_campaigns',
+    'loyalty_wallet_campaign_recipients',
     'loyalty_navigation_items',
     'loyalty_navigation_item_actions',
 ];
@@ -185,6 +207,25 @@ function moduleTargets(array $baseConfig): array {
     }
 
     return $targets;
+}
+
+function moduleTarget(array $baseConfig, string $moduleKey): ?array {
+    $registryPath = __DIR__ . '/../config/module-databases.php';
+    $registry = is_readable($registryPath) ? require $registryPath : [];
+    $entry = $registry[$moduleKey] ?? null;
+    if (!is_array($entry)) {
+        return null;
+    }
+
+    $suffix = moduleEnvSuffix($moduleKey);
+
+    return normalizeConfig($baseConfig, [
+        'host' => envOrDefault("DB_HOST_{$suffix}", (string)($entry['host'] ?? $baseConfig['host'])),
+        'port' => envOrDefault("DB_PORT_{$suffix}", (string)($entry['port'] ?? $baseConfig['port'])),
+        'database' => envOrDefault("DB_DATABASE_{$suffix}", (string)($entry['database'] ?? $entry['target_database'] ?? $baseConfig['database'])),
+        'username' => envOrDefault("DB_USERNAME_{$suffix}", (string)($entry['username'] ?? $baseConfig['username'])),
+        'password' => envOrDefault("DB_PASSWORD_{$suffix}", (string)($entry['password'] ?? $baseConfig['password'])),
+    ]);
 }
 
 function adminConnectionConfig(array $runtimeConfig): array {
@@ -323,6 +364,54 @@ function createMailerTables(PDO $pdo): void {
 
 function createLoyaltyTables(PDO $pdo): void {
     (new \App\Modules\LoyaltyRewards\Infrastructure\LoyaltySchema($pdo))->ensure();
+}
+
+function ensureBillingTenantIsolation(PDO $pdo): bool {
+    $tablesReady = (bool)$pdo->query(
+        "SELECT to_regclass('public.invoice_headers') IS NOT NULL
+             AND to_regclass('public.billing_customers') IS NOT NULL"
+    )->fetchColumn();
+    if (!$tablesReady) {
+        return false;
+    }
+
+    // Nullable by design: legacy rows without a deterministic customer/tenant
+    // relation remain unassigned and therefore cannot earn Loyalty points.
+    $pdo->exec('ALTER TABLE invoice_headers ADD COLUMN IF NOT EXISTS tenant_id text');
+    $pdo->exec(
+        'UPDATE invoice_headers ih
+         SET tenant_id = bc.tenant_id
+         FROM billing_customers bc
+         WHERE bc.id = ih.billing_customer_id
+           AND ih.tenant_id IS NULL
+           AND NULLIF(BTRIM(bc.tenant_id), \'\') IS NOT NULL'
+    );
+    $pdo->exec(
+        'CREATE INDEX IF NOT EXISTS invoice_headers_tenant_source_reference_idx
+         ON invoice_headers (tenant_id, source_reference)'
+    );
+
+    return true;
+}
+
+function ensureFidepuntosAdjustPermission(PDO $pdo): void {
+    $tablesReady = (bool)$pdo->query(
+        "SELECT to_regclass('public.tenant_roles') IS NOT NULL
+             AND to_regclass('public.tenant_role_navigation_grants') IS NOT NULL"
+    )->fetchColumn();
+    if (!$tablesReady) {
+        return;
+    }
+
+    $pdo->exec(
+        "INSERT INTO tenant_role_navigation_grants
+            (tenant_id, role_id, menu_option_key, action_key, assigned_by_user_id, granted_at, updated_at)
+         SELECT 'fidepuntos', 'fidepuntos_admin', 'loyalty.customers', 'adjust_points', NULL, NOW(), NOW()
+         FROM tenant_roles
+         WHERE tenant_id = 'fidepuntos' AND role_id = 'fidepuntos_admin'
+         ON CONFLICT (tenant_id, role_id, menu_option_key, action_key)
+         DO UPDATE SET updated_at = NOW()"
+    );
 }
 
 function dropRemoteSchema(PDO $pdo, string $schema): void {
@@ -582,6 +671,7 @@ function runModuleDatabaseBootstrap(): int {
     ];
     $defaultTenant = envValue('DEFAULT_TENANT', 'paramascotasec') ?? 'paramascotasec';
     $targets = moduleTargets($runtimeConfig);
+    $billingTarget = moduleTarget($runtimeConfig, \App\Modules\Billing\Domain\BillingDomain::KEY);
     $targetGroups = moduleTargetGroups($targets);
     $primaryRuntimeConfig = normalizeConfig($runtimeConfig);
     $adminConfig = adminConnectionConfig($runtimeConfig);
@@ -592,6 +682,20 @@ function runModuleDatabaseBootstrap(): int {
     }
 
     try {
+        if ($billingTarget !== null) {
+            ensureTargetDatabase($billingTarget, $adminConfig);
+            $billingPdo = connect(connectionTargetConfig($billingTarget, $adminConfig));
+            if (ensureBillingTenantIsolation($billingPdo)) {
+                grantRuntimeSchemaAccess($billingPdo, (string)($billingTarget['username'] ?? ''));
+                fwrite(STDOUT, sprintf(
+                    "[module-db] prepared Billing tenant isolation db=%s\n",
+                    (string)$billingTarget['database']
+                ));
+            } else {
+                fwrite(STDOUT, "[module-db] skipped Billing tenant isolation: fiscal tables unavailable\n");
+            }
+        }
+
         foreach ($targetGroups as $databaseName => $group) {
             $target = $group['target'];
             $modules = $group['modules'];
@@ -606,6 +710,9 @@ function runModuleDatabaseBootstrap(): int {
             }
             if (in_array('loyalty-rewards', $modules, true)) {
                 createLoyaltyTables($pdo);
+            }
+            if (in_array('identity-platform', $modules, true)) {
+                ensureFidepuntosAdjustPermission($pdo);
             }
             grantRuntimeSchemaAccess($pdo, (string)($target['username'] ?? ''));
             dropKnownCrossDomainConstraints($pdo);

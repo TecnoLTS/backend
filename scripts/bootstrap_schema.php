@@ -132,7 +132,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             CONSTRAINT tenant_role_navigation_grants_action_check
                 CHECK (action_key IN (
                     \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
-                    \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\'
+                    \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\',
+                    \'adjust_points\'
                 )),
             CONSTRAINT tenant_role_navigation_grants_role_fk
                 FOREIGN KEY (tenant_id, role_id)
@@ -803,16 +804,15 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
                     ON DELETE RESTRICT
                     NOT VALID;
             END IF;
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint WHERE conname = \'tenant_role_navigation_grants_action_check\'
-            ) THEN
-                ALTER TABLE tenant_role_navigation_grants
-                    ADD CONSTRAINT tenant_role_navigation_grants_action_check
-                    CHECK (action_key IN (
-                        \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
-                        \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\'
-                    ));
-            END IF;
+            ALTER TABLE tenant_role_navigation_grants
+                DROP CONSTRAINT IF EXISTS tenant_role_navigation_grants_action_check;
+            ALTER TABLE tenant_role_navigation_grants
+                ADD CONSTRAINT tenant_role_navigation_grants_action_check
+                CHECK (action_key IN (
+                    \'view\', \'create\', \'update\', \'delete\', \'reverse\', \'approve\', \'deliver\',
+                    \'cancel\', \'export\', \'assign_roles\', \'unlock\', \'invite\', \'revoke_sessions\',
+                    \'adjust_points\'
+                ));
         END
         $$',
         'INSERT INTO tenant_memberships (tenant_id, user_id, identity_type, status, created_at, updated_at)

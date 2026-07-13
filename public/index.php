@@ -8,6 +8,7 @@ use App\Core\Response;
 use App\Core\TenantContext;
 use App\Core\TenantResolver;
 use App\Core\Auth;
+use App\Core\AuthSurface;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Repositories\UserRepository;
 
@@ -241,7 +242,7 @@ if ($origin) {
 }
 header('Content-Type: application/json');
 header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token, X-API-Key');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token, X-API-Key, Idempotency-Key');
 header('Access-Control-Max-Age: 600');
 header('Vary: Origin');
 Response::noStore();
@@ -412,7 +413,11 @@ function is_public_api_request(string $uri, string $method): bool {
         return true;
     }
 
-    if (in_array($normalizedMethod, ['GET', 'HEAD', 'POST'], true) && str_starts_with($uri, '/api/l/r/')) {
+    if ($normalizedMethod === 'GET' && str_starts_with($uri, '/api/l/r/')) {
+        return true;
+    }
+
+    if (in_array($normalizedMethod, ['GET', 'HEAD', 'POST'], true) && str_starts_with($uri, '/api/l/portal')) {
         return true;
     }
 
@@ -487,13 +492,20 @@ $csrfExemptPaths = [
     '/api/health',
 ];
 $isMutatingApiRequest = str_starts_with($uri, '/api') && in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true);
-$hasAuthCookie = trim((string)($_COOKIE[$authCookieName] ?? '')) !== '';
+$hasAuthCookie = false;
+foreach (AuthSurface::authCookieCandidates($authCookieName) as $candidateCookieName) {
+    if (trim((string)($_COOKIE[$candidateCookieName] ?? '')) !== '') {
+        $hasAuthCookie = true;
+        break;
+    }
+}
 $hasBearerAuth = preg_match('/Bearer\s+\S+/', (string)($_SERVER['HTTP_AUTHORIZATION'] ?? '')) === 1;
+$isPortalFormRequest = $method === 'POST' && str_starts_with($uri, '/api/l/portal/');
 $shouldEnforceCsrf = $isMutatingApiRequest
     && !in_array($uri, $csrfExemptPaths, true)
     && !$isPublicBillingApi
-    && ($hasAuthCookie || $uri === '/api/auth/logout')
-    && !$hasTrustedInternalProxyToken;
+    && !$isPortalFormRequest
+    && ($hasAuthCookie || $uri === '/api/auth/logout');
 
 if ($shouldEnforceCsrf) {
     $secFetchSite = strtolower(trim((string)($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));

@@ -333,11 +333,11 @@ try {
         $catalog['options']
     ));
     assertRbacDatabaseCheck(count($rawItems) === 32, 'El catalogo Loyalty activo no contiene 32 items.');
-    assertRbacDatabaseCheck(count($rawActions) === 62, 'El catalogo Loyalty activo no contiene 62 acciones.');
+    assertRbacDatabaseCheck(count($rawActions) === 63, 'El catalogo Loyalty activo no contiene 63 acciones.');
     assertRbacDatabaseCheck($storedDepth === 3, 'La profundidad maxima del catalogo Loyalty no es tres.');
     assertRbacDatabaseCheck($publishedItems === 32, 'El servicio omitio items sembrados del catalogo Loyalty.');
-    assertRbacDatabaseCheck($publishedActions === 62, 'El servicio omitio acciones sembradas del catalogo Loyalty.');
-    fwrite(STDOUT, "[OK] catalogo Loyalty: 32 items, 62 acciones y profundidad maxima 3.\n");
+    assertRbacDatabaseCheck($publishedActions === 63, 'El servicio omitio acciones sembradas del catalogo Loyalty.');
+    fwrite(STDOUT, "[OK] catalogo Loyalty: 32 items, 63 acciones y profundidad maxima 3.\n");
 
     $pdo->beginRootTransaction();
     $pdo->exec("SET LOCAL lock_timeout = '5s'");
