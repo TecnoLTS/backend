@@ -134,14 +134,24 @@ class UserController {
             || array_key_exists('roleIds', $data)
             || (isset($data['profile']) && is_array($data['profile']) && array_key_exists('roleIds', $data['profile']));
         $roleIds = $this->normalizeRoleIds($data['roles'] ?? ($data['roleIds'] ?? ($data['profile']['roleIds'] ?? null)));
+        $tenantId = (string)(TenantContext::slug() ?? TenantContext::id() ?? '');
+        $usesImplicitTenantAdminRole = !$this->manageEcommerceCustomers
+            && $isCreate
+            && !$roleIdsWereProvided
+            && !TenantAccessService::tenantUsesGranularNavigationAccess($tenantId);
         if (!$this->manageEcommerceCustomers && !$isCreate && !$roleIdsWereProvided && $roleIds === [] && !empty($existingUser['id'])) {
             $roleIds = $this->identityAccessRepository->roleIdsForUser((string)$existingUser['id']);
+        }
+        if ($usesImplicitTenantAdminRole && $roleIds === []) {
+            // Compatibilidad controlada para tenants anteriores al cutover RBAC:
+            // el backend selecciona el rol base; el cliente nunca puede pedirlo.
+            $roleIds = [$this->defaultRoleId('admin')];
         }
         if (!$this->manageEcommerceCustomers && $roleIds === []) {
             Response::error('Debes asignar al menos un rol operativo del tenant.', 400, 'USER_ROLES_INVALID');
             exit;
         }
-        if (!$this->manageEcommerceCustomers && ($isCreate || $roleIdsWereProvided)) {
+        if (!$this->manageEcommerceCustomers && ($isCreate || $roleIdsWereProvided) && !$usesImplicitTenantAdminRole) {
             try {
                 $roleIds = $this->identityAccessRepository->validateAssignableRoleIds($roleIds);
             } catch (InvalidArgumentException $e) {

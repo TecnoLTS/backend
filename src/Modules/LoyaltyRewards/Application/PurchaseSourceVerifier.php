@@ -14,6 +14,8 @@ use PDO;
 
 final class PurchaseSourceVerifier
 {
+    public const STAFF_POS_SOURCE = 'staff_pos';
+
     public function verify(
         string $tenantId,
         array $member,
@@ -34,6 +36,26 @@ final class PurchaseSourceVerifier
 
         if (($trustedContext['verified'] ?? false) === true) {
             $type = strtolower(trim((string)($trustedContext['type'] ?? '')));
+            if ($type === self::STAFF_POS_SOURCE) {
+                $actorId = trim((string)($trustedContext['actorId'] ?? ''));
+                if ($actorId === '' || str_starts_with($actorId, 'api:')) {
+                    throw $this->mismatch(
+                        'purchase_staff_pos_context_invalid',
+                        'La venta de caja no tiene un operador autenticado valido.',
+                        [],
+                        403
+                    );
+                }
+
+                return [
+                    'type' => self::STAFF_POS_SOURCE,
+                    'verified' => false,
+                    'authorized' => true,
+                    'sourceReference' => $reference,
+                    'actorId' => $actorId,
+                    'verificationMethod' => 'authenticated_staff_rbac',
+                ];
+            }
             if ($type === 'pos') {
                 return [
                     'type' => 'pos',
@@ -102,7 +124,7 @@ final class PurchaseSourceVerifier
 
         throw $this->mismatch(
             'purchase_source_not_found',
-            'La factura no fue encontrada en una fuente interna realizada; se envio a revision sin acreditar puntos.',
+            'No se encontro el comprobante en Ecommerce ni Facturacion; no se acreditaron puntos.',
             ['attemptedSources' => array_keys($errors), 'results' => $errors],
             409
         );

@@ -1045,7 +1045,7 @@ final class LoyaltyRepository {
                 $riskMetadata['clientIp'] = $clientIp;
             }
             $this->recordRisk(
-                'critical',
+                $this->purchaseVerificationRiskSeverity($exception->riskType()),
                 $exception->riskType(),
                 $exception->getMessage(),
                 (string)$member['id'],
@@ -1085,6 +1085,24 @@ final class LoyaltyRepository {
                 throw new LoyaltyResourceNotFoundException('Socio no encontrado para registrar la compra.');
             }
             $this->assertMemberCanOperate($member, 'acumular puntos');
+            if ((string)($sourceVerification['type'] ?? '') === PurchaseSourceVerifier::STAFF_POS_SOURCE) {
+                $sourceVerification = $this->createStaffCashReceipt(
+                    $tenantId,
+                    $member,
+                    $program,
+                    $invoiceNumber,
+                    $amountMinor,
+                    $currency,
+                    $ledgerId,
+                    $journalCommandId,
+                    $userId,
+                    $sourceVerification
+                );
+                $invoiceNumber = (string)$sourceVerification['sourceReference'];
+                $amountMinor = (int)$sourceVerification['amountMinor'];
+                $amount = DecimalMath::moneyFromMinorUnits($amountMinor, 'monto de venta de caja');
+                $currency = (string)$sourceVerification['currency'];
+            }
             $formula = $this->purchaseFormulaSummary($settings, $member);
             $points = $this->calculatePurchasePoints($amount, $member, $formula);
             $rulesVersion = $this->earningRuleVersion($tenantId, (string)$program['id'], $formula, $userId);
@@ -1225,10 +1243,13 @@ final class LoyaltyRepository {
             if (
                 $e instanceof \PDOException
                 && (string)$e->getCode() === '23505'
-                && str_contains($e->getMessage(), 'loyalty_ledger_active_purchase_')
+                && (
+                    str_contains($e->getMessage(), 'loyalty_ledger_active_purchase_')
+                    || str_contains($e->getMessage(), 'loyalty_cash_receipts_active_')
+                )
             ) {
                 $e = new PurchaseVerificationException(
-                    'Esta factura ya fue registrada en el programa.',
+                    'Este comprobante ya fue registrado en el programa.',
                     'duplicate_reference',
                     ['invoiceNumber' => $invoiceNumber],
                     409
@@ -1264,6 +1285,7 @@ final class LoyaltyRepository {
 
         $member = [];
         $points = 0;
+        $cashReceiptId = null;
         $this->pdo->beginTransaction();
         try {
             $replay = $this->reserveCommand('purchase.reverse', $journalCommandId, $commandPayload, $userId, $operationSource);
@@ -1333,6 +1355,7 @@ final class LoyaltyRepository {
                 'UPDATE loyalty_point_ledger SET reversed_at = NOW() WHERE tenant_id = :tenant_id AND id = :id',
                 ['tenant_id' => $tenantId, 'id' => $ledger['id']]
             );
+            $cashReceiptId = $this->reverseStaffCashReceiptIfNeeded($tenantId, $ledger, $reason, $userId);
             $this->execute(
                 'INSERT INTO loyalty_point_ledger
                     (id, tenant_id, member_id, program_id, entry_type, points, balance_after, reference, source, source_reference, metadata, created_by_user_id)
@@ -1357,6 +1380,7 @@ final class LoyaltyRepository {
                         'cancelledReservations' => $reservationRelease['cancelled'],
                         'reversalSource' => $operationSource,
                         'apiClientId' => $reversalSourceContext['clientId'] ?? null,
+                        'cashReceiptId' => $cashReceiptId,
                     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                     'created_by_user_id' => $userId,
                 ]
@@ -1418,6 +1442,7 @@ final class LoyaltyRepository {
                 'commandId' => $commandId,
                 'source' => $operationSource,
                 'apiClientId' => $reversalSourceContext['clientId'] ?? null,
+                'cashReceiptId' => $cashReceiptId,
             ];
             $this->recordAudit('purchase.reversed', 'member', (string)$member['id'], $ledger, $response, $reason, $userId);
             $this->completeCommand('purchase.reverse', $journalCommandId, $response);
@@ -4168,12 +4193,159 @@ HTML;
         );
         if ($exists > 0) {
             throw new PurchaseVerificationException(
-                'Esta factura ya fue registrada en el programa.',
+                'Este comprobante ya fue registrado en el programa.',
                 'duplicate_reference',
                 ['entryType' => $entryType],
                 409
             );
         }
+    }
+
+    private function createStaffCashReceipt(
+        string $tenantId,
+        array $member,
+        array $program,
+        string $reference,
+        int $amountMinor,
+        string $currency,
+        string $ledgerId,
+        string $commandId,
+        ?string $userId,
+        array $authorization
+    ): array {
+        $actorId = trim((string)$userId);
+        $authorizedActorId = trim((string)($authorization['actorId'] ?? ''));
+        if (
+            $actorId === ''
+            || str_starts_with($actorId, 'api:')
+            || $authorizedActorId === ''
+            || !hash_equals($actorId, $authorizedActorId)
+            || ($authorization['authorized'] ?? false) !== true
+        ) {
+            throw new PurchaseVerificationException(
+                'La venta de caja no tiene un operador autenticado valido.',
+                'purchase_staff_pos_context_invalid',
+                ['actorId' => $actorId !== '' ? mb_substr($actorId, 0, 160) : null],
+                403
+            );
+        }
+
+        $receiptId = $this->id('receipt');
+        $requestId = trim((string)($_SERVER['HTTP_X_REQUEST_ID'] ?? ''));
+        $this->execute(
+            'INSERT INTO loyalty_cash_receipts
+                (id, tenant_id, member_id, program_id, reference, normalized_reference,
+                 amount_minor, currency_code, status, ledger_id, command_id,
+                 created_by_user_id, metadata)
+             VALUES
+                (:id, :tenant_id, :member_id, :program_id, :reference, :normalized_reference,
+                 :amount_minor, :currency_code, :status, :ledger_id, :command_id,
+                 :created_by_user_id, :metadata)',
+            [
+                'id' => $receiptId,
+                'tenant_id' => $tenantId,
+                'member_id' => (string)$member['id'],
+                'program_id' => (string)$program['id'],
+                'reference' => $reference,
+                'normalized_reference' => $reference,
+                'amount_minor' => $amountMinor,
+                'currency_code' => $currency,
+                'status' => 'completed',
+                'ledger_id' => $ledgerId,
+                'command_id' => $commandId,
+                'created_by_user_id' => $actorId,
+                'metadata' => json_encode([
+                    'verificationMethod' => 'authenticated_staff_rbac',
+                    'requestId' => $requestId !== '' ? mb_substr($requestId, 0, 160) : null,
+                ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            ]
+        );
+
+        $receipt = $this->fetchAll(
+            'SELECT id, tenant_id, member_id, program_id, reference, normalized_reference,
+                    amount_minor, currency_code, status, ledger_id, command_id,
+                    created_by_user_id, created_at
+             FROM loyalty_cash_receipts
+             WHERE tenant_id = :tenant_id AND id = :id
+             LIMIT 1
+             FOR UPDATE',
+            ['tenant_id' => $tenantId, 'id' => $receiptId]
+        )[0] ?? null;
+        if (
+            !$receipt
+            || !hash_equals((string)$member['id'], (string)($receipt['member_id'] ?? ''))
+            || !hash_equals($reference, (string)($receipt['normalized_reference'] ?? ''))
+            || $amountMinor !== (int)($receipt['amount_minor'] ?? 0)
+            || !hash_equals($currency, (string)($receipt['currency_code'] ?? ''))
+            || !hash_equals('completed', (string)($receipt['status'] ?? ''))
+        ) {
+            throw new PurchaseVerificationException(
+                'No se pudo verificar el comprobante interno de caja.',
+                'purchase_staff_pos_receipt_invalid',
+                ['receiptId' => $receiptId],
+                409
+            );
+        }
+
+        return [
+            'type' => PurchaseSourceVerifier::STAFF_POS_SOURCE,
+            'verified' => true,
+            'sourceId' => (string)$receipt['id'],
+            'sourceReference' => (string)$receipt['normalized_reference'],
+            'amount' => DecimalMath::moneyFromMinorUnits((string)$receipt['amount_minor'], 'monto de venta de caja'),
+            'amountMinor' => (int)$receipt['amount_minor'],
+            'currency' => (string)$receipt['currency_code'],
+            'status' => (string)$receipt['status'],
+            'actorId' => (string)$receipt['created_by_user_id'],
+            'verificationMethod' => 'authenticated_staff_rbac',
+            'verifiedAt' => (string)$receipt['created_at'],
+        ];
+    }
+
+    private function reverseStaffCashReceiptIfNeeded(
+        string $tenantId,
+        array $purchaseLedger,
+        string $reason,
+        ?string $userId
+    ): ?string {
+        if ((string)($purchaseLedger['source'] ?? '') !== PurchaseSourceVerifier::STAFF_POS_SOURCE) {
+            return null;
+        }
+
+        $receipt = $this->fetchAll(
+            'SELECT id, status
+             FROM loyalty_cash_receipts
+             WHERE tenant_id = :tenant_id AND ledger_id = :ledger_id
+             LIMIT 1
+             FOR UPDATE',
+            ['tenant_id' => $tenantId, 'ledger_id' => (string)$purchaseLedger['id']]
+        )[0] ?? null;
+        if (!$receipt || (string)($receipt['status'] ?? '') !== 'completed') {
+            throw new PurchaseVerificationException(
+                'El comprobante interno de caja no existe o ya fue reversado.',
+                'purchase_staff_pos_receipt_not_reversible',
+                ['purchaseLedgerId' => (string)($purchaseLedger['id'] ?? '')],
+                409
+            );
+        }
+
+        $this->execute(
+            'UPDATE loyalty_cash_receipts
+             SET status = :status,
+                 reversed_at = NOW(),
+                 reversed_by_user_id = :reversed_by_user_id,
+                 reversal_reason = :reversal_reason
+             WHERE tenant_id = :tenant_id AND id = :id',
+            [
+                'status' => 'reversed',
+                'reversed_by_user_id' => $userId,
+                'reversal_reason' => $reason,
+                'tenant_id' => $tenantId,
+                'id' => (string)$receipt['id'],
+            ]
+        );
+
+        return (string)$receipt['id'];
     }
 
     private function commandId(array $payload, string $fallback, bool $required = false): string {
@@ -4758,7 +4930,7 @@ HTML;
                 $metadata['clientIp'] = $clientIp;
             }
             $this->recordRisk(
-                in_array($exception->riskType(), ['duplicate_reference', 'purchase_amount_mismatch', 'purchase_customer_mismatch'], true) ? 'critical' : 'high',
+                $this->purchaseVerificationRiskSeverity($exception->riskType()),
                 $exception->riskType(),
                 $exception->getMessage(),
                 $memberId,
@@ -4768,6 +4940,30 @@ HTML;
         } catch (\Throwable $riskFailure) {
             error_log('[LOYALTY_RISK_PERSIST_FAILED] ' . $riskFailure->getMessage());
         }
+    }
+
+    private function purchaseVerificationRiskSeverity(string $riskType): string
+    {
+        if (in_array($riskType, [
+            'duplicate_reference',
+            'purchase_amount_mismatch',
+            'purchase_customer_mismatch',
+            'purchase_source_client_mismatch',
+            'purchase_reversal_source_mismatch',
+        ], true)) {
+            return 'critical';
+        }
+        if (in_array($riskType, [
+            'purchase_source_not_found',
+            'purchase_ecommerce_not_found',
+            'purchase_billing_not_found',
+            'purchase_ecommerce_status_mismatch',
+            'purchase_billing_not_authorized',
+        ], true)) {
+            return 'medium';
+        }
+
+        return 'high';
     }
 
     private function trustedClientIp(): ?string

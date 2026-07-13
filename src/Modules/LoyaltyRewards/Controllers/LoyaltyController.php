@@ -6,6 +6,7 @@ use App\Core\Auth;
 use App\Core\Response;
 use App\Core\TenantContext;
 use App\Modules\LoyaltyRewards\Application\LoyaltyReportService;
+use App\Modules\LoyaltyRewards\Application\PurchaseSourceVerifier;
 use App\Modules\LoyaltyRewards\Domain\ExternalApiAccessException;
 use App\Modules\LoyaltyRewards\Domain\ExternalApiConflictException;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyReportExportTooLargeException;
@@ -146,8 +147,17 @@ final class LoyaltyController {
     public function registerPurchase(): void {
         $user = Auth::requireAdmin();
         $payload = $this->withCommandId($this->jsonPayload());
+        $actorId = trim((string)($user['sub'] ?? ''));
+        if ($actorId === '') {
+            throw new \RuntimeException('No se pudo identificar al operador de caja.');
+        }
+        $staffPosContext = [
+            'verified' => true,
+            'type' => PurchaseSourceVerifier::STAFF_POS_SOURCE,
+            'actorId' => $actorId,
+        ];
         $this->respond(
-            fn() => $this->repository->registerPurchase($payload, is_string($user['sub'] ?? null) ? $user['sub'] : null),
+            fn() => $this->repository->registerPurchase($payload, $actorId, $staffPosContext),
             'LOYALTY_PURCHASE_REGISTER_FAILED',
             201
         );

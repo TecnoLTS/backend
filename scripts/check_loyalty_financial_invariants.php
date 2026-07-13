@@ -60,6 +60,66 @@ $queries = [
             HAVING COUNT(*) > 1
         ) duplicates
         SQL,
+    'staff_pos_receipt_orphans' => <<<'SQL'
+        SELECT COUNT(*)
+        FROM loyalty_cash_receipts receipt
+        LEFT JOIN loyalty_members member
+          ON member.tenant_id = receipt.tenant_id
+         AND member.id = receipt.member_id
+        LEFT JOIN loyalty_programs program
+          ON program.tenant_id = receipt.tenant_id
+         AND program.id = receipt.program_id
+        LEFT JOIN loyalty_point_ledger ledger
+          ON ledger.tenant_id = receipt.tenant_id
+         AND ledger.id = receipt.ledger_id
+        WHERE member.id IS NULL
+           OR program.id IS NULL
+           OR ledger.id IS NULL
+        SQL,
+    'staff_pos_receipt_ledger_mismatches' => <<<'SQL'
+        SELECT COUNT(*)
+        FROM loyalty_cash_receipts receipt
+        JOIN loyalty_point_ledger ledger
+          ON ledger.tenant_id = receipt.tenant_id
+         AND ledger.id = receipt.ledger_id
+        WHERE ledger.entry_type <> 'purchase'
+           OR ledger.source <> 'staff_pos'
+           OR ledger.member_id IS DISTINCT FROM receipt.member_id
+           OR ledger.program_id IS DISTINCT FROM receipt.program_id
+           OR ledger.reference IS DISTINCT FROM receipt.reference
+           OR ledger.normalized_reference IS DISTINCT FROM receipt.normalized_reference
+           OR ledger.amount_minor IS DISTINCT FROM receipt.amount_minor
+           OR ledger.currency_code IS DISTINCT FROM receipt.currency_code
+           OR (receipt.status = 'completed' AND ledger.reversed_at IS NOT NULL)
+           OR (receipt.status = 'reversed' AND ledger.reversed_at IS NULL)
+        SQL,
+    'staff_pos_receipt_status_mismatches' => <<<'SQL'
+        SELECT COUNT(*)
+        FROM loyalty_cash_receipts
+        WHERE status NOT IN ('completed', 'reversed')
+           OR (
+                status = 'completed'
+                AND (reversed_at IS NOT NULL OR reversed_by_user_id IS NOT NULL OR reversal_reason IS NOT NULL)
+           )
+           OR (
+                status = 'reversed'
+                AND (
+                    reversed_at IS NULL
+                    OR NULLIF(BTRIM(reversed_by_user_id), '') IS NULL
+                    OR NULLIF(BTRIM(reversal_reason), '') IS NULL
+                )
+           )
+        SQL,
+    'staff_pos_ledger_without_receipt' => <<<'SQL'
+        SELECT COUNT(*)
+        FROM loyalty_point_ledger ledger
+        LEFT JOIN loyalty_cash_receipts receipt
+          ON receipt.tenant_id = ledger.tenant_id
+         AND receipt.ledger_id = ledger.id
+        WHERE ledger.entry_type = 'purchase'
+          AND ledger.source = 'staff_pos'
+          AND receipt.id IS NULL
+        SQL,
     'reversal_total_mismatches' => <<<'SQL'
         SELECT COUNT(*)
         FROM loyalty_reversals r

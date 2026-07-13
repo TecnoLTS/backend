@@ -39,6 +39,10 @@ class TenantAccessService {
         'users',
     ];
 
+    private const GRANULAR_ACCESS_TENANT_IDS = [
+        'fidepuntos',
+    ];
+
     private SettingsRepository $settingsRepository;
     private IdentityAccessRepository $identityAccessRepository;
 
@@ -248,37 +252,43 @@ class TenantAccessService {
         }
 
         $storedRoles = $this->identityAccessRepository->rolesForUser($userId);
-        if ($storedRoles !== [] || $this->identityAccessRepository->membershipForUser($userId) !== null) {
-            return $storedRoles;
-        }
-
-        // Fidepuntos ya hizo cutover relacional: una membresía ausente no puede
-        // resucitar permisos desde User.profile.roleIds ni desde User.role.
-        if ($this->usesGranularNavigationAccess()) {
+        $membership = $this->identityAccessRepository->membershipForUser($userId);
+        if ($membership === null || strtolower(trim((string)($membership['status'] ?? ''))) !== 'active') {
             return [];
         }
 
-        // Compatibilidad de migración únicamente: materializa una asignación legacy una sola vez.
-        $tenantSlug = TenantContext::slug() ?: 'tenant';
-        foreach ($this->systemRoles($enabledModules, $tenantSlug) as $systemRole) {
-            $this->identityAccessRepository->syncRole($systemRole);
+        // Una membresía sin asignaciones es un estado relacional incompleto, no
+        // una migración terminada. Las lecturas de contexto fallan cerradas y no
+        // escriben roles; la reparación legacy se ejecuta solo mediante el
+        // reconciliador explícito y auditable.
+        return $storedRoles;
+    }
+
+    public static function tenantUsesGranularNavigationAccess(string $tenantId): bool {
+        return in_array(
+            strtolower(trim($tenantId)),
+            self::GRANULAR_ACCESS_TENANT_IDS,
+            true
+        );
+    }
+
+    public static function isLegacyTenantAdminRoleReconciliationCandidate(
+        string $tenantId,
+        array $user,
+        ?array $membership,
+        array $assignedRoleIds
+    ): bool {
+        $tenantId = strtolower(trim($tenantId));
+        if ($tenantId === '' || self::tenantUsesGranularNavigationAccess($tenantId)) {
+            return false;
         }
-        $profile = $this->decodeProfile($user['profile'] ?? null);
-        $requestedRoleIds = $this->normalizeRoleIds($profile['roleIds'] ?? null);
-        $availableIds = array_flip(array_map(
-            static fn (array $role): string => (string)$role['id'],
-            $this->identityAccessRepository->roles()
-        ));
-        $requestedRoleIds = array_values(array_filter(
-            $requestedRoleIds,
-            static fn (string $roleId): bool => isset($availableIds[$roleId])
-                && !in_array($roleId, ['platform_admin', 'superadmin'], true)
-        ));
-        if ($requestedRoleIds === []) {
-            $requestedRoleIds = ["{$tenantSlug}_reader"];
-        }
-        $this->identityAccessRepository->syncMembership($userId, 'tenant_staff', $requestedRoleIds, 'active');
-        return $this->identityAccessRepository->rolesForUser($userId);
+
+        $userTenantId = strtolower(trim((string)($user['tenant_id'] ?? $tenantId)));
+        return $userTenantId === $tenantId
+            && strtolower(trim((string)($user['role'] ?? ''))) === 'admin'
+            && strtolower(trim((string)($membership['identity_type'] ?? ''))) === 'tenant_staff'
+            && strtolower(trim((string)($membership['status'] ?? ''))) === 'active'
+            && $assignedRoleIds === [];
     }
 
     public function permissionsFromRoles(array $roles): array {
@@ -695,7 +705,9 @@ class TenantAccessService {
     }
 
     private function usesGranularNavigationAccess(): bool {
-        return strtolower((string)(TenantContext::slug() ?? TenantContext::id() ?? '')) === 'fidepuntos';
+        return self::tenantUsesGranularNavigationAccess(
+            (string)(TenantContext::slug() ?? TenantContext::id() ?? '')
+        );
     }
 
     private function permissionForMethod(string $resource, string $method): string {

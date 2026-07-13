@@ -6,6 +6,7 @@ $base = dirname(__DIR__);
 $verifier = file_get_contents($base . '/Application/PurchaseSourceVerifier.php');
 $repository = file_get_contents($base . '/Infrastructure/LoyaltyRepository.php');
 $controller = file_get_contents($base . '/Controllers/LoyaltyController.php');
+$schema = file_get_contents($base . '/Infrastructure/LoyaltySchema.php');
 $billingRepository = file_get_contents(dirname($base) . '/Billing/Native/Billing/Infrastructure/Persistence/InvoiceRepository.php');
 $billingGateway = file_get_contents(dirname($base) . '/Billing/Infrastructure/NativeBillingGateway.php');
 $bootstrap = file_get_contents(dirname(__DIR__, 4) . '/scripts/bootstrap_module_databases.php');
@@ -14,6 +15,7 @@ if (
     !is_string($verifier)
     || !is_string($repository)
     || !is_string($controller)
+    || !is_string($schema)
     || !is_string($billingRepository)
     || !is_string($billingGateway)
     || !is_string($bootstrap)
@@ -37,6 +39,20 @@ $checks = [
     'ecommerce_tenant_verified' => str_contains($verifier, 'purchase_ecommerce_tenant_mismatch'),
     'external_purchase_source_bound' => str_contains($verifier, 'purchase_source_client_mismatch')
         && str_contains($verifier, '$requestedSource = $boundClientSource'),
+    'staff_pos_server_context_only' => str_contains($controller, 'PurchaseSourceVerifier::STAFF_POS_SOURCE')
+        && str_contains($controller, "'actorId' => \$actorId")
+        && str_contains($verifier, "public const STAFF_POS_SOURCE = 'staff_pos'")
+        && str_contains($verifier, 'purchase_staff_pos_context_invalid'),
+    'staff_pos_receipt_is_source_of_truth' => str_contains($schema, 'CREATE TABLE IF NOT EXISTS loyalty_cash_receipts')
+        && str_contains($repository, 'createStaffCashReceipt')
+        && str_contains($repository, "'verificationMethod' => 'authenticated_staff_rbac'")
+        && str_contains($repository, "'verified' => true"),
+    'staff_pos_reversal_is_atomic' => str_contains($repository, 'reverseStaffCashReceiptIfNeeded')
+        && str_contains($repository, "SET status = :status,")
+        && str_contains($repository, "'status' => 'reversed'"),
+    'source_not_found_does_not_autoblock' => str_contains($repository, 'purchaseVerificationRiskSeverity')
+        && str_contains($repository, "'purchase_source_not_found'")
+        && str_contains($repository, "return 'medium';"),
     'external_reversal_context_forwarded' => str_contains($controller, '$sourceContext = [')
         && preg_match('/reversePurchase\s*\([^;]+\$sourceContext\s*\)/s', $controller) === 1,
     'external_reversal_source_bound' => str_contains($repository, 'assertExternalPurchaseReversalAllowed')

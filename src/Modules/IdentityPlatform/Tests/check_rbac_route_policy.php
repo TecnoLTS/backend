@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../../../vendor/autoload.php';
 
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
 use App\Modules\LoyaltyRewards\Application\LoyaltyNavigationService;
 
 /** @param array<string, mixed> $actual */
@@ -136,5 +137,120 @@ $legacyCreateDecision = $access->routeAccessDecision('users.admin', 'POST', '/ap
 if (isset($legacyCreateDecision['permissions'])) {
     throw new RuntimeException('Otros tenants no deben activar el contrato compuesto Fidepuntos.');
 }
+
+assertSameValue(
+    TenantAccessService::isLegacyTenantAdminRoleReconciliationCandidate(
+        'paramascotasec',
+        ['tenant_id' => 'paramascotasec', 'role' => 'admin'],
+        ['identity_type' => 'tenant_staff', 'status' => 'active'],
+        []
+    ),
+    true,
+    'Paramascotas debe detectar el admin legacy activo sin roles como candidato explícito'
+);
+assertSameValue(
+    TenantAccessService::isLegacyTenantAdminRoleReconciliationCandidate(
+        'fidepuntos',
+        ['tenant_id' => 'fidepuntos', 'role' => 'admin'],
+        ['identity_type' => 'tenant_staff', 'status' => 'active'],
+        []
+    ),
+    false,
+    'Fidepuntos debe quedar excluido del reconciliador legacy'
+);
+assertSameValue(
+    TenantAccessService::isLegacyTenantAdminRoleReconciliationCandidate(
+        'paramascotasec',
+        ['tenant_id' => 'paramascotasec', 'role' => 'admin'],
+        ['identity_type' => 'tenant_staff', 'status' => 'inactive'],
+        []
+    ),
+    false,
+    'El reconciliador no debe reactivar administradores inactivos'
+);
+assertSameValue(
+    TenantAccessService::isLegacyTenantAdminRoleReconciliationCandidate(
+        'paramascotasec',
+        ['tenant_id' => 'paramascotasec', 'role' => 'admin'],
+        ['identity_type' => 'tenant_staff', 'status' => 'active'],
+        ['paramascotasec_reader']
+    ),
+    false,
+    'El reconciliador no debe ampliar usuarios que ya tienen una asignación relacional'
+);
+
+$readOnlyRepository = new class extends IdentityAccessRepository {
+    /** @var list<array<string, mixed>> */
+    public array $storedRoles = [];
+    /** @var array<string, mixed>|null */
+    public ?array $membership = null;
+    public int $writeCalls = 0;
+
+    public function __construct()
+    {
+    }
+
+    public function rolesForUser(string $userId, ?string $tenantId = null): array
+    {
+        return $this->storedRoles;
+    }
+
+    public function membershipForUser(string $userId, ?string $tenantId = null): ?array
+    {
+        return $this->membership;
+    }
+
+    public function syncRole(array $role, ?string $tenantId = null): void
+    {
+        $this->writeCalls++;
+    }
+
+    public function syncMembership(
+        string $userId,
+        string $identityType,
+        array $roleIds = [],
+        string $status = 'active',
+        ?string $tenantId = null
+    ): void {
+        $this->writeCalls++;
+    }
+};
+$readOnlyRepository->membership = [
+    'tenant_id' => 'paramascotasec',
+    'identity_type' => 'tenant_staff',
+    'status' => 'active',
+];
+$identityRepositoryProperty = $reflection->getProperty('identityAccessRepository');
+$identityRepositoryProperty->setValue($access, $readOnlyRepository);
+assertSameValue(
+    $access->rolesForTenantUser(
+        ['id' => 'legacy-admin', 'tenant_id' => 'paramascotasec', 'role' => 'admin'],
+        ['dashboard', 'users', 'ecommerce']
+    ),
+    [],
+    'La lectura debe fallar cerrada hasta que el reconciliador materialice el rol'
+);
+assertSameValue(
+    $readOnlyRepository->writeCalls,
+    0,
+    'rolesForTenantUser no debe escribir roles ni membresías durante un GET'
+);
+$readOnlyRepository->storedRoles = [[
+    'id' => 'paramascotasec_admin',
+    'permissions' => ['ecommerce.update'],
+]];
+assertSameValue(
+    $access->rolesForTenantUser(
+        ['id' => 'materialized-admin', 'tenant_id' => 'paramascotasec', 'role' => 'admin'],
+        ['dashboard', 'users', 'ecommerce']
+    ),
+    $readOnlyRepository->storedRoles,
+    'La lectura debe devolver la asignación central una vez materializada'
+);
+assertSameValue(
+    $readOnlyRepository->writeCalls,
+    0,
+    'La lectura de una asignación materializada tampoco debe escribir'
+);
 
 fwrite(STDOUT, "RBAC route policy OK\n");

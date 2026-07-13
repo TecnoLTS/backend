@@ -172,6 +172,25 @@ final class LoyaltySchema {
             created_by_user_id text,
             created_at timestamp without time zone DEFAULT NOW() NOT NULL
         )');
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_cash_receipts (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            member_id text NOT NULL,
+            program_id text NOT NULL,
+            reference text NOT NULL,
+            normalized_reference text NOT NULL,
+            amount_minor bigint NOT NULL,
+            currency_code text NOT NULL,
+            status text NOT NULL DEFAULT \'completed\',
+            ledger_id text NOT NULL,
+            command_id text NOT NULL,
+            created_by_user_id text NOT NULL,
+            metadata jsonb DEFAULT \'{}\'::jsonb NOT NULL,
+            created_at timestamp without time zone DEFAULT NOW() NOT NULL,
+            reversed_at timestamp without time zone,
+            reversed_by_user_id text,
+            reversal_reason text
+        )');
         $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_rewards (
             id text PRIMARY KEY,
             tenant_id text NOT NULL,
@@ -702,6 +721,12 @@ final class LoyaltySchema {
         $this->createIndexIfMissing('loyalty_ledger_reference_idx', 'CREATE INDEX loyalty_ledger_reference_idx ON loyalty_point_ledger (tenant_id, source, reference)');
         $this->createIndexIfMissing('loyalty_ledger_active_purchase_reference_uidx', "CREATE UNIQUE INDEX loyalty_ledger_active_purchase_reference_uidx ON loyalty_point_ledger (tenant_id, reference) WHERE entry_type = 'purchase' AND reversed_at IS NULL");
         $this->createIndexIfMissing('loyalty_ledger_active_purchase_normalized_reference_uidx', "CREATE UNIQUE INDEX loyalty_ledger_active_purchase_normalized_reference_uidx ON loyalty_point_ledger (tenant_id, normalized_reference) WHERE entry_type = 'purchase' AND reversed_at IS NULL AND normalized_reference IS NOT NULL");
+        $this->createIndexIfMissing('loyalty_cash_receipts_active_reference_uidx', "CREATE UNIQUE INDEX loyalty_cash_receipts_active_reference_uidx ON loyalty_cash_receipts (tenant_id, reference) WHERE status = 'completed'");
+        $this->createIndexIfMissing('loyalty_cash_receipts_active_normalized_reference_uidx', "CREATE UNIQUE INDEX loyalty_cash_receipts_active_normalized_reference_uidx ON loyalty_cash_receipts (tenant_id, normalized_reference) WHERE status = 'completed'");
+        $this->createIndexIfMissing('loyalty_cash_receipts_tenant_ledger_uidx', 'CREATE UNIQUE INDEX loyalty_cash_receipts_tenant_ledger_uidx ON loyalty_cash_receipts (tenant_id, ledger_id)');
+        $this->createIndexIfMissing('loyalty_cash_receipts_tenant_command_uidx', 'CREATE UNIQUE INDEX loyalty_cash_receipts_tenant_command_uidx ON loyalty_cash_receipts (tenant_id, command_id)');
+        $this->createIndexIfMissing('loyalty_cash_receipts_member_created_idx', 'CREATE INDEX loyalty_cash_receipts_member_created_idx ON loyalty_cash_receipts (tenant_id, member_id, created_at DESC)');
+        $this->createIndexIfMissing('loyalty_cash_receipts_status_created_idx', 'CREATE INDEX loyalty_cash_receipts_status_created_idx ON loyalty_cash_receipts (tenant_id, status, created_at DESC)');
         $this->createIndexIfMissing('loyalty_debt_ledger_member_idx', 'CREATE INDEX loyalty_debt_ledger_member_idx ON loyalty_debt_ledger (tenant_id, member_id, created_at, id)');
         $this->createIndexIfMissing('loyalty_debt_ledger_member_sequence_idx', 'CREATE INDEX loyalty_debt_ledger_member_sequence_idx ON loyalty_debt_ledger (tenant_id, member_id, sequence_no)');
         $this->createIndexIfMissing('loyalty_command_journal_actor_idx', 'CREATE INDEX loyalty_command_journal_actor_idx ON loyalty_command_journal (tenant_id, actor_type, actor_id, created_at DESC)');
@@ -781,6 +806,23 @@ final class LoyaltySchema {
             'loyalty_point_ledger',
             'loyalty_point_ledger_nonnegative_after_check',
             'balance_after >= 0'
+        );
+        $this->addCheckConstraintIfMissing(
+            'loyalty_cash_receipts',
+            'loyalty_cash_receipts_amount_check',
+            'amount_minor > 0'
+        );
+        $this->addCheckConstraintIfMissing(
+            'loyalty_cash_receipts',
+            'loyalty_cash_receipts_status_check',
+            "status IN ('completed', 'reversed')"
+        );
+        $this->addCheckConstraintIfMissing(
+            'loyalty_cash_receipts',
+            'loyalty_cash_receipts_reversal_state_check',
+            "(status = 'completed' AND reversed_at IS NULL AND reversed_by_user_id IS NULL AND reversal_reason IS NULL)
+             OR
+             (status = 'reversed' AND reversed_at IS NOT NULL AND NULLIF(BTRIM(reversed_by_user_id), '') IS NOT NULL AND NULLIF(BTRIM(reversal_reason), '') IS NOT NULL)"
         );
         $this->addCheckConstraintIfMissing(
             'loyalty_rewards',

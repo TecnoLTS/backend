@@ -7,8 +7,10 @@ require_once __DIR__ . '/../vendor/autoload.php';
 use App\Core\TenantContext;
 use App\Core\Database;
 use App\Modules\LoyaltyRewards\Infrastructure\LoyaltyRepository;
+use App\Modules\LoyaltyRewards\Application\PurchaseSourceVerifier;
 use App\Modules\LoyaltyRewards\Domain\DecimalMath;
 use App\Modules\LoyaltyRewards\Domain\LoyaltyRewardsDomain;
+use App\Modules\LoyaltyRewards\Domain\ReferenceNormalizer;
 use Dotenv\Dotenv;
 
 $envDir = __DIR__ . '/../entorno';
@@ -126,13 +128,14 @@ $cleanup = static function () use ($pdo, &$createdMemberIds, &$createdRewardIds,
     $pdo->prepare(
         "DELETE FROM loyalty_command_journal
          WHERE tenant_id = :tenant_id
-           AND actor_id IN ('policy-script', 'api:policy-client')"
+           AND actor_id IN ('policy-script', 'policy-staff', 'api:policy-client')"
     )->execute(['tenant_id' => 'fidepuntos']);
     $deleteByIds($pdo, 'loyalty_point_expirations', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_reversals', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_debt_ledger', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_redemptions', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_wallet_passes', 'member_id', $createdMemberIds);
+    $deleteByIds($pdo, 'loyalty_cash_receipts', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_point_ledger', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_point_accounts', 'member_id', $createdMemberIds);
     $deleteByIds($pdo, 'loyalty_members', 'id', $createdMemberIds);
@@ -292,7 +295,7 @@ try {
                 'commandId' => $duplicateCommandTwo,
             ], 'policy-script', $trustedFixture);
         },
-        'factura'
+        'comprobante'
     );
     $report['checks']['duplicate_invoice_blocked'] = $duplicateInvoice;
 
@@ -375,6 +378,78 @@ try {
         'rules_version' => (int)($storedFormulaRow['rules_version'] ?? 0),
         'missing_keys' => array_values(array_diff($requiredFormulaKeys, array_keys($storedFormula))),
         'variant_hashes_are_unique' => count(array_unique($formulaHashes)) === count($formulaHashes),
+    ];
+
+    $forgedStaffReference = 'POL-STAFF-FORGED-' . $token;
+    $createdReferences[] = $forgedStaffReference;
+    $forgedStaffSource = $expectException(
+        fn() => $repository->registerPurchase([
+            'memberId' => $member['id'],
+            'invoiceNumber' => $forgedStaffReference,
+            'invoiceAmount' => '10.00',
+            'purchaseSource' => PurchaseSourceVerifier::STAFF_POS_SOURCE,
+            'commandId' => 'policy-staff-forged-' . $token,
+        ], 'policy-script'),
+        'fuente indicada'
+    );
+    $report['checks']['staff_pos_cannot_be_forged_from_payload'] = $forgedStaffSource;
+
+    $staffReference = 'POL-STAFF-' . $token;
+    $staffCommand = 'policy-staff-register-' . $token;
+    $staffReverseCommand = 'policy-staff-reverse-' . $token;
+    $createdReferences[] = $staffReference;
+    $createdCommandIds[] = $staffCommand;
+    $createdCommandIds[] = $staffReverseCommand;
+    $staffContext = [
+        'verified' => true,
+        'type' => PurchaseSourceVerifier::STAFF_POS_SOURCE,
+        'actorId' => 'policy-staff',
+    ];
+    $staffPurchase = $repository->registerPurchase([
+        'memberId' => $member['id'],
+        'invoiceNumber' => $staffReference,
+        'invoiceAmount' => '19.95',
+        'commandId' => $staffCommand,
+    ], 'policy-staff', $staffContext);
+    $staffReceiptBefore = $pdo->prepare(
+        'SELECT id, status, member_id, ledger_id, amount_minor, currency_code, created_by_user_id
+         FROM loyalty_cash_receipts
+         WHERE tenant_id = :tenant_id AND normalized_reference = :reference
+         LIMIT 1'
+    );
+    $staffReceiptBefore->execute([
+        'tenant_id' => 'fidepuntos',
+        'reference' => ReferenceNormalizer::normalize($staffReference),
+    ]);
+    $staffReceipt = $staffReceiptBefore->fetch(PDO::FETCH_ASSOC) ?: [];
+    $staffReversal = $repository->reversePurchase($staffReference, [
+        'reason' => 'Reversa de ejercicio staff POS',
+        'commandId' => $staffReverseCommand,
+    ], 'policy-staff');
+    $staffReceiptAfter = $pdo->prepare(
+        'SELECT status, reversed_at, reversed_by_user_id, reversal_reason
+         FROM loyalty_cash_receipts
+         WHERE tenant_id = :tenant_id AND id = :id
+         LIMIT 1'
+    );
+    $staffReceiptAfter->execute(['tenant_id' => 'fidepuntos', 'id' => $staffReceipt['id'] ?? '']);
+    $reversedStaffReceipt = $staffReceiptAfter->fetch(PDO::FETCH_ASSOC) ?: [];
+    $report['checks']['staff_pos_receipt_lifecycle'] = [
+        'passed' => ($staffPurchase['sourceVerification']['type'] ?? null) === PurchaseSourceVerifier::STAFF_POS_SOURCE
+            && !empty($staffPurchase['sourceVerification']['verified'])
+            && ($staffPurchase['sourceVerification']['sourceId'] ?? null) === ($staffReceipt['id'] ?? null)
+            && ($staffReceipt['status'] ?? null) === 'completed'
+            && ($staffReceipt['member_id'] ?? null) === $member['id']
+            && ($staffReceipt['ledger_id'] ?? null) === ($staffPurchase['ledgerId'] ?? null)
+            && (int)($staffReceipt['amount_minor'] ?? 0) === 1995
+            && ($staffReceipt['currency_code'] ?? null) === 'USD'
+            && ($staffReceipt['created_by_user_id'] ?? null) === 'policy-staff'
+            && ($staffReversal['cashReceiptId'] ?? null) === ($staffReceipt['id'] ?? null)
+            && ($reversedStaffReceipt['status'] ?? null) === 'reversed'
+            && !empty($reversedStaffReceipt['reversed_at'])
+            && ($reversedStaffReceipt['reversed_by_user_id'] ?? null) === 'policy-staff'
+            && ($reversedStaffReceipt['reversal_reason'] ?? null) === 'Reversa de ejercicio staff POS',
+        'receipt_id' => $staffReceipt['id'] ?? null,
     ];
 
     $idempotencyKey = 'POL-IDEM-' . $token;

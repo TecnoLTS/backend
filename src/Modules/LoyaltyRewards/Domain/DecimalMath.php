@@ -48,6 +48,23 @@ final class DecimalMath
         return self::boundedInteger($minor, $field);
     }
 
+    public static function moneyFromMinorUnits(mixed $value, string $field = 'monto'): string
+    {
+        self::assertAvailable();
+        if (is_int($value)) {
+            $minor = (string)$value;
+        } elseif (is_string($value)) {
+            $minor = trim($value);
+        } else {
+            throw new \InvalidArgumentException("{$field} en centavos debe ser un entero.");
+        }
+        if (preg_match('/^[0-9]+$/D', $minor) !== 1 || bccomp($minor, '0', 0) <= 0) {
+            throw new \InvalidArgumentException("{$field} en centavos debe ser mayor a cero.");
+        }
+
+        return self::money(bcdiv($minor, '100', 2), $field);
+    }
+
     public static function compare(string $left, string $right, int $scale = 4): int
     {
         self::assertAvailable();

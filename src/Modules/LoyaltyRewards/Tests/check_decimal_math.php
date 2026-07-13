@@ -33,10 +33,13 @@ $assertSame(2, DecimalMath::calculatePoints('1.00', '0.40', '1', '1', DecimalMat
 $assertSame(3, DecimalMath::calculatePoints('1.00', '0.40', '1', '1', DecimalMath::ROUND_HALF_UP), 'borde half-up');
 $assertSame(3, DecimalMath::calculatePoints('1.00', '0.40', '1', '1', DecimalMath::ROUND_CEIL), 'borde ceil');
 $assertSame(20000, DecimalMath::capPoints(25000, 20000), 'cap maximo');
+$assertSame('250.00', DecimalMath::moneyFromMinorUnits(25000), 'centavos a dinero');
+$assertSame('0.01', DecimalMath::moneyFromMinorUnits('1'), 'centavo minimo');
 $assertThrows(static fn() => DecimalMath::money('1e3'), 'notacion cientifica');
 $assertThrows(static fn() => DecimalMath::money('1.001'), 'escala monetaria');
 $assertThrows(static fn() => DecimalMath::factor('1.00001'), 'escala de factor');
 $assertThrows(static fn() => DecimalMath::money('9999999999999.00'), 'overflow decimal');
+$assertThrows(static fn() => DecimalMath::moneyFromMinorUnits('1.5'), 'centavos no enteros');
 
 mt_srand(20260713);
 for ($case = 0; $case < 10000; $case++) {
