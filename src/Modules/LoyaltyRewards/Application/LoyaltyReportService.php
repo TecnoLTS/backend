@@ -233,10 +233,10 @@ final class LoyaltyReportService
 
             $summaryRows = [
                 [['value' => $definition['title'], 'style' => 1]],
-                [['value' => 'Tenant', 'style' => 2], ['value' => $context['tenantId']]],
-                [['value' => 'Periodo', 'style' => 2], ['value' => $context['from'] . ' a ' . $context['to']]],
-                [['value' => 'Zona horaria', 'style' => 2], ['value' => $context['timezone']]],
-                [['value' => 'Generado', 'style' => 2], ['value' => $generatedAt, 'type' => 'datetime']],
+                [['value' => 'Tenant', 'style' => 5], ['value' => $context['tenantId']]],
+                [['value' => 'Periodo', 'style' => 5], ['value' => $context['from'] . ' a ' . $context['to']]],
+                [['value' => 'Zona horaria', 'style' => 5], ['value' => $context['timezone']]],
+                [['value' => 'Generado', 'style' => 5], ['value' => $generatedAt, 'type' => 'datetime']],
                 [],
                 [['value' => 'Indicador', 'style' => 2], ['value' => 'Valor', 'style' => 2], ['value' => 'Definicion', 'style' => 2]],
             ];
@@ -244,29 +244,8 @@ final class LoyaltyReportService
                 $summaryRows[] = [
                     ['value' => $metric['label']],
                     ['value' => $metric['value'], 'type' => $metric['format']],
-                    ['value' => $metric['definition']],
+                    ['value' => $metric['definition'], 'style' => 6],
                 ];
-            }
-
-            $chartRows = [[
-                ['value' => 'Grafico', 'style' => 2],
-                ['value' => 'Categoria', 'style' => 2],
-                ['value' => 'Serie', 'style' => 2],
-                ['value' => 'Valor', 'style' => 2],
-                ['value' => 'Unidad', 'style' => 2],
-            ]];
-            foreach ($overview['charts'] as $chart) {
-                foreach ($chart['series'] as $series) {
-                    foreach ($chart['categories'] as $index => $category) {
-                        $chartRows[] = [
-                            ['value' => $chart['title']],
-                            ['value' => $category],
-                            ['value' => $series['label']],
-                            ['value' => (int)($series['data'][$index] ?? 0), 'type' => 'integer'],
-                            ['value' => $chart['unit']],
-                        ];
-                    }
-                }
             }
 
             $definitionRows = [[
@@ -277,32 +256,33 @@ final class LoyaltyReportService
             $definitionRows[] = [
                 ['value' => 'Reporte'],
                 ['value' => $definition['scope']],
-                ['value' => $definition['purpose']],
+                ['value' => $definition['purpose'], 'style' => 6],
             ];
             foreach ($definition['columns'] as $column) {
                 $definitionRows[] = [
                     ['value' => $column['label']],
                     ['value' => $column['type']],
-                    ['value' => $column['definition']],
+                    ['value' => $column['definition'], 'style' => 6],
                 ];
             }
             foreach ($overview['metrics'] as $metric) {
                 $definitionRows[] = [
                     ['value' => $metric['label']],
                     ['value' => $metric['format']],
-                    ['value' => $metric['definition']],
+                    ['value' => $metric['definition'], 'style' => 6],
                 ];
             }
 
             $sheets = [];
             try {
-                $sheets[] = ['name' => 'Resumen', 'path' => $this->writeWorksheet($summaryRows, 7)];
-                $sheets[] = ['name' => 'Gráficos', 'path' => $this->writeWorksheet($chartRows, 1)];
+                $sheets[] = ['name' => 'Resumen', 'path' => $this->writeWorksheet($summaryRows, 7, [24, 18, 76])];
+                $chartSheet = $this->writeChartWorksheet($overview['charts']);
+                $sheets[] = ['name' => 'Gráficos', 'path' => $chartSheet['path'], 'charts' => $chartSheet['charts']];
                 $sheets[] = [
                     'name' => 'Datos',
                     'path' => $this->writeDataWorksheet($reportKey, $definition, $context, $filters, $count),
                 ];
-                $sheets[] = ['name' => 'Definiciones', 'path' => $this->writeWorksheet($definitionRows, 1)];
+                $sheets[] = ['name' => 'Definiciones', 'path' => $this->writeWorksheet($definitionRows, 1, [26, 16, 92])];
                 $path = $this->buildWorkbookFile($definition['title'], $sheets);
             } finally {
                 foreach ($sheets as $sheet) {
@@ -2703,7 +2683,7 @@ final class LoyaltyReportService
         }
         $completed = false;
         try {
-            fwrite($handle, $this->worksheetStart());
+            fwrite($handle, $this->worksheetStart(1, $this->dataWorksheetColumnWidths(count($definition['columns']))));
             $rowIndex = 1;
             $headers = array_map(
                 static fn(array $column): array => ['value' => $column['label'], 'style' => 2],
@@ -2745,7 +2725,7 @@ final class LoyaltyReportService
     }
 
     /** @param array<int,array<int,array<string,mixed>>> $rows */
-    private function writeWorksheet(array $rows, int $freezeRow): string
+    private function writeWorksheet(array $rows, int $freezeRow, ?array $columnWidths = null): string
     {
         $path = tempnam(sys_get_temp_dir(), 'loyalty-report-sheet-');
         if (!is_string($path)) {
@@ -2756,7 +2736,7 @@ final class LoyaltyReportService
             @unlink($path);
             throw new \RuntimeException('No se pudo abrir una hoja Excel.');
         }
-        fwrite($handle, $this->worksheetStart($freezeRow));
+        fwrite($handle, $this->worksheetStart($freezeRow, $columnWidths));
         $rowIndex = 1;
         $maximumColumns = 1;
         foreach ($rows as $row) {
@@ -2770,29 +2750,267 @@ final class LoyaltyReportService
         return $path;
     }
 
-    private function worksheetStart(int $freezeRow = 1): string
+    /**
+     * @param array<int,array<string,mixed>> $charts
+     * @return array{path:string,charts:array<int,array<string,mixed>>}
+     */
+    private function writeChartWorksheet(array $charts): array
+    {
+        $path = tempnam(sys_get_temp_dir(), 'loyalty-report-charts-');
+        if (!is_string($path)) {
+            throw new \RuntimeException('No se pudo preparar una hoja Excel.');
+        }
+        $handle = fopen($path, 'wb');
+        if ($handle === false) {
+            @unlink($path);
+            throw new \RuntimeException('No se pudo abrir una hoja Excel.');
+        }
+
+        $normalizedCharts = array_values(array_map(fn(array $chart): array => $this->normalizeExcelChart($chart), $charts));
+        $chartCount = count($normalizedCharts);
+        $chartHeightRows = 18;
+        $chartGapRows = 2;
+        $dataRow = max(2, ($chartCount * ($chartHeightRows + $chartGapRows)) + 2);
+        $rowIndex = $dataRow;
+        $maximumColumns = 1;
+        $chartDefinitions = [];
+        $mergeRanges = [];
+        $firstAutoFilter = null;
+
+        fwrite($handle, $this->worksheetStart(0, [22, 18, 16, 18, 18, 14, 14, 14, 14, 14]));
+        if ($chartCount === 0) {
+            fwrite($handle, $this->xlsxRow(1, [
+                ['value' => 'No hay graficos para el periodo aplicado.', 'style' => 1],
+            ]));
+            fwrite($handle, $this->worksheetEnd('A1:A1'));
+            fclose($handle);
+
+            return ['path' => $path, 'charts' => []];
+        }
+
+        foreach ($normalizedCharts as $index => $chart) {
+            $titleRow = $rowIndex++;
+            $summaryRow = $rowIndex++;
+            $headerRow = $rowIndex++;
+            $firstDataRow = $rowIndex;
+            $series = $chart['series'];
+            $headerCells = [
+                ['value' => 'Categoria', 'style' => 2],
+            ];
+            foreach ($series as $item) {
+                $headerCells[] = ['value' => $item['label'], 'style' => 2];
+            }
+
+            fwrite($handle, $this->xlsxRow($titleRow, [
+                ['value' => $chart['title'], 'style' => 1],
+                ['value' => null],
+                ['value' => 'Unidad', 'style' => 5],
+                ['value' => $chart['unit']],
+            ]));
+            fwrite($handle, $this->xlsxRow($summaryRow, [
+                ['value' => 'Resumen', 'style' => 5],
+                ['value' => $chart['summary'], 'style' => 9],
+                ['value' => null],
+                ['value' => null],
+                ['value' => null],
+            ]));
+            $mergeRanges[] = 'A' . $titleRow . ':B' . $titleRow;
+            $mergeRanges[] = 'B' . $summaryRow . ':E' . $summaryRow;
+            fwrite($handle, $this->xlsxRow($headerRow, $headerCells));
+            $maximumColumns = max($maximumColumns, count($headerCells));
+
+            foreach ($chart['categories'] as $categoryIndex => $category) {
+                $row = [['value' => $category]];
+                foreach ($series as $item) {
+                    $row[] = [
+                        'value' => (int)($item['data'][$categoryIndex] ?? 0),
+                        'type' => 'integer',
+                    ];
+                }
+                fwrite($handle, $this->xlsxRow($rowIndex++, $row));
+            }
+
+            $lastDataRow = $rowIndex - 1;
+            if ($firstAutoFilter === null) {
+                $lastHeaderColumn = $this->xlsxColumnName(max(0, count($headerCells) - 1));
+                $firstAutoFilter = 'A' . $headerRow . ':' . $lastHeaderColumn . $lastDataRow;
+            }
+            $seriesDefinitions = [];
+            foreach ($series as $seriesIndex => $item) {
+                $seriesDefinitions[] = [
+                    'label' => $item['label'],
+                    'labelRef' => $this->xlsxCellReference('Gráficos', $seriesIndex + 1, $headerRow),
+                    'valuesRef' => $this->xlsxRangeReference('Gráficos', $seriesIndex + 1, $firstDataRow, $lastDataRow),
+                    'data' => array_map(static fn(mixed $value): int => (int)$value, $item['data']),
+                ];
+            }
+
+            $anchorStartRow = $index * ($chartHeightRows + $chartGapRows);
+            $chartDefinitions[] = [
+                'title' => $chart['title'],
+                'type' => $chart['type'],
+                'unit' => $chart['unit'],
+                'categories' => $chart['categories'],
+                'categoriesRef' => $this->xlsxRangeReference('Gráficos', 0, $firstDataRow, $lastDataRow),
+                'series' => $seriesDefinitions,
+                'fromColumn' => 0,
+                'fromRow' => $anchorStartRow,
+                'toColumn' => 9,
+                'toRow' => $anchorStartRow + $chartHeightRows,
+            ];
+
+            $rowIndex += 2;
+        }
+
+        fwrite($handle, $this->worksheetEnd($firstAutoFilter, 'rId1', $mergeRanges));
+        fclose($handle);
+
+        return ['path' => $path, 'charts' => $chartDefinitions];
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function normalizeExcelChart(array $chart): array
+    {
+        $categories = array_values(array_map(
+            static fn(mixed $value): string => is_scalar($value) ? (string)$value : '',
+            is_array($chart['categories'] ?? null) ? $chart['categories'] : []
+        ));
+        $series = [];
+        foreach (is_array($chart['series'] ?? null) ? $chart['series'] : [] as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $data = array_values(array_map(
+                static fn(mixed $value): int => is_numeric($value) ? (int)$value : 0,
+                is_array($item['data'] ?? null) ? $item['data'] : []
+            ));
+            $series[] = [
+                'label' => (string)($item['label'] ?? $item['name'] ?? $item['key'] ?? 'Serie'),
+                'data' => $data,
+            ];
+        }
+        if ($categories === []) {
+            $categories = ['Sin datos'];
+        }
+        if ($series === []) {
+            $series[] = ['label' => 'Total', 'data' => [0]];
+        }
+        foreach ($series as &$item) {
+            $data = $item['data'];
+            for ($index = 0, $total = count($categories); $index < $total; $index++) {
+                if (!array_key_exists($index, $data)) {
+                    $data[$index] = 0;
+                }
+            }
+            $item['data'] = array_slice($data, 0, count($categories));
+        }
+        unset($item);
+
+        $type = (string)($chart['type'] ?? 'bar');
+        if (!in_array($type, ['line', 'bar', 'stacked-bar', 'donut'], true)) {
+            $type = 'bar';
+        }
+
+        return [
+            'title' => (string)($chart['title'] ?? 'Grafico'),
+            'type' => $type,
+            'unit' => (string)($chart['unit'] ?? ''),
+            'summary' => (string)($chart['summary'] ?? ''),
+            'categories' => $categories,
+            'series' => $series,
+        ];
+    }
+
+    /** @param array<int,int|float>|null $columnWidths */
+    private function worksheetStart(int $freezeRow = 1, ?array $columnWidths = null): string
     {
         $pane = $freezeRow > 0
             ? '<pane ySplit="' . $freezeRow . '" topLeftCell="A' . ($freezeRow + 1) . '" activePane="bottomLeft" state="frozen"/>'
             : '';
 
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            . '<sheetViews><sheetView workbookViewId="0">' . $pane . '</sheetView></sheetViews>'
+            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . '<sheetViews><sheetView showGridLines="0" workbookViewId="0">' . $pane . '</sheetView></sheetViews>'
             . '<sheetFormatPr defaultRowHeight="18"/>'
-            . '<cols><col min="1" max="4" width="24" customWidth="1"/>'
-            . '<col min="5" max="40" width="20" customWidth="1"/></cols><sheetData>';
+            . $this->worksheetColumnDefinitions($columnWidths)
+            . '<sheetData>';
     }
 
-    private function worksheetEnd(string $autoFilter): string
+    /** @param array<int,string> $mergeRanges */
+    private function worksheetEnd(?string $autoFilter, ?string $drawingRelationshipId = null, array $mergeRanges = []): string
     {
-        return '</sheetData><autoFilter ref="' . $this->xml($autoFilter) . '"/></worksheet>';
+        $filter = $autoFilter === null || $autoFilter === ''
+            ? ''
+            : '<autoFilter ref="' . $this->xml($autoFilter) . '"/>';
+        $merges = '';
+        if ($mergeRanges !== []) {
+            $merges = '<mergeCells count="' . count($mergeRanges) . '">';
+            foreach ($mergeRanges as $range) {
+                $merges .= '<mergeCell ref="' . $this->xml($range) . '"/>';
+            }
+            $merges .= '</mergeCells>';
+        }
+        $drawing = $drawingRelationshipId === null
+            ? ''
+            : '<drawing r:id="' . $this->xml($drawingRelationshipId) . '"/>';
+
+        return '</sheetData>' . $filter . $merges . $drawing . '</worksheet>';
+    }
+
+    /** @param array<int,int|float>|null $columnWidths */
+    private function worksheetColumnDefinitions(?array $columnWidths = null): string
+    {
+        if ($columnWidths === null || $columnWidths === []) {
+            return '<cols><col min="1" max="4" width="24" customWidth="1"/>'
+                . '<col min="5" max="40" width="20" customWidth="1"/></cols>';
+        }
+
+        $xml = '<cols>';
+        foreach (array_values($columnWidths) as $index => $width) {
+            $column = $index + 1;
+            $safeWidth = max(8, min(110, (float)$width));
+            $xml .= '<col min="' . $column . '" max="' . $column
+                . '" width="' . $safeWidth . '" customWidth="1"/>';
+        }
+
+        return $xml . '</cols>';
+    }
+
+    /** @return array<int,int> */
+    private function dataWorksheetColumnWidths(int $columnCount): array
+    {
+        if ($columnCount <= 0) {
+            return [22];
+        }
+
+        return array_fill(0, $columnCount, 22);
     }
 
     /** @param array<int,array<string,mixed>|scalar|null> $cells */
     private function xlsxRow(int $rowIndex, array $cells): string
     {
-        $xml = '<row r="' . $rowIndex . '">';
+        $styles = array_map(static fn(mixed $cell): int => is_array($cell) ? (int)($cell['style'] ?? 0) : 0, $cells);
+        $maxTextLength = 0;
+        foreach ($cells as $cell) {
+            $value = is_array($cell) ? ($cell['value'] ?? null) : $cell;
+            if (is_scalar($value)) {
+                $maxTextLength = max($maxTextLength, mb_strlen((string)$value, 'UTF-8'));
+            }
+        }
+        $rowAttributes = ' r="' . $rowIndex . '"';
+        if (in_array(1, $styles, true)) {
+            $rowAttributes .= ' ht="24" customHeight="1"';
+        } elseif (in_array(9, $styles, true)) {
+            $rowAttributes .= ' ht="36" customHeight="1"';
+        } elseif (in_array(6, $styles, true)) {
+            if ($maxTextLength > 95) {
+                $rowAttributes .= ' ht="40" customHeight="1"';
+            } elseif ($maxTextLength > 60) {
+                $rowAttributes .= ' ht="28" customHeight="1"';
+            }
+        }
+        $xml = '<row' . $rowAttributes . '>';
         foreach (array_values($cells) as $columnIndex => $cell) {
             $value = is_array($cell) ? ($cell['value'] ?? null) : $cell;
             $style = is_array($cell) ? (int)($cell['style'] ?? 0) : 0;
@@ -2810,7 +3028,9 @@ final class LoyaltyReportService
             return '<c r="' . $reference . '"/>';
         }
         if (in_array($type, ['integer', 'points', 'percent'], true) && is_numeric($value)) {
-            return '<c r="' . $reference . '" s="' . $style . '"><v>' . $this->xml((string)$value) . '</v></c>';
+            $numericStyle = $style > 0 ? $style : ($type === 'percent' ? 8 : 7);
+
+            return '<c r="' . $reference . '" s="' . $numericStyle . '"><v>' . $this->xml((string)$value) . '</v></c>';
         }
         if (in_array($type, ['date', 'datetime'], true)) {
             try {
@@ -2842,7 +3062,182 @@ final class LoyaltyReportService
         return $name;
     }
 
-    /** @param array<int,array{name:string,path:string}> $sheets */
+    private function xlsxCellReference(string $sheetName, int $columnIndex, int $rowIndex): string
+    {
+        return $this->xlsxQuotedSheetName($sheetName) . '!$'
+            . $this->xlsxColumnName($columnIndex) . '$' . $rowIndex;
+    }
+
+    private function xlsxRangeReference(string $sheetName, int $columnIndex, int $firstRow, int $lastRow): string
+    {
+        return $this->xlsxQuotedSheetName($sheetName) . '!$'
+            . $this->xlsxColumnName($columnIndex) . '$' . $firstRow . ':$'
+            . $this->xlsxColumnName($columnIndex) . '$' . $lastRow;
+    }
+
+    private function xlsxQuotedSheetName(string $sheetName): string
+    {
+        return "'" . str_replace("'", "''", $sheetName) . "'";
+    }
+
+    /** @param array<int,array<string,mixed>> $charts */
+    private function xlsxDrawingXml(array $charts): string
+    {
+        $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
+            . ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">';
+        foreach ($charts as $index => $chart) {
+            $relationshipId = 'rId' . ($index + 1);
+            $xml .= '<xdr:twoCellAnchor>'
+                . '<xdr:from><xdr:col>' . (int)$chart['fromColumn'] . '</xdr:col><xdr:colOff>0</xdr:colOff>'
+                . '<xdr:row>' . (int)$chart['fromRow'] . '</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+                . '<xdr:to><xdr:col>' . (int)$chart['toColumn'] . '</xdr:col><xdr:colOff>0</xdr:colOff>'
+                . '<xdr:row>' . (int)$chart['toRow'] . '</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+                . '<xdr:graphicFrame macro="">'
+                . '<xdr:nvGraphicFramePr><xdr:cNvPr id="' . ($index + 2) . '" name="Grafico ' . ($index + 1) . '"/>'
+                . '<xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>'
+                . '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+                . '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+                . '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+                . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+                . ' r:id="' . $relationshipId . '"/>'
+                . '</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>';
+        }
+
+        return $xml . '</xdr:wsDr>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function xlsxChartXml(array $chart): string
+    {
+        $partId = (int)($chart['partId'] ?? 1);
+        $categoryAxisId = 100000 + ($partId * 10);
+        $valueAxisId = $categoryAxisId + 1;
+        $plot = match ($chart['type']) {
+            'line' => $this->xlsxLineChartXml($chart, $categoryAxisId, $valueAxisId),
+            'donut' => $this->xlsxDoughnutChartXml($chart),
+            default => $this->xlsxBarChartXml($chart, $categoryAxisId, $valueAxisId),
+        };
+        $axes = $chart['type'] === 'donut' ? '' : $this->xlsxChartAxesXml($categoryAxisId, $valueAxisId);
+
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"'
+            . ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+            . ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . '<c:lang val="es-ES"/><c:chart>'
+            . $this->xlsxChartTitleXml((string)$chart['title'])
+            . '<c:plotArea><c:layout/>' . $plot . $axes . '</c:plotArea>'
+            . '<c:legend><c:legendPos val="b"/><c:layout/><c:overlay val="0"/></c:legend>'
+            . '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>'
+            . '<c:printSettings><c:headerFooter/><c:pageMargins l="0.7" r="0.7" t="0.75" b="0.75" header="0.3" footer="0.3"/>'
+            . '<c:pageSetup/></c:printSettings></c:chartSpace>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function xlsxLineChartXml(array $chart, int $categoryAxisId, int $valueAxisId): string
+    {
+        return '<c:lineChart><c:grouping val="standard"/>'
+            . $this->xlsxChartSeriesXml($chart, true)
+            . '<c:marker val="1"/><c:smooth val="0"/>'
+            . '<c:axId val="' . $categoryAxisId . '"/><c:axId val="' . $valueAxisId . '"/></c:lineChart>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function xlsxBarChartXml(array $chart, int $categoryAxisId, int $valueAxisId): string
+    {
+        $grouping = $chart['type'] === 'stacked-bar' ? 'stacked' : 'clustered';
+        $overlap = $chart['type'] === 'stacked-bar' ? '<c:overlap val="100"/>' : '';
+
+        return '<c:barChart><c:barDir val="col"/><c:grouping val="' . $grouping . '"/>'
+            . $this->xlsxChartSeriesXml($chart, false)
+            . $overlap
+            . '<c:axId val="' . $categoryAxisId . '"/><c:axId val="' . $valueAxisId . '"/></c:barChart>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function xlsxDoughnutChartXml(array $chart): string
+    {
+        $firstSeries = [$chart['series'][0] ?? ['label' => 'Total', 'data' => [0], 'labelRef' => '', 'valuesRef' => '']];
+
+        return '<c:doughnutChart><c:varyColors val="1"/>'
+            . $this->xlsxChartSeriesXml([
+                'categories' => $chart['categories'],
+                'categoriesRef' => $chart['categoriesRef'],
+                'series' => $firstSeries,
+            ], false)
+            . '<c:holeSize val="55"/></c:doughnutChart>';
+    }
+
+    /** @param array<string,mixed> $chart */
+    private function xlsxChartSeriesXml(array $chart, bool $line): string
+    {
+        $colors = ['2B648F', '9A6B2F', '2F7D67', '7C5AA6', 'B44B5A', '60758A'];
+        $xml = '';
+        foreach ($chart['series'] as $index => $series) {
+            $color = $colors[$index % count($colors)];
+            $marker = $line ? '<c:marker><c:symbol val="circle"/><c:size val="5"/></c:marker>' : '';
+            $xml .= '<c:ser><c:idx val="' . $index . '"/><c:order val="' . $index . '"/>'
+                . '<c:tx><c:strRef><c:f>' . $this->xml((string)$series['labelRef']) . '</c:f>'
+                . $this->xlsxStringCache([(string)$series['label']]) . '</c:strRef></c:tx>'
+                . '<c:spPr><a:solidFill><a:srgbClr val="' . $color . '"/></a:solidFill>'
+                . '<a:ln w="25400"><a:solidFill><a:srgbClr val="' . $color . '"/></a:solidFill></a:ln></c:spPr>'
+                . $marker
+                . '<c:cat><c:strRef><c:f>' . $this->xml((string)$chart['categoriesRef']) . '</c:f>'
+                . $this->xlsxStringCache($chart['categories']) . '</c:strRef></c:cat>'
+                . '<c:val><c:numRef><c:f>' . $this->xml((string)$series['valuesRef']) . '</c:f>'
+                . $this->xlsxNumberCache($series['data']) . '</c:numRef></c:val></c:ser>';
+        }
+
+        return $xml;
+    }
+
+    private function xlsxChartTitleXml(string $title): string
+    {
+        return '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>'
+            . $this->xml($title)
+            . '</a:t></a:r></a:p></c:rich></c:tx><c:layout/><c:overlay val="0"/></c:title>';
+    }
+
+    private function xlsxChartAxesXml(int $categoryAxisId, int $valueAxisId): string
+    {
+        return '<c:catAx><c:axId val="' . $categoryAxisId . '"/>'
+            . '<c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
+            . '<c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="1"/>'
+            . '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>'
+            . '<c:crossAx val="' . $valueAxisId . '"/><c:crosses val="autoZero"/>'
+            . '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx>'
+            . '<c:valAx><c:axId val="' . $valueAxisId . '"/>'
+            . '<c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/>'
+            . '<c:axPos val="l"/><c:majorGridlines/>'
+            . '<c:numFmt formatCode="General" sourceLinked="1"/>'
+            . '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>'
+            . '<c:crossAx val="' . $categoryAxisId . '"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>';
+    }
+
+    /** @param array<int,mixed> $values */
+    private function xlsxStringCache(array $values): string
+    {
+        $xml = '<c:strCache><c:ptCount val="' . count($values) . '"/>';
+        foreach (array_values($values) as $index => $value) {
+            $xml .= '<c:pt idx="' . $index . '"><c:v>' . $this->xml((string)$value) . '</c:v></c:pt>';
+        }
+
+        return $xml . '</c:strCache>';
+    }
+
+    /** @param array<int,mixed> $values */
+    private function xlsxNumberCache(array $values): string
+    {
+        $xml = '<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="' . count($values) . '"/>';
+        foreach (array_values($values) as $index => $value) {
+            $number = is_numeric($value) ? (string)(0 + $value) : '0';
+            $xml .= '<c:pt idx="' . $index . '"><c:v>' . $this->xml($number) . '</c:v></c:pt>';
+        }
+
+        return $xml . '</c:numCache>';
+    }
+
+    /** @param array<int,array{name:string,path:string,charts?:array<int,array<string,mixed>>}> $sheets */
     private function buildWorkbookFile(string $title, array $sheets): string
     {
         $path = tempnam(sys_get_temp_dir(), 'loyalty-report-xlsx-');
@@ -2858,10 +3253,24 @@ final class LoyaltyReportService
         $overrides = '';
         $workbookSheets = '';
         $relationships = '';
+        $chartSheets = [];
+        $chartPartId = 1;
         foreach ($sheets as $index => $sheet) {
             $sheetId = $index + 1;
             $overrides .= '<Override PartName="/xl/worksheets/sheet' . $sheetId
                 . '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+            $sheetCharts = $sheet['charts'] ?? [];
+            if ($sheetCharts !== []) {
+                $overrides .= '<Override PartName="/xl/drawings/drawing' . $sheetId
+                    . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';
+                foreach ($sheetCharts as $chartIndex => $chart) {
+                    $chart['partId'] = $chartPartId++;
+                    $sheetCharts[$chartIndex] = $chart;
+                    $overrides .= '<Override PartName="/xl/charts/chart' . $chart['partId']
+                        . '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>';
+                }
+                $chartSheets[$sheetId] = $sheetCharts;
+            }
             $workbookSheets .= '<sheet name="' . $this->xml($sheet['name']) . '" sheetId="' . $sheetId
                 . '" r:id="rId' . $sheetId . '"/>';
             $relationships .= '<Relationship Id="rId' . $sheetId
@@ -2913,6 +3322,33 @@ final class LoyaltyReportService
             . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
             . '</Relationships>');
         $zip->addFromString('xl/styles.xml', $this->xlsxStyles());
+        foreach ($chartSheets as $sheetId => $sheetCharts) {
+            $worksheetRelationships = '<Relationship Id="rId1"'
+                . ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"'
+                . ' Target="../drawings/drawing' . $sheetId . '.xml"/>';
+            $zip->addFromString('xl/worksheets/_rels/sheet' . $sheetId . '.xml.rels',
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . $worksheetRelationships . '</Relationships>'
+            );
+            $zip->addFromString('xl/drawings/drawing' . $sheetId . '.xml', $this->xlsxDrawingXml($sheetCharts));
+            $drawingRelationships = '';
+            foreach ($sheetCharts as $index => $chart) {
+                $relationshipId = 'rId' . ($index + 1);
+                $drawingRelationships .= '<Relationship Id="' . $relationshipId . '"'
+                    . ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"'
+                    . ' Target="../charts/chart' . (int)$chart['partId'] . '.xml"/>';
+                $zip->addFromString(
+                    'xl/charts/chart' . (int)$chart['partId'] . '.xml',
+                    $this->xlsxChartXml($chart)
+                );
+            }
+            $zip->addFromString('xl/drawings/_rels/drawing' . $sheetId . '.xml.rels',
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . $drawingRelationships . '</Relationships>'
+            );
+        }
         $zip->close();
 
         return $path;
@@ -2922,25 +3358,51 @@ final class LoyaltyReportService
     {
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            . '<numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>'
-            . '<numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/></numFmts>'
-            . '<fonts count="2"><font><sz val="11"/><color rgb="FF0F172A"/><name val="Arial"/></font>'
-            . '<font><b/><sz val="11"/><color rgb="FF0F172A"/><name val="Arial"/></font></fonts>'
-            . '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+            . '<numFmts count="4"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>'
+            . '<numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>'
+            . '<numFmt numFmtId="166" formatCode="#,##0"/>'
+            . '<numFmt numFmtId="167" formatCode="0.00&quot;%&quot;"/></numFmts>'
+            . '<fonts count="6">'
+            . '<font><sz val="11"/><color rgb="FF102033"/><name val="Arial"/></font>'
+            . '<font><b/><sz val="14"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>'
+            . '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>'
+            . '<font><b/><sz val="11"/><color rgb="FF1D5F8C"/><name val="Arial"/></font>'
+            . '<font><sz val="10"/><color rgb="FF516578"/><name val="Arial"/></font>'
+            . '<font><b/><sz val="11"/><color rgb="FF102033"/><name val="Arial"/></font>'
+            . '</fonts>'
+            . '<fills count="6"><fill><patternFill patternType="none"/></fill>'
             . '<fill><patternFill patternType="gray125"/></fill>'
-            . '<fill><patternFill patternType="solid"><fgColor rgb="FFEAF4F1"/></patternFill></fill></fills>'
+            . '<fill><patternFill patternType="solid"><fgColor rgb="FF1D5F8C"/></patternFill></fill>'
+            . '<fill><patternFill patternType="solid"><fgColor rgb="FF123A5A"/></patternFill></fill>'
+            . '<fill><patternFill patternType="solid"><fgColor rgb="FFEAF3F8"/></patternFill></fill>'
+            . '<fill><patternFill patternType="solid"><fgColor rgb="FFF7FAFC"/></patternFill></fill></fills>'
             . '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'
-            . '<border><left style="thin"><color rgb="FFD9E7E2"/></left>'
-            . '<right style="thin"><color rgb="FFD9E7E2"/></right>'
-            . '<top style="thin"><color rgb="FFD9E7E2"/></top>'
-            . '<bottom style="thin"><color rgb="FFD9E7E2"/></bottom><diagonal/></border></borders>'
+            . '<border><left style="thin"><color rgb="FFD7E3EC"/></left>'
+            . '<right style="thin"><color rgb="FFD7E3EC"/></right>'
+            . '<top style="thin"><color rgb="FFD7E3EC"/></top>'
+            . '<bottom style="thin"><color rgb="FFD7E3EC"/></bottom><diagonal/></border></borders>'
             . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-            . '<cellXfs count="5">'
-            . '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0"/>'
-            . '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1"/>'
-            . '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1"/>'
-            . '<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1"/>'
-            . '<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1"/>'
+            . '<cellXfs count="10">'
+            . '<xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1">'
+            . '<alignment vertical="top" wrapText="1"/></xf>'
+            . '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1">'
+            . '<alignment horizontal="left" vertical="center"/></xf>'
+            . '<xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1">'
+            . '<alignment horizontal="left" vertical="center" wrapText="1"/></xf>'
+            . '<xf numFmtId="164" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1">'
+            . '<alignment horizontal="left" vertical="top"/></xf>'
+            . '<xf numFmtId="165" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1">'
+            . '<alignment horizontal="left" vertical="top"/></xf>'
+            . '<xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1">'
+            . '<alignment horizontal="left" vertical="center"/></xf>'
+            . '<xf numFmtId="0" fontId="4" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1">'
+            . '<alignment vertical="top" wrapText="1"/></xf>'
+            . '<xf numFmtId="166" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1">'
+            . '<alignment horizontal="right" vertical="top"/></xf>'
+            . '<xf numFmtId="167" fontId="0" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1">'
+            . '<alignment horizontal="right" vertical="top"/></xf>'
+            . '<xf numFmtId="0" fontId="4" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1">'
+            . '<alignment vertical="top" wrapText="1"/></xf>'
             . '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
             . '</styleSheet>';
     }

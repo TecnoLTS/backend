@@ -205,6 +205,8 @@ if ($csvHandle !== false) {
 
 $sheetNames = [];
 $xlsxPhysicalRows = -1;
+$xlsxChartParts = 0;
+$xlsxChartDrawingLinked = false;
 $zip = new ZipArchive();
 if ($zip->open($xlsx['path']) === true) {
         $workbookXml = (string)$zip->getFromName('xl/workbook.xml');
@@ -212,6 +214,18 @@ if ($zip->open($xlsx['path']) === true) {
         $sheetNames = $matches[1] ?? [];
         $dataXml = (string)$zip->getFromName('xl/worksheets/sheet3.xml');
         $xlsxPhysicalRows = max(0, substr_count($dataXml, '<row ') - 1);
+        for ($index = 0; $index < $zip->numFiles; $index++) {
+            $name = (string)$zip->getNameIndex($index);
+            if (preg_match('#^xl/charts/chart\d+\.xml$#', $name) === 1) {
+                $xlsxChartParts++;
+            }
+        }
+        $chartSheetXml = (string)$zip->getFromName('xl/worksheets/sheet2.xml');
+        $chartSheetRels = (string)$zip->getFromName('xl/worksheets/_rels/sheet2.xml.rels');
+        $drawingXml = (string)$zip->getFromName('xl/drawings/drawing2.xml');
+        $xlsxChartDrawingLinked = str_contains($chartSheetXml, '<drawing r:id="rId1"')
+            && str_contains($chartSheetRels, 'drawings/drawing2.xml')
+            && str_contains($drawingXml, 'relationships" r:id="rId1"');
         $zip->close();
 }
 $report['checks']['audit_export_complete'] = [
@@ -229,6 +243,11 @@ $report['checks']['audit_export_complete'] = [
 $report['checks']['xlsx_four_sheets'] = [
     'passed' => $sheetNames === ['Resumen', 'Gráficos', 'Datos', 'Definiciones'],
     'sheets' => $sheetNames,
+];
+$report['checks']['xlsx_embeds_charts'] = [
+    'passed' => $xlsxChartParts > 0 && $xlsxChartDrawingLinked,
+    'chart_parts' => $xlsxChartParts,
+    'drawing_linked' => $xlsxChartDrawingLinked,
 ];
 @unlink($csv['path']);
 @unlink($xlsx['path']);

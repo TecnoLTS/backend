@@ -4954,6 +4954,8 @@ HTML;
             return 'critical';
         }
         if (in_array($riskType, [
+            'daily_redemption_limit',
+            'same_reward_daily_limit',
             'purchase_source_not_found',
             'purchase_ecommerce_not_found',
             'purchase_billing_not_found',

@@ -764,6 +764,39 @@ try {
             && !empty($redemptionMismatch['blocked'])
             && (int)$redemptionCountStmt->fetchColumn() === 1,
     ];
+    $sameRewardLimitCommand = 'policy-same-reward-limit-' . $token;
+    $createdCommandIds[] = $sameRewardLimitCommand;
+    $sameRewardLimit = $expectException(
+        fn() => $repository->redeemReward([
+            'memberId' => $member['id'],
+            'rewardId' => $reward['id'],
+            'commandId' => $sameRewardLimitCommand,
+        ], 'policy-script'),
+        'ya canjeo este premio hoy'
+    );
+    $sameRewardRiskStmt = $pdo->prepare(
+        "SELECT severity
+         FROM loyalty_risk_events
+         WHERE tenant_id = :tenant_id
+           AND member_id = :member_id
+           AND reference = :reward_id
+           AND event_type = 'same_reward_daily_limit'
+         ORDER BY created_at DESC
+         LIMIT 1"
+    );
+    $sameRewardRiskStmt->execute([
+        'tenant_id' => 'fidepuntos',
+        'member_id' => $member['id'],
+        'reward_id' => $reward['id'],
+    ]);
+    $memberAfterSameRewardLimit = $repository->customerDetail((string)$member['id'])['member'] ?? [];
+    $report['checks']['same_reward_daily_limit_does_not_block_member'] = [
+        'passed' => !empty($sameRewardLimit['blocked'])
+            && ($sameRewardRiskStmt->fetchColumn() ?: null) === 'medium'
+            && ($memberAfterSameRewardLimit['status'] ?? null) === 'active',
+        'message' => $sameRewardLimit['message'] ?? null,
+        'member_status' => $memberAfterSameRewardLimit['status'] ?? null,
+    ];
     $redemptionSource = new ReflectionMethod($repository, 'redemptionOperationSource');
     $redemptionLedgerSourceStmt = $pdo->prepare(
         'SELECT source FROM loyalty_point_ledger
