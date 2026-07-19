@@ -7,6 +7,7 @@ return [
     ['method' => 'GET', 'path' => '/api/products/{id}/movement', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@movement', 'capability' => 'catalog.public'],
     ['method' => 'GET', 'path' => '/api/products/{id}', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@show', 'capability' => 'catalog.public'],
     ['method' => 'GET', 'path' => '/api/admin/products', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@adminIndex', 'capability' => 'catalog.admin'],
+    ['method' => 'POST', 'path' => '/api/admin/catalog/images', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\CatalogImageUploadController@store', 'capability' => 'catalog.admin'],
     ['method' => 'POST', 'path' => '/api/admin/products', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@store', 'capability' => 'catalog.admin'],
     ['method' => 'GET', 'path' => '/api/admin/products/{id}', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@adminShow', 'capability' => 'catalog.admin'],
     ['method' => 'PUT', 'path' => '/api/admin/products/{id}', 'handler' => 'App\\Modules\\CatalogInventory\\Controllers\\ProductController@update', 'capability' => 'catalog.admin'],

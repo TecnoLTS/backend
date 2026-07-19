@@ -4,13 +4,14 @@ namespace App\Modules\ReportingFinance\Controllers;
 
 use App\Core\Auth;
 use App\Core\Response;
-use App\Repositories\OrderRepository;
+use App\Modules\ReportingFinance\Application\Ports\SalesReportingPort;
+use App\Modules\ReportingFinance\Infrastructure\ReportingFinancePortsFactory;
 
 final class GeneralReportController {
-    private OrderRepository $orders;
+    private SalesReportingPort $reports;
 
-    public function __construct() {
-        $this->orders = new OrderRepository();
+    public function __construct(?SalesReportingPort $reports = null) {
+        $this->reports = $reports ?? ReportingFinancePortsFactory::salesReporting();
     }
 
     public function show(): void {
@@ -19,7 +20,7 @@ final class GeneralReportController {
         try {
             $query = $this->reportQuery();
             $projection = $this->projection();
-            $report = $this->orders->getReportPeriodSummary(
+            $report = $this->reports->periodSummary(
                 $query['period'],
                 $query['date'],
                 $query['scope'],

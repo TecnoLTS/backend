@@ -33,6 +33,8 @@ $db = new PDO($dsn, $_ENV['DB_USERNAME'] ?? 'postgres', $_ENV['DB_PASSWORD'] ?? 
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     PDO::ATTR_EMULATE_PREPARES => false,
 ]);
+$tenantScope = $db->prepare("SELECT set_config('app.tenant_id', :tenant_id, false)");
+$tenantScope->execute(['tenant_id' => $tenantId]);
 
 $slugify = static function (string $value): string {
     $normalized = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value) ?: $value;
@@ -64,7 +66,7 @@ $stmt = $db->prepare('
         p.product_type,
         COALESCE(p.attributes, \'{}\'::jsonb) AS attributes
     FROM "Image" i
-    INNER JOIN "Product" p ON p.id = i.product_id
+    INNER JOIN "Product" p ON p.id = i.product_id AND p.tenant_id = i.tenant_id
     WHERE p.tenant_id = :tenant_id
     ORDER BY p.created_at DESC, i.id ASC
 ');
@@ -143,7 +145,7 @@ foreach ($stmt->fetchAll() ?: [] as $row) {
 if ($apply && $updates) {
     $db->beginTransaction();
     try {
-        $updateStmt = $db->prepare('UPDATE "Image" SET url = :url, alt_text = :alt_text WHERE id = :id');
+        $updateStmt = $db->prepare('UPDATE "Image" SET url = :url, alt_text = :alt_text WHERE id = :id AND tenant_id = :tenant_id');
         foreach ($updates as $update) {
             if ($update['from'] !== $update['to']) {
                 rename($update['sourcePath'], $update['targetPath']);
@@ -157,6 +159,7 @@ if ($apply && $updates) {
             }
             $updateStmt->execute([
                 'id' => $update['imageId'],
+                'tenant_id' => $tenantId,
                 'url' => $update['to'],
                 'alt_text' => $update['altText'],
             ]);

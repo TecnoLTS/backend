@@ -2,4 +2,6 @@
 
 namespace App\Modules\IdentityPlatform\Controllers;
 
-class SessionSettingsController extends \App\Controllers\SettingsController {}
+use App\Http\Shared\SettingsControllerBase;
+
+class SessionSettingsController extends SettingsControllerBase {}

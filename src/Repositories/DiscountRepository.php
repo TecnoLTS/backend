@@ -19,7 +19,8 @@ class DiscountRepository {
             SELECT *
             FROM "DiscountCode"
             WHERE tenant_id = :tenant_id
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
+            LIMIT 100
         ');
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $rows = $stmt->fetchAll();
@@ -205,7 +206,7 @@ class DiscountRepository {
     }
 
     public function getAuditLog(int $limit = 100, ?string $code = null, ?string $orderId = null) {
-        $safeLimit = max(1, min(500, $limit));
+        $safeLimit = max(1, min(100, $limit));
         $sql = '
             SELECT *
             FROM "DiscountAudit"

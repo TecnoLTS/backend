@@ -17,7 +17,7 @@
       "requires": [
         "PostgreSQL unico con bases logicas de servicio",
         "Configuracion de tenants",
-        "Variables de JWT, CSRF y proxy interno"
+        "Variables de JWT, CSRF y credencial del salto APISIX"
       ],
       "operationFlow": [
         "Expone su API multi-tenant y resuelve tenant, autenticacion y permisos desde el propio runtime.",
@@ -39,13 +39,13 @@
       ],
       "operationFlow": [
         "El dashboard habilita las features tenantizadas cuyo owner visible sigue siendo platform-core.",
-        "La UI consume el Core API por proxy dashboard o por el contrato publico de gatewayapisix.",
+        "El navegador consume el Core API por rutas APISIX registradas; la shell Dashboard no intermedia negocio.",
         "El Core API mantiene tenancy, validaciones y escrituras, resolviendo cada dominio a dashboard, ecommerce, facturacion o loyalty.",
         "El dashboard presenta resultados y acciones sin replicar tablas ni reglas de negocio del Core."
       ],
       "sourceOfTruth": "owner-runtime",
       "writePolicy": "owner-api-only",
-      "integrationStyle": "dashboard-proxy-http-contract",
+      "integrationStyle": "apisix-direct-http-contract",
       "orchestratorKey": "dashboard",
       "registryFile": "dashboard/public/module-registry.json"
     }
@@ -54,6 +54,7 @@
     "enabled": true,
     "healthEndpoint": "/api/health",
     "manifestEndpoint": "/module.json",
+    "openApiEndpoint": "/openapi.json",
     "runtimeBaseUrlExample": "http://backend-http:8080",
     "orchestratedEntryPoints": [
       {
@@ -62,9 +63,9 @@
         "notes": "Contrato publico APISIX para ecommerce, administracion y operaciones tenant-aware."
       },
       {
-        "key": "dashboard-api-proxy",
+        "key": "dashboard-api-edge",
         "path": "/dashboard/api",
-        "notes": "Consumo del dashboard mediante su proxy interno hacia la API principal."
+        "notes": "Contrato administrativo APISIX directo hacia la API principal, aislado por host, tenant, metodo y capability."
       },
       {
         "key": "public-billing-api",
@@ -115,7 +116,7 @@
       },
       {
         "key": "mailer-service",
-        "summary": "Mensajes de contacto, outbox y auditoria de entregas de correo del backend.",
+        "summary": "Outbox durable multi-tenant, worker SMTP aislado, reintentos/DLQ y auditoria de correo del backend.",
         "extractionStatus": "service-group-db-internal"
       },
       {
@@ -130,7 +131,7 @@
       "Usar IDs estables, snapshots o contratos API para relaciones entre modulos.",
       "Las tablas foraneas FDW son una capa de compatibilidad para consultas existentes, no ownership funcional.",
       "Billing SRI corre dentro del Core API y usa la base logica facturacion como store fiscal.",
-      "Mailer corre dentro del Core API y usa la base logica dashboard para mensajes, outbox y logs.",
+      "Mailer acepta send/sendHtml durablemente dentro del Core API y entrega por un worker SMTP aislado con rol dashboard dedicado; adjuntos permanecen sincronos y auditados sin persistir el binario.",
       "LoyaltyRewards corre dentro del Core API y usa la base logica loyalty para saldos, ledger, canjes, pases wallet y el catalogo versionado de navegacion de Fidepuntos.",
       "IdentityPlatform conserva usuarios, passwords, sesiones, roles, asignaciones y grants; Loyalty no almacena identidades ni hashes de password."
     ],
@@ -176,7 +177,31 @@
   "contracts": {
     "health": true,
     "manifest": true,
-    "openApi": false,
+    "openApi": true,
+    "openApiCoverage": {
+      "endpoint": "/openapi.json",
+      "specVersion": "3.1.0",
+      "sourcePattern": "src/Modules/*/routes.php",
+      "operationInventory": "complete",
+      "pathProjection": "public-apisix-with-x-internal-path",
+      "servers": "public-apisix-tenant-aware-only",
+      "legacyPublicPrefixesPublished": false,
+      "pathParameters": "complete-for-public-contract",
+      "queryParameters": "conservative-static-handler-scan",
+      "security": "inferred-and-explained",
+      "requestDtos": "typed-for-public-external-critical-mutations",
+      "responseDtos": "typed-for-public-external-critical-mutations",
+      "businessDtoFieldsTyped": "required-surfaces-complete",
+      "publicOperations": 41,
+      "externalOperations": 22,
+      "criticalDomainMutations": 82,
+      "semanticRequiredOperations": 128,
+      "semanticTypedOperations": 128,
+      "semanticRequiredRequests": 80,
+      "semanticTypedRequests": 80,
+      "requiredSurfacesComplete": true,
+      "verification": "php scripts/check_openapi_contract.php"
+    },
     "capabilityRegistry": true,
     "migrations": true,
     "backupRestore": true,

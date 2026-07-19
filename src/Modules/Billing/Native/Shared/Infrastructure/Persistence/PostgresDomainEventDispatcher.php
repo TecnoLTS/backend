@@ -21,11 +21,13 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
     public function dispatch(DomainEvent $event, array $context = []): void
     {
         $this->ensureSchema();
+        $tenantId = $this->requiredTenantId($context);
 
         $payload = $event->toPrimitives();
         $statement = $this->connection->prepare(
             'INSERT INTO billing_domain_events (
                 event_id,
+                tenant_id,
                 event_name,
                 access_key,
                 client_id,
@@ -36,6 +38,7 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
                 occurred_on
             ) VALUES (
                 :event_id,
+                :tenant_id,
                 :event_name,
                 :access_key,
                 :client_id,
@@ -49,6 +52,7 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
         );
 
         $statement->bindValue(':event_id', $event->eventId());
+        $statement->bindValue(':tenant_id', $tenantId);
         $statement->bindValue(':event_name', $event->eventName());
         $this->bindNullableString($statement, ':access_key', $this->stringValue($payload['access_key'] ?? null));
         $this->bindNullableInt($statement, ':client_id', $context['client_id'] ?? null);
@@ -72,28 +76,20 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
             return;
         }
 
-        $this->connection->exec(
-            'CREATE TABLE IF NOT EXISTS billing_domain_events (
-                event_id text PRIMARY KEY,
-                event_name text NOT NULL,
-                access_key text,
-                client_id bigint,
-                branch_id bigint,
-                api_key_id bigint,
-                payload jsonb NOT NULL DEFAULT \'{}\'::jsonb,
-                context jsonb NOT NULL DEFAULT \'{}\'::jsonb,
-                occurred_on timestamp without time zone NOT NULL,
-                recorded_at timestamp without time zone DEFAULT NOW() NOT NULL
-            )'
-        );
-        $this->connection->exec(
-            'CREATE INDEX IF NOT EXISTS billing_domain_events_access_key_idx
-             ON billing_domain_events (access_key, occurred_on DESC)'
-        );
-        $this->connection->exec(
-            'CREATE INDEX IF NOT EXISTS billing_domain_events_client_event_idx
-             ON billing_domain_events (client_id, event_name, occurred_on DESC)'
-        );
+        $ready = $this->connection->query(
+            "SELECT to_regclass('public.billing_domain_events') IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'billing_domain_events'
+                      AND column_name = 'tenant_id'
+                      AND is_nullable = 'NO'
+                )"
+        )->fetchColumn();
+        if (!filter_var($ready, FILTER_VALIDATE_BOOLEAN)) {
+            throw new \RuntimeException('billing_domain_events requiere bootstrap tenant antes de registrar eventos.');
+        }
 
         $this->schemaEnsured = true;
     }
@@ -101,6 +97,7 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
     private function publicContext(array $context): array
     {
         return [
+            'tenant_id' => $context['tenant_id'] ?? null,
             'client_id' => $context['client_id'] ?? null,
             'branch_id' => $context['branch_id'] ?? null,
             'resolved_branch_id' => $context['resolved_branch_id'] ?? null,
@@ -111,6 +108,16 @@ final class PostgresDomainEventDispatcher implements DomainEventDispatcher
             'branch_code' => $context['branch_code'] ?? null,
             'emission_point' => $context['emission_point'] ?? null,
         ];
+    }
+
+    private function requiredTenantId(array $context): string
+    {
+        $tenantId = trim((string)($context['tenant_id'] ?? ''));
+        if ($tenantId === '') {
+            throw new \RuntimeException('El evento fiscal no tiene tenant_id resuelto.');
+        }
+
+        return $tenantId;
     }
 
     private function stringValue(mixed $value): ?string

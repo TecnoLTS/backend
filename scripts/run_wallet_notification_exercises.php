@@ -94,7 +94,9 @@ if (!empty($campaign['id'])) {
 // Doble minimo: implementa el puerto WalletMessenger sin depender de las
 // credenciales reales de Google (evita llamadas HTTP en el ejercicio).
 $fakeService = new class implements WalletMessenger {
+    public int $calls = 0;
     public function addMessage(string $accountId, string $header, string $body): array {
+        $this->calls++;
         return ['objectId' => 'obj_' . $accountId, 'messageId' => 'msg_fake'];
     }
 };
@@ -110,7 +112,10 @@ if ($previewAll >= 1) {
     $assert('campaña masiva total = preview all', (int)$massive['total_recipients'] === $previewAll);
 
     $processor = new WalletNotificationProcessor($pdo);
-    $tally = $processor->drainCampaign($massive['id'], $fakeService);
+    $callsBeforeWrongTenant = $fakeService->calls;
+    $wrongTenantTally = $processor->drainCampaign($massive['id'], $fakeService, 0, 'otro-tenant');
+    $assert('tenant incorrecto no drena campaña', $wrongTenantTally['processed'] === 0 && $fakeService->calls === $callsBeforeWrongTenant);
+    $tally = $processor->drainCampaign($massive['id'], $fakeService, 0, 'fidepuntos');
     $assert('drenado proceso todos', $tally['processed'] === $previewAll);
     $assert('drenado marco enviados', $tally['sent'] === $previewAll);
 
@@ -139,8 +144,31 @@ if ($previewAllForDrain >= 1) {
     $assert('campaña worker queda pending', ($worker['status'] ?? '') === 'pending');
     $assert('campaña worker total = preview all', (int)$worker['total_recipients'] === $previewAllForDrain);
 
-    $drainTally = $processor->drainPending(50, 'fidepuntos', static fn(string $t): WalletMessenger => $fakeService);
-    $assert('drainPending envio todos los pendientes', $drainTally['sent'] === $previewAllForDrain);
+    $firstBudget = $previewAllForDrain >= 2 ? max(1, min(2, $previewAllForDrain - 1)) : 1;
+    $firstTally = $processor->drainPending(
+        $firstBudget,
+        'fidepuntos',
+        static fn(string $t): WalletMessenger => $fakeService,
+        0,
+        (hrtime(true) / 1000000000) + 30
+    );
+    $assert('drainPending respeta presupuesto global', $firstTally['processed'] === $firstBudget);
+    if ($previewAllForDrain >= 2) {
+        $partial = $repository->getNotificationCampaign($worker['id']);
+        $assert('campaña mayor al lote queda reanudable', ($partial['status'] ?? '') === 'processing');
+        $assert('lote parcial no inventa delivery_unknown', (int)($partial['delivery_unknown_count'] ?? -1) === 0);
+    }
+    $remainingTally = $processor->drainPending(
+        max(1000, $previewAllForDrain),
+        'fidepuntos',
+        static fn(string $t): WalletMessenger => $fakeService,
+        0,
+        (hrtime(true) / 1000000000) + 30
+    );
+    $assert(
+        'drainPending completa la campaña en ciclos acotados',
+        $firstTally['sent'] + $remainingTally['sent'] === $previewAllForDrain
+    );
 
     $workerAfter = $repository->getNotificationCampaign($worker['id']);
     $assert('campaña worker quedo completed', ($workerAfter['status'] ?? '') === 'completed');

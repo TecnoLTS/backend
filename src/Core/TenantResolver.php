@@ -10,6 +10,9 @@ class TenantResolver {
         $host = strtolower(trim($host));
         $host = preg_replace('/:\d+$/', '', $host);
         foreach ($tenants as $tenant) {
+            if (strtolower(trim((string)($tenant['status'] ?? 'active'))) !== 'active') {
+                continue;
+            }
             $domains = $tenant['domains'] ?? [];
             foreach ($domains as $domain) {
                 if ($host === strtolower($domain)) {

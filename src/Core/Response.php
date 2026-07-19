@@ -14,7 +14,13 @@ class Response {
     }
 
     private static function csrfCookieName(): string {
-        return trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+        $baseName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+        return AuthSurface::csrfCookieName($baseName);
+    }
+
+    private static function csrfCookieNames(): array {
+        $baseName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+        return AuthSurface::csrfCookieCandidates($baseName);
     }
 
     private static function envFlag(string $key, ?bool $default = null): ?bool {
@@ -151,10 +157,12 @@ class Response {
 
     public static function ensureCsrfCookie(?int $expiresAt = null): string {
         $existing = trim((string)($_COOKIE[self::csrfCookieName()] ?? ''));
+        if ($existing === '' && AuthSurface::legacyCookieFallbackEnabled()) {
+            $baseName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+            $existing = trim((string)($_COOKIE[$baseName] ?? ''));
+        }
         if ($existing !== '') {
-            if ($expiresAt !== null) {
-                self::setCsrfCookie($existing, $expiresAt);
-            }
+            self::setCsrfCookie($existing, $expiresAt ?? (time() + self::authCookieLifetimeSeconds()));
             return $existing;
         }
 
@@ -178,13 +186,15 @@ class Response {
     }
 
     public static function clearCsrfCookie(): void {
-        setcookie(self::csrfCookieName(), '', [
-            'expires' => time() - 3600,
-            'path' => '/',
-            'secure' => self::isSecureRequest(),
-            'httponly' => false,
-            'samesite' => 'Lax',
-        ]);
-        unset($_COOKIE[self::csrfCookieName()]);
+        foreach (self::csrfCookieNames() as $cookieName) {
+            setcookie($cookieName, '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => self::isSecureRequest(),
+                'httponly' => false,
+                'samesite' => 'Lax',
+            ]);
+            unset($_COOKIE[$cookieName]);
+        }
     }
 }

@@ -6,8 +6,29 @@ final class AuthSurface {
     public const DASHBOARD = 'dashboard';
     public const ECOMMERCE = 'ecommerce';
 
+    private static function envFlag(string $key, bool $default = false): bool {
+        $raw = $_ENV[$key] ?? getenv($key);
+        $value = strtolower(trim((string)($raw === false ? '' : $raw)));
+        if ($value === '') {
+            return $default;
+        }
+
+        return in_array($value, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    public static function legacyCookieFallbackEnabled(): bool {
+        return self::envFlag('AUTH_LEGACY_COOKIE_FALLBACK_ENABLED');
+    }
+
     public static function current(): string {
-        $raw = strtolower(trim((string)($_SERVER['HTTP_X_AUTH_SURFACE'] ?? $_GET['auth_surface'] ?? '')));
+        $raw = '';
+        $providedHeader = strtolower(trim((string)($_SERVER['HTTP_X_AUTH_SURFACE'] ?? '')));
+        if (($GLOBALS['trusted_internal_proxy_token'] ?? false) && $providedHeader !== '') {
+            $raw = $providedHeader;
+        } elseif (self::envFlag('AUTH_LEGACY_SURFACE_QUERY_ENABLED')) {
+            $raw = strtolower(trim((string)($_GET['auth_surface'] ?? '')));
+        }
+
         if (in_array($raw, [self::DASHBOARD, self::ECOMMERCE], true)) {
             return $raw;
         }
@@ -48,14 +69,31 @@ final class AuthSurface {
             : "{$baseName}_ecommerce";
     }
 
-    public static function authCookieCandidates(string $baseName): array {
+    public static function authCookieCandidates(string $baseName, ?string $surface = null): array {
         $baseName = trim($baseName) !== '' ? trim($baseName) : 'pm_auth';
-        $current = self::current();
-        $ordered = [
-            self::authCookieName($baseName, $current),
-            self::authCookieName($baseName, $current === self::DASHBOARD ? self::ECOMMERCE : self::DASHBOARD),
-            $baseName,
-        ];
+        $ordered = [self::authCookieName($baseName, $surface ?? self::current())];
+        if (self::legacyCookieFallbackEnabled()) {
+            $ordered[] = $baseName;
+        }
+
+        return array_values(array_unique($ordered));
+    }
+
+    public static function csrfCookieName(string $baseName, ?string $surface = null): string {
+        $baseName = trim($baseName) !== '' ? trim($baseName) : 'pm_csrf';
+        $surface = $surface ?? self::current();
+
+        return $surface === self::DASHBOARD
+            ? "{$baseName}_dashboard"
+            : "{$baseName}_ecommerce";
+    }
+
+    public static function csrfCookieCandidates(string $baseName, ?string $surface = null): array {
+        $baseName = trim($baseName) !== '' ? trim($baseName) : 'pm_csrf';
+        $ordered = [self::csrfCookieName($baseName, $surface ?? self::current())];
+        if (self::legacyCookieFallbackEnabled()) {
+            $ordered[] = $baseName;
+        }
 
         return array_values(array_unique($ordered));
     }

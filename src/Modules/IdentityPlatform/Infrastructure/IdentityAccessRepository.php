@@ -45,19 +45,28 @@ class IdentityAccessRepository {
         }
     }
 
-    public function syncTenantModules(array $modules, ?string $tenantId = null, string $source = 'tenant-admin'): void {
+    public function syncTenantModules(array $modules, ?string $tenantId = null, string $source = 'tenant-admin'): bool {
         $tenantId = $tenantId ?: $this->tenantId();
         if ($tenantId === '') {
-            return;
+            return false;
         }
 
         $modules = array_values(array_unique(array_filter(array_map(
             static fn ($value): string => strtolower(trim((string)$value)),
             $modules
         ))));
+        sort($modules, SORT_STRING);
+        $currentModules = $this->activeTenantModules($tenantId) ?? [];
+        sort($currentModules, SORT_STRING);
+        if ($currentModules === $modules) {
+            return false;
+        }
 
+        $ownsTransaction = !$this->db->inTransaction();
         try {
-            $this->db->beginTransaction();
+            if ($ownsTransaction) {
+                $this->db->beginTransaction();
+            }
 
             $deactivate = $this->db->prepare('
                 UPDATE tenant_module_entitlements
@@ -102,13 +111,16 @@ class IdentityAccessRepository {
                 ]);
             }
 
-            $this->db->commit();
+            if ($ownsTransaction) {
+                $this->db->commit();
+            }
+            return true;
         } catch (PDOException $e) {
-            if ($this->db->inTransaction()) {
+            if ($ownsTransaction && $this->db->inTransaction()) {
                 $this->db->rollBack();
             }
             if ($this->isMissingContractTable($e)) {
-                return;
+                return false;
             }
             throw $e;
         }
@@ -877,7 +889,9 @@ class IdentityAccessRepository {
 
     public function searchTenantUsers(array $filters = [], ?string $tenantId = null): array {
         $tenantId = $tenantId ?: $this->tenantId();
-        $page = max(1, (int)($filters['page'] ?? 1));
+        // Mantiene compatibilidad page/OFFSET con un techo operativo de 5.000
+        // identidades (50 paginas de 100) y evita offsets arbitrariamente caros.
+        $page = max(1, min(50, (int)($filters['page'] ?? 1)));
         $pageSize = max(1, min(100, (int)($filters['pageSize'] ?? 20)));
         $search = trim((string)($filters['search'] ?? ''));
         $status = strtolower(trim((string)($filters['status'] ?? 'all')));

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use App\Controllers\OrderController;
+use App\Modules\Commerce\Controllers\OrderController;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\Commerce\Domain\CommerceDomain;

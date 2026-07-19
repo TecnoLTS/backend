@@ -3,8 +3,15 @@
 require_once __DIR__ . '/vendor/autoload.php';
 
 use App\Core\Database;
+use App\Core\TenantContext;
 
 try {
+    $tenantId = trim((string)($_ENV['DEFAULT_TENANT'] ?? getenv('DEFAULT_TENANT') ?: 'paramascotasec'));
+    $tenants = require __DIR__ . '/config/tenants.php';
+    if (!isset($tenants[$tenantId])) {
+        throw new RuntimeException('Tenant no configurado para seed analytics: ' . $tenantId);
+    }
+    TenantContext::set($tenants[$tenantId]);
     $db = Database::getInstance();
 
     echo "Seeding Analytics Data...\n";
@@ -12,19 +19,20 @@ try {
     // 1. Ensure we have some users
     // Create users 2, 3, 4 if they don't exist to simulate clients
     $users = [
-        ['id' => 2, 'name' => 'Juan Perez', 'email' => 'juan@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
-        ['id' => 3, 'name' => 'Maria Lopez', 'email' => 'maria@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
-        ['id' => 4, 'name' => 'Carlos Andrade', 'email' => 'carlos@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
+        ['id' => 'analytics_customer_2', 'name' => 'Juan Perez', 'email' => 'juan@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
+        ['id' => 'analytics_customer_3', 'name' => 'Maria Lopez', 'email' => 'maria@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
+        ['id' => 'analytics_customer_4', 'name' => 'Carlos Andrade', 'email' => 'carlos@example.com', 'password' => password_hash('password', PASSWORD_DEFAULT)],
     ];
 
-    $stmtUserCheck = $db->prepare('SELECT id FROM "User" WHERE id = :id');
-    $stmtUserInsert = $db->prepare('INSERT INTO "User" (id, name, email, password, role, email_verified, updated_at, created_at) VALUES (:id, :name, :email, :password, \'client\', TRUE, NOW(), NOW())');
+    $stmtUserCheck = $db->prepare('SELECT id FROM "Customer" WHERE tenant_id = :tenant_id AND id = :id');
+    $stmtUserInsert = $db->prepare('INSERT INTO "Customer" (id, tenant_id, name, email, password, role, email_verified, updated_at, created_at) VALUES (:id, :tenant_id, :name, :email, :password, \'customer\', TRUE, NOW(), NOW())');
 
     foreach ($users as $u) {
-        $stmtUserCheck->execute(['id' => $u['id']]);
+        $stmtUserCheck->execute(['tenant_id' => $tenantId, 'id' => $u['id']]);
         if (!$stmtUserCheck->fetch()) {
             $stmtUserInsert->execute([
                 'id' => $u['id'],
+                'tenant_id' => $tenantId,
                 'name' => $u['name'],
                 'email' => $u['email'],
                 'password' => $u['password']
@@ -34,7 +42,8 @@ try {
     }
 
     // Fetch all valid user IDs
-    $stmtUsers = $db->query('SELECT id FROM "User"');
+    $stmtUsers = $db->prepare('SELECT id FROM "Customer" WHERE tenant_id = :tenant_id');
+    $stmtUsers->execute(['tenant_id' => $tenantId]);
     $availableUserIds = $stmtUsers->fetchAll(PDO::FETCH_COLUMN);
     
     // 2. Clear existing orders (optional, but good for clean slate if requested)
@@ -44,15 +53,12 @@ try {
     // 3. Generate Orders for the last 10 days
     $statuses = ['pending', 'processing', 'completed', 'shipped', 'delivered'];
     
-    // Fake product names for items
-    $products = [
-        ['id' => 1, 'name' => 'Royal Canin Size Health Nutrition', 'price' => 45.00],
-        ['id' => 2, 'name' => 'Purina Pro Plan Adulto', 'price' => 55.50],
-        ['id' => 3, 'name' => 'Blue Buffalo Life Protection', 'price' => 62.00],
-        ['id' => 4, 'name' => 'Hill\'s Science Diet Dry Dog Food', 'price' => 48.99],
-        ['id' => 5, 'name' => 'Wellness CON CORE Natural', 'price' => 75.00],
-        ['id' => 6, 'name' => 'Taste of the Wild High Prairie', 'price' => 52.00],
-    ];
+    $stmtProducts = $db->prepare('SELECT id, name, price FROM "Product" WHERE tenant_id = :tenant_id AND is_published = TRUE LIMIT 30');
+    $stmtProducts->execute(['tenant_id' => $tenantId]);
+    $products = $stmtProducts->fetchAll();
+    if ($products === []) {
+        throw new RuntimeException('No hay productos del tenant para generar analytics.');
+    }
 
     $orderCount = 35;
 
@@ -86,11 +92,13 @@ try {
         }
 
         // Insert Order
-        $stmtOrder = $db->prepare('INSERT INTO "Order" ("id", "user_id", "total", "status", "created_at", "shipping_address", "billing_address") VALUES (:id, :user_id, :total, :status, :created_at, :shipping_address, :billing_address)');
+        $stmtOrder = $db->prepare('INSERT INTO "Order" ("id", "tenant_id", "user_id", "customer_id", "total", "status", "created_at", "shipping_address", "billing_address") VALUES (:id, :tenant_id, :user_id, :customer_id, :total, :status, :created_at, :shipping_address, :billing_address)');
         
         $stmtOrder->execute([
             'id' => $orderId,
+            'tenant_id' => $tenantId,
             'user_id' => $userId,
+            'customer_id' => $userId,
             'total' => $orderTotal,
             'status' => $status,
             'created_at' => $dateStr,
@@ -99,10 +107,12 @@ try {
         ]);
 
         // Insert Items
-        $stmtItem = $db->prepare('INSERT INTO "OrderItem" ("order_id", "product_id", "product_name", "product_image", "quantity", "price") VALUES (:order_id, :product_id, :product_name, :product_image, :quantity, :price)');
+        $stmtItem = $db->prepare('INSERT INTO "OrderItem" ("id", "tenant_id", "order_id", "product_id", "product_name", "product_image", "quantity", "price") VALUES (:id, :tenant_id, :order_id, :product_id, :product_name, :product_image, :quantity, :price)');
         
         foreach ($orderItems as $item) {
             $stmtItem->execute([
+                'id' => uniqid('analytics_item_', true),
+                'tenant_id' => $tenantId,
                 'order_id' => $orderId,
                 'product_id' => $item['product_id'],
                 'product_name' => $item['product_name'],

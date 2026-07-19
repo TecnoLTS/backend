@@ -46,9 +46,11 @@ final class LoyaltyRepository {
     private const CLAIM_STATUS_EXPIRED = 'expired';
 
     private PDO $pdo;
+    private PurchaseSourceVerifier $purchaseSourceVerifier;
 
-    public function __construct(?PDO $pdo = null) {
+    public function __construct(?PDO $pdo = null, ?PurchaseSourceVerifier $purchaseSourceVerifier = null) {
         $this->pdo = $pdo ?? Database::getModuleInstance(LoyaltyRewardsDomain::KEY);
+        $this->purchaseSourceVerifier = $purchaseSourceVerifier ?? PurchaseSourceVerifierFactory::create();
     }
 
     public function dashboard(?string $month = null): array {
@@ -111,7 +113,7 @@ final class LoyaltyRepository {
     public function customersPage(array $filters = []): array {
         $tenantId = $this->tenantId();
         $limit = min(100, max(10, (int)($filters['limit'] ?? 25)));
-        $offset = max(0, (int)($filters['offset'] ?? 0));
+        $offset = min(4900, max(0, (int)($filters['offset'] ?? 0)));
         [$where, $params] = $this->customerWhere($tenantId, $filters);
         $orderBy = $this->customerOrderBy((string)($filters['sort'] ?? 'recent'));
         $countTotal = !in_array(strtolower((string)($filters['count'] ?? '1')), ['0', 'false', 'no'], true);
@@ -220,7 +222,8 @@ final class LoyaltyRepository {
                     (SELECT COUNT(*) FROM loyalty_redemptions r WHERE r.tenant_id = loyalty_rewards.tenant_id AND r.reward_id = loyalty_rewards.id) AS redemption_count
              FROM loyalty_rewards
              WHERE " . implode(' AND ', $where) . "
-             ORDER BY CASE status WHEN 'active' THEN 1 WHEN 'inactive' THEN 2 ELSE 3 END, points_cost ASC, name ASC",
+             ORDER BY CASE status WHEN 'active' THEN 1 WHEN 'inactive' THEN 2 ELSE 3 END, points_cost ASC, name ASC
+             LIMIT 100",
             $params
         );
     }
@@ -1020,7 +1023,7 @@ final class LoyaltyRepository {
             );
         }
         try {
-            $sourceVerification = (new PurchaseSourceVerifier())->verify(
+            $sourceVerification = $this->purchaseSourceVerifier->verify(
                 $tenantId,
                 $member,
                 $amount,
@@ -2171,7 +2174,7 @@ final class LoyaltyRepository {
         $this->expireCustomerPortalReservations();
         $tenantId = $this->tenantId();
         $limit = min(100, max(10, (int)($filters['limit'] ?? 50)));
-        $offset = max(0, (int)($filters['offset'] ?? 0));
+        $offset = min(4900, max(0, (int)($filters['offset'] ?? 0)));
         $status = strtolower(trim((string)($filters['status'] ?? 'open')));
         $query = mb_substr(strtolower(trim((string)($filters['query'] ?? ''))), 0, 120);
         $fulfillment = strtolower(trim((string)($filters['fulfillment'] ?? 'all')));
@@ -3594,7 +3597,8 @@ HTML;
             'SELECT id, name, source, scopes, status, rate_limit_per_minute, last_used_at, created_at, updated_at, revoked_at
              FROM loyalty_api_clients
              WHERE tenant_id = :tenant_id
-             ORDER BY status ASC, name ASC',
+             ORDER BY status ASC, name ASC
+             LIMIT 100',
             ['tenant_id' => $this->tenantId()]
         );
     }
@@ -6127,8 +6131,8 @@ HTML;
 
     private function eventPage(string $table, array $filters): array {
         $tenantId = $this->tenantId();
-        $limit = min(200, max(10, (int)($filters['limit'] ?? 50)));
-        $offset = max(0, (int)($filters['offset'] ?? 0));
+        $limit = min(100, max(10, (int)($filters['limit'] ?? 50)));
+        $offset = min(4900, max(0, (int)($filters['offset'] ?? 0)));
         [$from, $to] = $this->dateRange($filters);
         $where = [
             'tenant_id = :tenant_id',
@@ -7188,7 +7192,7 @@ HTML;
 
         // Individual: enviar inline con el servicio del tenant.
         if ($type === 'individual') {
-            (new WalletNotificationProcessor($this->pdo))->drainCampaign($campaignId, $individualService);
+            (new WalletNotificationProcessor($this->pdo))->drainCampaign($campaignId, $individualService, 0, $tenantId);
         }
 
         return $this->getNotificationCampaign($campaignId);
@@ -7221,7 +7225,7 @@ HTML;
     public function listNotificationCampaigns(array $filters = []): array {
         $tenantId = $this->tenantId();
         $limit = max(1, min(100, (int)($filters['limit'] ?? 25)));
-        $offset = max(0, (int)($filters['offset'] ?? 0));
+        $offset = min(4900, max(0, (int)($filters['offset'] ?? 0)));
 
         $rows = $this->fetchAll(
             'SELECT id, tenant_id, created_by_user_id, title, body, audience_type, audience_filter,

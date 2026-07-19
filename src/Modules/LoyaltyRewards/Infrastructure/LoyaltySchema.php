@@ -465,7 +465,8 @@ final class LoyaltySchema {
             delivery_unknown_count integer NOT NULL DEFAULT 0,
             created_at timestamp without time zone DEFAULT NOW() NOT NULL,
             started_at timestamp without time zone,
-            finished_at timestamp without time zone
+            finished_at timestamp without time zone,
+            UNIQUE (tenant_id, id)
         )');
         $this->pdo->exec('CREATE TABLE IF NOT EXISTS loyalty_wallet_campaign_recipients (
             id text PRIMARY KEY,
@@ -478,8 +479,37 @@ final class LoyaltySchema {
             message_id text,
             last_error text,
             updated_at timestamp without time zone DEFAULT NOW() NOT NULL,
-            UNIQUE (campaign_id, member_id)
+            UNIQUE (campaign_id, member_id),
+            UNIQUE (tenant_id, id),
+            UNIQUE (tenant_id, campaign_id, member_id),
+            CONSTRAINT loyalty_wallet_recipient_campaign_tenant_fk
+                FOREIGN KEY (tenant_id, campaign_id)
+                REFERENCES loyalty_wallet_campaigns (tenant_id, id)
+                ON DELETE CASCADE
         )');
+        $this->pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS loyalty_wallet_campaigns_tenant_id_uidx
+            ON loyalty_wallet_campaigns (tenant_id, id)');
+        $this->pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS loyalty_wallet_recipients_tenant_campaign_member_uidx
+            ON loyalty_wallet_campaign_recipients (tenant_id, campaign_id, member_id)');
+        $this->pdo->exec(<<<'SQL'
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'loyalty_wallet_recipient_campaign_tenant_fk'
+                      AND conrelid = 'loyalty_wallet_campaign_recipients'::regclass
+                ) THEN
+                    ALTER TABLE loyalty_wallet_campaign_recipients
+                    ADD CONSTRAINT loyalty_wallet_recipient_campaign_tenant_fk
+                    FOREIGN KEY (tenant_id, campaign_id)
+                    REFERENCES loyalty_wallet_campaigns (tenant_id, id)
+                    ON DELETE CASCADE;
+                END IF;
+            END
+            $$
+            SQL
+        );
         $this->pdo->exec('CREATE INDEX IF NOT EXISTS idx_wallet_campaign_recipients_pending
             ON loyalty_wallet_campaign_recipients (tenant_id, status)');
     }

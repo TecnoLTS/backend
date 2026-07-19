@@ -54,6 +54,7 @@ class ProductReferenceCatalogRepository {
             FROM "ProductReferenceCatalog"
             WHERE tenant_id = :tenant_id
             ORDER BY catalog_key ASC, sort_order ASC, created_at ASC, id ASC
+            LIMIT 2000
         ');
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $rows = $stmt->fetchAll() ?: [];

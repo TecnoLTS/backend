@@ -3,8 +3,9 @@
 namespace App\Modules\IdentityPlatform\Application;
 
 use App\Core\TenantContext;
+use App\Modules\IdentityPlatform\Application\Ports\TenantNavigationPort;
 use App\Modules\IdentityPlatform\Infrastructure\IdentityAccessRepository;
-use App\Modules\LoyaltyRewards\Application\LoyaltyNavigationService;
+use App\Modules\IdentityPlatform\Infrastructure\Navigation\TenantNavigationPortFactory;
 use App\Repositories\SettingsRepository;
 use App\Repositories\UserRepository;
 
@@ -45,13 +46,16 @@ class TenantAccessService {
 
     private SettingsRepository $settingsRepository;
     private IdentityAccessRepository $identityAccessRepository;
+    private TenantNavigationPort $tenantNavigation;
 
     public function __construct(
         ?SettingsRepository $settingsRepository = null,
-        ?IdentityAccessRepository $identityAccessRepository = null
+        ?IdentityAccessRepository $identityAccessRepository = null,
+        ?TenantNavigationPort $tenantNavigation = null
     ) {
         $this->settingsRepository = $settingsRepository ?? new SettingsRepository();
         $this->identityAccessRepository = $identityAccessRepository ?? new IdentityAccessRepository();
+        $this->tenantNavigation = $tenantNavigation ?? TenantNavigationPortFactory::create();
     }
 
     public function modulePermissionActions(): array {
@@ -70,6 +74,12 @@ class TenantAccessService {
 
         $configuredModules = $this->normalizeKnownModuleList($configured);
         $tenantId = (string)($tenant['id'] ?? $tenant['slug'] ?? TenantContext::id() ?? '');
+        if (!$this->canSynchronizeTenantEntitlements($tenantId)) {
+            // Un platform-admin puede administrar otros tenants desde su host
+            // actual, pero el rol API no debe recibir una policy RLS global.
+            // El reconciliador gateway/worker aplicara este estado deseado.
+            return $configuredModules;
+        }
         $storedModules = $tenantId !== ''
             ? $this->identityAccessRepository->activeTenantModules($tenantId)
             : null;
@@ -85,13 +95,39 @@ class TenantAccessService {
         return $configuredModules;
     }
 
-    public function syncTenantModuleEntitlements(array $tenant, array $modules, string $source = 'tenant-admin'): void {
+    public function syncTenantModuleEntitlements(array $tenant, array $modules, string $source = 'tenant-admin'): bool {
         $tenantId = (string)($tenant['id'] ?? $tenant['slug'] ?? TenantContext::id() ?? '');
         if ($tenantId === '') {
-            return;
+            return false;
+        }
+        if (!$this->canSynchronizeTenantEntitlements($tenantId)) {
+            throw new \RuntimeException('TENANT_ENTITLEMENT_RECONCILIATION_REQUIRED');
         }
 
-        $this->identityAccessRepository->syncTenantModules($this->normalizeKnownModuleList($modules), $tenantId, $source);
+        return $this->identityAccessRepository->syncTenantModules(
+            $this->normalizeKnownModuleList($modules),
+            $tenantId,
+            $source
+        );
+    }
+
+    public function canSynchronizeTenantEntitlements(string $tenantId): bool {
+        $tenantId = trim($tenantId);
+        if ($tenantId === '') {
+            return false;
+        }
+
+        $rlsMode = strtolower(trim((string)($_ENV['TENANT_RLS_MODE'] ?? getenv('TENANT_RLS_MODE') ?: 'off')));
+        if ($rlsMode !== 'enforce') {
+            return true;
+        }
+
+        $connectionRole = strtolower(trim((string)($_ENV['DB_CONNECTION_ROLE'] ?? getenv('DB_CONNECTION_ROLE') ?: 'app')));
+        if ($connectionRole === 'worker') {
+            return true;
+        }
+
+        return hash_equals($tenantId, trim((string)(TenantContext::id() ?? '')));
     }
 
     public function platformAdminContextModules(array $tenantModules): array {
@@ -579,8 +615,7 @@ class TenantAccessService {
         }
 
         if ($capability === 'loyalty.admin' || str_starts_with($uri, '/api/admin/loyalty')) {
-            $permission = (new LoyaltyNavigationService())->requiredPermissionForRequest($method, $uri)
-                ?? LoyaltyNavigationService::DENY_PERMISSION;
+            $permission = $this->tenantNavigation->requiredPermissionForRequest($method, $uri);
             return [
                 'requiresPermission' => true,
                 'permission' => $permission,

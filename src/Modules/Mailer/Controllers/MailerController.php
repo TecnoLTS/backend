@@ -4,6 +4,7 @@ namespace App\Modules\Mailer\Controllers;
 
 use App\Core\Auth;
 use App\Core\Response;
+use App\Core\TenantContext;
 use App\Modules\Mailer\Infrastructure\Persistence\EmailOutboxRepository;
 
 final class MailerController
@@ -15,18 +16,22 @@ final class MailerController
         try {
             $repository = new EmailOutboxRepository();
             $repository->assertReady();
+            $stats = $repository->stats($this->tenantId());
             Response::json([
                 'status' => 'healthy',
+                'operational_status' => (int)($stats['dead_letter'] ?? 0) > $this->deadLetterDegradationThreshold()
+                    ? 'degraded'
+                    : 'normal',
                 'module' => 'mailer-service',
                 'database' => 'dashboard',
-                'stats' => $repository->stats(),
+                'delivery' => 'durable-outbox',
+                'stats' => $stats,
             ]);
-        } catch (\Throwable $exception) {
+        } catch (\Throwable) {
             Response::error(
                 'El módulo de correo no puede acceder a dashboard.',
                 503,
-                'MAILER_SERVICE_UNAVAILABLE',
-                ['reason' => $exception->getMessage()]
+                'MAILER_SERVICE_UNAVAILABLE'
             );
         }
     }
@@ -37,7 +42,7 @@ final class MailerController
 
         try {
             $status = strtolower(trim((string)($_GET['status'] ?? '')));
-            if (!in_array($status, ['', 'pending', 'sent', 'failed'], true)) {
+            if (!in_array($status, ['', 'pending', 'retry', 'processing', 'sent', 'dead_letter'], true)) {
                 Response::error('Estado de correo inválido.', 422, 'MAILER_STATUS_INVALID');
                 return;
             }
@@ -46,12 +51,10 @@ final class MailerController
             $repository = new EmailOutboxRepository();
             Response::json([
                 'items' => $repository->listOutbox($limit, $status !== '' ? $status : null),
-                'stats' => $repository->stats(),
+                'stats' => $repository->stats($this->tenantId()),
             ]);
-        } catch (\Throwable $exception) {
-            Response::error('No se pudo consultar la bandeja de correo.', 500, 'MAILER_OUTBOX_FAILED', [
-                'reason' => $exception->getMessage(),
-            ]);
+        } catch (\Throwable) {
+            Response::error('No se pudo consultar la bandeja de correo.', 500, 'MAILER_OUTBOX_FAILED');
         }
     }
 
@@ -65,10 +68,31 @@ final class MailerController
             Response::json([
                 'items' => $repository->listDeliveryLog($limit),
             ]);
-        } catch (\Throwable $exception) {
-            Response::error('No se pudo consultar el historial de entregas.', 500, 'MAILER_DELIVERY_LOG_FAILED', [
-                'reason' => $exception->getMessage(),
-            ]);
+        } catch (\Throwable) {
+            Response::error('No se pudo consultar el historial de entregas.', 500, 'MAILER_DELIVERY_LOG_FAILED');
         }
+    }
+
+    private function tenantId(): string
+    {
+        $tenantId = trim((string)(TenantContext::id() ?? ''));
+        if ($tenantId === '') {
+            throw new \LogicException('Mailer admin surface requires a tenant.');
+        }
+
+        return $tenantId;
+    }
+
+    private function deadLetterDegradationThreshold(): int
+    {
+        $raw = $_ENV['MAILER_OUTBOX_HEALTH_MAX_DEAD_LETTER']
+            ?? getenv('MAILER_OUTBOX_HEALTH_MAX_DEAD_LETTER');
+        $value = filter_var(
+            $raw === false || $raw === null || trim((string)$raw) === '' ? 0 : $raw,
+            FILTER_VALIDATE_INT,
+            ['options' => ['min_range' => 0, 'max_range' => 1000000]]
+        );
+
+        return $value === false ? 0 : (int)$value;
     }
 }

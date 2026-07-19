@@ -5,7 +5,7 @@ namespace App\Services;
 use App\Repositories\OrderRepository;
 use App\Repositories\UserRepository;
 use App\Repositories\ProductRepository;
-use App\Repositories\SettingsRepository;
+use App\Modules\Commerce\Application\TenantDefaultTaxRate;
 
 class BusinessIntelligenceService {
     private $orderRepo;
@@ -17,13 +17,10 @@ class BusinessIntelligenceService {
     }
 
     public function getFullDashboardStats(?string $selectedMonth = null, ?string $selectedDate = null, ?string $scope = null, bool $includeReport = true) {
-        $settings = new SettingsRepository();
-        $vatRate = $settings->get('vat_rate');
-        $vatRate = is_numeric($vatRate) ? floatval($vatRate) : 0;
-        $creditCurrentRate = $settings->get('sri_purchase_vat_credit_current_rate');
-        $creditCarryforwardRate = $settings->get('sri_purchase_vat_credit_carryforward_rate');
-        $creditCurrentRate = is_numeric($creditCurrentRate) ? max(0, min(100, floatval($creditCurrentRate))) : 60.0;
-        $creditCarryforwardRate = is_numeric($creditCarryforwardRate) ? max(0, min(100, floatval($creditCarryforwardRate))) : 40.0;
+        $taxConfiguration = TenantDefaultTaxRate::currentConfiguration();
+        $vatRate = $taxConfiguration['rate'];
+        $creditCurrentRate = $taxConfiguration['credit_current_rate'];
+        $creditCarryforwardRate = $taxConfiguration['credit_carryforward_rate'];
         $salesProgress = $this->orderRepo->getSalesProgress();
         $ordersProgress = $this->orderRepo->getOrdersProgress();
         $clientsProgress = $this->userRepo->getClientsProgress();
@@ -149,61 +146,7 @@ class BusinessIntelligenceService {
     }
 
     private function productAnalytics() {
-        $pRepo = new \App\Repositories\ProductRepository();
-        $products = $pRepo->getAll();
-
-        $totalMargin = 0.0;
-        $marginSampleCount = 0;
-        $weightedProfit = 0.0;
-        $weightedRevenue = 0.0;
-        $lowMarginCount = 0;
-        $missingCostCount = 0;
-        $stockValueAtCost = 0.0;
-
-        foreach ($products as $p) {
-            $price = (float)($p['price'] ?? 0);
-            $cost = (float)($p['cost'] ?? ($p['business']['cost'] ?? 0));
-            $quantity = max(0, (int)($p['quantity'] ?? 0));
-
-            if ($cost <= 0) {
-                $missingCostCount++;
-            }
-
-            if ($price <= 0 || $cost <= 0) {
-                continue;
-            }
-
-            if (isset($p['business']['margin']) && is_numeric($p['business']['margin'])) {
-                $margin = (float)$p['business']['margin'];
-            } else {
-                $margin = (($price - $cost) / $price) * 100;
-            }
-
-            $totalMargin += $margin;
-            $marginSampleCount++;
-            if ($margin < 25) {
-                $lowMarginCount++;
-            }
-
-            $stockRevenue = $price * $quantity;
-            $stockCost = $cost * $quantity;
-            $weightedRevenue += $stockRevenue;
-            $weightedProfit += ($stockRevenue - $stockCost);
-            $stockValueAtCost += $stockCost;
-        }
-
-        $avgMargin = $marginSampleCount > 0 ? round($totalMargin / $marginSampleCount, 1) : 0;
-        $weightedMargin = $weightedRevenue > 0 ? round(($weightedProfit / $weightedRevenue) * 100, 1) : 0;
-        
-        return [
-            'averageMargin' => $avgMargin,
-            'weightedMargin' => $weightedMargin,
-            'lowMarginOpportunities' => $lowMarginCount,
-            'missingCostCount' => $missingCostCount,
-            'stockValueAtCost' => round($stockValueAtCost, 2),
-            'totalMonitored' => count($products),
-            'pricedCostedProducts' => $marginSampleCount
-        ];
+        return (new ProductRepository())->getProductAnalyticsAggregate();
     }
 
     private function generateAlerts($inventory = null, $salesProgress = null, $productAnalysis = null, $ordersByStatus = null) {

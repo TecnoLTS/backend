@@ -24,6 +24,7 @@ $tenantId = $env('DEFAULT_TENANT', $env('PUBLIC_TENANT_SLUG', 'paramascotasec'))
 $tenantSlug = $env('PUBLIC_TENANT_SLUG', $tenantId);
 $primaryDomain = strtolower($env('PRIMARY_SITE_DOMAIN', $hostFromUrl($env('APP_URL', 'https://localhost')) ?: 'localhost'));
 $aliases = $csv($env('PRIMARY_SITE_ALIASES', "www.{$primaryDomain}"));
+$dashboardAdminHost = strtolower($env('DASHBOARD_ADMIN_HOST', "admin.{$primaryDomain}"));
 $appUrl = rtrim($env('APP_URL', "https://{$primaryDomain}"), '/');
 $publicBaseUrl = rtrim($env('PUBLIC_BASE_URL', $appUrl), '/');
 $scheme = parse_url($publicBaseUrl, PHP_URL_SCHEME) ?: $env('PUBLIC_SCHEME', 'https');
@@ -31,7 +32,6 @@ $dashboardEnabledModules = $csv($env('DASHBOARD_ENABLED_MODULES', 'dashboard,use
 $dashboardPlatformAdminEmails = $csv($env('DASHBOARD_PLATFORM_ADMIN_EMAILS', ''));
 $dashboardPlatformAdminDomains = $csv($env('DASHBOARD_PLATFORM_ADMIN_DOMAINS', 'tecnolts.com'));
 $fidepuntosDemoEnabled = !in_array(strtolower($env('FIDEPUNTOS_DEMO_ENABLED', '1')), ['0', 'false', 'no', 'off'], true);
-
 $domains = array_values(array_unique(array_filter([$primaryDomain, ...$aliases])));
 $allowedOrigins = array_values(array_unique(array_map(
     static fn (string $domain): string => "{$scheme}://{$domain}",

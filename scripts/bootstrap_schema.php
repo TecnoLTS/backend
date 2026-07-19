@@ -45,12 +45,228 @@ function connect(array $config): PDO {
     ]);
 }
 
+function assertLegacySchemaBootstrapTopology(PDO $pdo): void {
+    $foreignTables = $pdo->query(
+        "SELECT string_agg(c.relname, ',' ORDER BY c.relname)
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'f'"
+    )->fetchColumn();
+    if (is_string($foreignTables) && $foreignTables !== '') {
+        throw new RuntimeException(sprintf(
+            'Legacy schema bootstrap refuses modular foreign tables (%s); use scripts/bootstrap_module_databases.php.',
+            $foreignTables
+        ));
+    }
+}
+
+function schemaQuoteIdentifier(string $identifier): string {
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+/**
+ * Adds and validates the tenant half of an existing parent/child relationship.
+ * Legacy rows are derived from the authoritative parent first. A fallback is
+ * allowed only through the explicitly named environment variable.
+ */
+function ensureTenantChildIsolation(
+    PDO $pdo,
+    string $childTable,
+    string $parentTable,
+    string $parentColumn,
+    array $options
+): void {
+    $child = schemaQuoteIdentifier($childTable);
+    $parent = schemaQuoteIdentifier($parentTable);
+    $parentKey = schemaQuoteIdentifier($parentColumn);
+    $legacyEnv = trim((string)($options['legacy_env'] ?? ''));
+    $legacyTenant = $legacyEnv !== '' ? trim((string)envValue($legacyEnv, '')) : '';
+
+    $pdo->exec(sprintf('ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id text', $child));
+    $pdo->exec(sprintf(
+        "UPDATE %s SET tenant_id = NULL WHERE tenant_id IS NOT NULL AND NULLIF(BTRIM(tenant_id), '') IS NULL",
+        $child
+    ));
+
+    $mismatch = (int)$pdo->query(sprintf(
+        "SELECT COUNT(*)
+         FROM %s child
+         JOIN %s parent ON parent.id = child.%s
+         WHERE NULLIF(BTRIM(child.tenant_id), '') IS NOT NULL
+           AND NULLIF(BTRIM(parent.tenant_id), '') IS NOT NULL
+           AND child.tenant_id <> parent.tenant_id",
+        $child,
+        $parent,
+        $parentKey
+    ))->fetchColumn();
+    if ($mismatch !== 0) {
+        throw new RuntimeException(sprintf(
+            '%s tenant backfill found %d rows that conflict with authoritative parent %s',
+            $childTable,
+            $mismatch,
+            $parentTable
+        ));
+    }
+
+    $pdo->exec(sprintf(
+        "UPDATE %s child
+         SET tenant_id = parent.tenant_id
+         FROM %s parent
+         WHERE parent.id = child.%s
+           AND NULLIF(BTRIM(child.tenant_id), '') IS NULL
+           AND NULLIF(BTRIM(parent.tenant_id), '') IS NOT NULL",
+        $child,
+        $parent,
+        $parentKey
+    ));
+
+    if ($legacyTenant !== '') {
+        $statement = $pdo->prepare(sprintf(
+            "UPDATE %s SET tenant_id = :tenant_id WHERE NULLIF(BTRIM(tenant_id), '') IS NULL",
+            $child
+        ));
+        $statement->execute(['tenant_id' => $legacyTenant]);
+    }
+
+    $unresolved = (int)$pdo->query(sprintf(
+        "SELECT COUNT(*) FROM %s WHERE NULLIF(BTRIM(tenant_id), '') IS NULL",
+        $child
+    ))->fetchColumn();
+    if ($unresolved !== 0) {
+        $fallbackMessage = $legacyEnv !== ''
+            ? sprintf(' or set %s explicitly after validating ownership', $legacyEnv)
+            : '';
+        throw new RuntimeException(sprintf(
+            '%s tenant backfill unresolved rows=%d; repair the parent relationship%s',
+            $childTable,
+            $unresolved,
+            $fallbackMessage
+        ));
+    }
+
+    $pdo->exec(sprintf('ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL', $child));
+    $pdo->exec(sprintf(
+        'CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (tenant_id, id)',
+        schemaQuoteIdentifier((string)$options['parent_unique_index']),
+        $parent
+    ));
+    $childUniqueColumns = array_map(
+        static fn(string $column): string => schemaQuoteIdentifier($column),
+        array_map('strval', $options['child_unique_columns'] ?? ['tenant_id', 'id'])
+    );
+    $pdo->exec(sprintf(
+        'CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s)',
+        schemaQuoteIdentifier((string)$options['child_unique_index']),
+        $child,
+        implode(', ', $childUniqueColumns)
+    ));
+    $pdo->exec(sprintf(
+        'CREATE INDEX IF NOT EXISTS %s ON %s (tenant_id, %s)',
+        schemaQuoteIdentifier((string)$options['child_parent_index']),
+        $child,
+        $parentKey
+    ));
+
+    $constraintName = (string)$options['constraint_name'];
+    $constraintExists = $pdo->prepare(
+        "SELECT 1
+         FROM pg_constraint constraint_info
+         JOIN pg_class relation ON relation.oid = constraint_info.conrelid
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+         WHERE namespace.nspname = 'public'
+           AND relation.relname = :table_name
+           AND constraint_info.conname = :constraint_name
+         LIMIT 1"
+    );
+    $constraintExists->execute([
+        'table_name' => $childTable,
+        'constraint_name' => $constraintName,
+    ]);
+    if (!$constraintExists->fetchColumn()) {
+        $actions = trim((string)($options['actions'] ?? ''));
+        $pdo->exec(sprintf(
+            'ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (tenant_id, %s) REFERENCES %s (tenant_id, id) %s NOT VALID',
+            $child,
+            schemaQuoteIdentifier($constraintName),
+            $parentKey,
+            $parent,
+            $actions
+        ));
+    }
+    $pdo->exec(sprintf(
+        'ALTER TABLE %s VALIDATE CONSTRAINT %s',
+        $child,
+        schemaQuoteIdentifier($constraintName)
+    ));
+}
+
+function assertTenantChildBackfillPreflight(
+    PDO $pdo,
+    string $childTable,
+    string $parentTable,
+    string $parentColumn,
+    string $legacyEnv
+): void {
+    $relations = $pdo->prepare(
+        "SELECT to_regclass(:child_relation) IS NOT NULL
+            AND to_regclass(:parent_relation) IS NOT NULL"
+    );
+    $relations->execute([
+        'child_relation' => 'public.' . schemaQuoteIdentifier($childTable),
+        'parent_relation' => 'public.' . schemaQuoteIdentifier($parentTable),
+    ]);
+    if (!filter_var($relations->fetchColumn(), FILTER_VALIDATE_BOOLEAN)) {
+        return;
+    }
+
+    $tenantColumn = $pdo->prepare(
+        "SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = :table_name
+           AND column_name = 'tenant_id'"
+    );
+    $tenantColumn->execute(['table_name' => $childTable]);
+    $needsTenant = $tenantColumn->fetchColumn()
+        ? "NULLIF(BTRIM(child.tenant_id), '') IS NULL"
+        : 'TRUE';
+    $unresolved = (int)$pdo->query(sprintf(
+        'SELECT COUNT(*)
+         FROM %s child
+         LEFT JOIN %s parent ON parent.id = child.%s
+         WHERE parent.id IS NULL
+           AND %s',
+        schemaQuoteIdentifier($childTable),
+        schemaQuoteIdentifier($parentTable),
+        schemaQuoteIdentifier($parentColumn),
+        $needsTenant
+    ))->fetchColumn();
+    if ($unresolved !== 0 && trim((string)envValue($legacyEnv, '')) === '') {
+        throw new RuntimeException(sprintf(
+            '%s tenant preflight found orphan rows=%d; set %s explicitly after validating ownership',
+            $childTable,
+            $unresolved,
+            $legacyEnv
+        ));
+    }
+}
+
 function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options = []): void {
+    // This legacy schema routine owns local relations. Running its ALTER/DDL
+    // list against compatibility foreign tables produces partial bootstraps
+    // (PostgreSQL 42809). The modular orchestrator removes foreign relations
+    // transactionally before calling this function for each owner database.
+    assertLegacySchemaBootstrapTopology($pdo);
+    assertTenantChildBackfillPreflight($pdo, 'Image', 'Product', 'product_id', 'ECOMMERCE_LEGACY_TENANT_ID');
+    assertTenantChildBackfillPreflight($pdo, 'Variation', 'Product', 'product_id', 'ECOMMERCE_LEGACY_TENANT_ID');
+    assertTenantChildBackfillPreflight($pdo, 'OrderItem', 'Order', 'order_id', 'ECOMMERCE_LEGACY_TENANT_ID');
+
     $statements = [
         'CREATE TABLE IF NOT EXISTS "Tenant" (id text PRIMARY KEY, name text, created_at timestamp without time zone DEFAULT NOW())',
         'CREATE TABLE IF NOT EXISTS "User" (
             id text PRIMARY KEY,
-            tenant_id text,
+            tenant_id text NOT NULL,
             email text NOT NULL,
             name text,
             password text NOT NULL,
@@ -62,7 +278,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "Customer" (
             id text PRIMARY KEY,
-            tenant_id text,
+            tenant_id text NOT NULL,
             email text NOT NULL,
             name text,
             password text NOT NULL,
@@ -167,7 +383,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "Product" (
             id text PRIMARY KEY,
-            tenant_id text,
+            tenant_id text NOT NULL,
             legacy_id text,
             category text NOT NULL,
             product_type text,
@@ -191,6 +407,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "Image" (
             id text PRIMARY KEY,
+            tenant_id text NOT NULL,
             url text NOT NULL,
             product_id text,
             kind text,
@@ -201,6 +418,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "Variation" (
             id text PRIMARY KEY,
+            tenant_id text NOT NULL,
             color text NOT NULL,
             color_code text,
             color_image text,
@@ -209,7 +427,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "Order" (
             id text PRIMARY KEY,
-            tenant_id text,
+            tenant_id text NOT NULL,
             user_id text,
             customer_id text,
             status text DEFAULT \'pending\' NOT NULL,
@@ -221,6 +439,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         )',
         'CREATE TABLE IF NOT EXISTS "OrderItem" (
             id text PRIMARY KEY,
+            tenant_id text NOT NULL,
             order_id text NOT NULL,
             product_id text NOT NULL,
             quantity integer NOT NULL,
@@ -229,6 +448,51 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
             cost_total numeric(12,4) DEFAULT 0 NOT NULL,
             product_name text,
             product_image text
+        )',
+        'CREATE TABLE IF NOT EXISTS "CommerceBillingOutbox" (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            order_id text NOT NULL,
+            event_type text NOT NULL DEFAULT \'commerce.order.ready_for_billing.v1\',
+            command jsonb NOT NULL DEFAULT \'{}\'::jsonb,
+            status text NOT NULL DEFAULT \'pending\',
+            delivery_state text NOT NULL DEFAULT \'not_started\',
+            attempts integer NOT NULL DEFAULT 0,
+            max_attempts integer NOT NULL DEFAULT 12,
+            requeue_count integer NOT NULL DEFAULT 0,
+            available_at timestamp without time zone NOT NULL DEFAULT NOW(),
+            locked_at timestamp without time zone,
+            locked_by text,
+            lock_token text,
+            billing_access_key text,
+            billing_response jsonb,
+            last_http_status integer,
+            last_error_code text,
+            last_error text,
+            created_at timestamp without time zone NOT NULL DEFAULT NOW(),
+            updated_at timestamp without time zone NOT NULL DEFAULT NOW(),
+            completed_at timestamp without time zone,
+            CONSTRAINT commerce_billing_outbox_status_check CHECK (status IN (\'pending\', \'processing\', \'retry\', \'delivery_unknown\', \'sent\', \'dead_letter\')),
+            CONSTRAINT commerce_billing_outbox_delivery_check CHECK (delivery_state IN (\'not_started\', \'lookup\', \'emit_requested\', \'delivery_unknown\', \'confirmed\')),
+            CONSTRAINT commerce_billing_outbox_attempts_check CHECK (attempts >= 0 AND max_attempts BETWEEN 1 AND 100),
+            CONSTRAINT commerce_billing_outbox_requeue_check CHECK (requeue_count >= 0),
+            CONSTRAINT commerce_billing_outbox_http_check CHECK (last_http_status IS NULL OR last_http_status BETWEEN 100 AND 599)
+        )',
+        'CREATE TABLE IF NOT EXISTS "CommerceBillingOutboxAttempt" (
+            id text PRIMARY KEY,
+            tenant_id text NOT NULL,
+            outbox_id text NOT NULL,
+            order_id text NOT NULL,
+            attempt_number integer NOT NULL,
+            phase text NOT NULL,
+            outcome text NOT NULL,
+            http_status integer,
+            error_code text,
+            error_message text,
+            metadata jsonb NOT NULL DEFAULT \'{}\'::jsonb,
+            created_at timestamp without time zone NOT NULL DEFAULT NOW(),
+            CONSTRAINT commerce_billing_attempt_number_check CHECK (attempt_number >= 0),
+            CONSTRAINT commerce_billing_attempt_http_check CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599)
         )',
         'CREATE TABLE IF NOT EXISTS "Quotation" (
             id text PRIMARY KEY,
@@ -312,7 +576,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE TABLE IF NOT EXISTS "Setting" (
             key text PRIMARY KEY,
             value text NOT NULL,
-            tenant_id text
+            tenant_id text NOT NULL
         )',
         'CREATE TABLE IF NOT EXISTS "ProductReferenceCatalog" (
             id text PRIMARY KEY,
@@ -595,6 +859,7 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS product_type text',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS attributes jsonb',
         'ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS is_published boolean',
+        'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS kind text',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS width integer',
         'ALTER TABLE "Image" ADD COLUMN IF NOT EXISTS height integer',
@@ -619,6 +884,14 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS discount_code text',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS discount_total numeric(12,2) DEFAULT 0',
         'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS discount_snapshot jsonb',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_name text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_email text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_phone text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_document_type text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_document_number text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_company text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS sales_channel text',
+        'ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS customer_snapshot_version smallint NOT NULL DEFAULT 0',
         'ALTER TABLE "Quotation" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "Quotation" ADD COLUMN IF NOT EXISTS status text DEFAULT \'quoted\'',
         'ALTER TABLE "Quotation" ADD COLUMN IF NOT EXISTS customer_name text',
@@ -640,6 +913,8 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "Quotation" ADD COLUMN IF NOT EXISTS created_at timestamp without time zone DEFAULT NOW()',
         'ALTER TABLE "Quotation" ADD COLUMN IF NOT EXISTS updated_at timestamp without time zone DEFAULT NOW()',
         'ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS unit_cost numeric(12,4)',
+        'ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS tenant_id text',
+        'ALTER TABLE "Variation" ADD COLUMN IF NOT EXISTS tenant_id text',
         'ALTER TABLE "OrderItem" ALTER COLUMN unit_cost TYPE numeric(12,4) USING COALESCE(unit_cost, 0)::numeric(12,4)',
         'ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS cost_total numeric(12,4)',
         'ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS price_net numeric(12,4)',
@@ -753,9 +1028,11 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'DROP INDEX IF EXISTS "Product_legacy_id_key"',
         'CREATE INDEX IF NOT EXISTS "User_tenant_id_idx" ON "User" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "User_tenant_email_idx" ON "User" (tenant_id, email)',
+        'CREATE INDEX IF NOT EXISTS "User_tenant_created_cursor_idx" ON "User" (tenant_id, created_at DESC, id DESC)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "User_tenant_email_uidx" ON "User" (tenant_id, email)',
         'CREATE INDEX IF NOT EXISTS "Customer_tenant_id_idx" ON "Customer" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "Customer_tenant_email_idx" ON "Customer" (tenant_id, email)',
+        'CREATE INDEX IF NOT EXISTS "Customer_tenant_created_cursor_idx" ON "Customer" (tenant_id, created_at DESC, id DESC)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "Customer_tenant_email_uidx" ON "Customer" (tenant_id, email)',
         'CREATE INDEX IF NOT EXISTS "Customer_tenant_document_idx" ON "Customer" (tenant_id, document_number)',
         'CREATE INDEX IF NOT EXISTS tenant_module_entitlements_status_idx ON tenant_module_entitlements (tenant_id, status, module_key)',
@@ -840,13 +1117,23 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE UNIQUE INDEX IF NOT EXISTS "Product_tenant_slug_uidx" ON "Product" (tenant_id, slug)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_legacy_id_idx" ON "Product" (tenant_id, legacy_id)',
         'CREATE INDEX IF NOT EXISTS "Product_tenant_created_idx" ON "Product" (tenant_id, created_at DESC)',
-        'CREATE INDEX IF NOT EXISTS "Product_catalog_listing_idx" ON "Product" (tenant_id, created_at DESC) WHERE COALESCE(is_published, true) = true AND COALESCE(quantity, 0) > 0',
+        'CREATE INDEX IF NOT EXISTS "Product_admin_cursor_idx" ON "Product" (tenant_id, created_at DESC, id DESC) WHERE COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_cursor_idx" ON "Product" (tenant_id, created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_category_cursor_idx" ON "Product" (tenant_id, category, created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_brand_cursor_idx" ON "Product" (tenant_id, brand, created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_gender_cursor_idx" ON "Product" (tenant_id, gender, created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_variant_group_cursor_idx" ON "Product" (tenant_id, (attributes->>\'variantGroupKey\'), created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_category_slug_cursor_idx" ON "Product" (tenant_id, (TRIM(BOTH \'-\' FROM REGEXP_REPLACE(TRANSLATE(LOWER(COALESCE(category, \'\')), \'áéíóúüñ\', \'aeiouun\'), \'[^a-z0-9]+\', \'-\', \'g\'))), created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_brand_slug_cursor_idx" ON "Product" (tenant_id, (TRIM(BOTH \'-\' FROM REGEXP_REPLACE(TRANSLATE(LOWER(COALESCE(brand, \'\')), \'áéíóúüñ\', \'aeiouun\'), \'[^a-z0-9]+\', \'-\', \'g\'))), created_at DESC, id DESC) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
+        'CREATE INDEX IF NOT EXISTS "Product_public_search_fts_idx" ON "Product" USING GIN (TO_TSVECTOR(\'simple\', TRANSLATE(LOWER(COALESCE(name, \'\') || \' \' || COALESCE(brand, \'\') || \' \' || COALESCE(category, \'\') || \' \' || COALESCE(product_type, \'\') || \' \' || COALESCE(gender, \'\') || \' \' || COALESCE(description, \'\') || \' \' || COALESCE(attributes->>\'sku\', \'\') || \' \' || COALESCE(attributes->>\'presentation\', \'\') || \' \' || COALESCE(attributes->>\'variantLabel\', \'\') || \' \' || COALESCE(attributes->>\'catalogCategories\', \'\')), \'áéíóúüñ\', \'aeiouun\'))) WHERE is_published = true AND quantity > 0 AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
         'CREATE UNIQUE INDEX IF NOT EXISTS "Product_tenant_sku_active_uidx" ON "Product" (tenant_id, upper(trim(attributes->>\'sku\'))) WHERE COALESCE(NULLIF(trim(attributes->>\'sku\'), \'\'), \'\') <> \'\' AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
         'CREATE UNIQUE INDEX IF NOT EXISTS "Product_tenant_variant_label_active_uidx" ON "Product" (tenant_id, (attributes->>\'variantGroupKey\'), (attributes->>\'variantLabel\')) WHERE COALESCE(NULLIF(attributes->>\'variantGroupKey\', \'\'), \'\') <> \'\' AND COALESCE(NULLIF(attributes->>\'variantLabel\', \'\'), \'\') <> \'\' AND COALESCE(attributes->>\'archived\', \'false\') <> \'true\'',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_id_idx" ON "Order" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_created_idx" ON "Order" (tenant_id, created_at)',
+        'CREATE INDEX IF NOT EXISTS "Order_tenant_created_cursor_idx" ON "Order" (tenant_id, created_at DESC, id DESC)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_status_created_idx" ON "Order" (tenant_id, lower(COALESCE(status, \'pending\')), created_at)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_user_idx" ON "Order" (tenant_id, user_id)',
+        'CREATE INDEX IF NOT EXISTS "Order_tenant_user_created_cursor_idx" ON "Order" (tenant_id, user_id, created_at DESC, id DESC)',
         'CREATE INDEX IF NOT EXISTS "Order_tenant_customer_idx" ON "Order" (tenant_id, customer_id)',
         'CREATE INDEX IF NOT EXISTS "Quotation_tenant_created_idx" ON "Quotation" (tenant_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Quotation_tenant_status_idx" ON "Quotation" (tenant_id, status, created_at DESC)',
@@ -866,7 +1153,9 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'CREATE INDEX IF NOT EXISTS "PurchaseInvoiceItem_tenant_product_idx" ON "PurchaseInvoiceItem" (tenant_id, product_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Image_product_id_idx" ON "Image" (product_id)',
         'CREATE INDEX IF NOT EXISTS "Image_product_kind_order_idx" ON "Image" (product_id, kind, display_order, id)',
+        'CREATE INDEX IF NOT EXISTS "Image_tenant_product_kind_order_idx" ON "Image" (tenant_id, product_id, kind, display_order, id)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_product_status_idx" ON "ProductReview" (tenant_id, product_id, status, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_product_status_cursor_idx" ON "ProductReview" (tenant_id, product_id, status, created_at DESC, id DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_status_created_idx" ON "ProductReview" (tenant_id, status, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_user_idx" ON "ProductReview" (tenant_id, user_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "ProductReview_tenant_customer_idx" ON "ProductReview" (tenant_id, customer_id, created_at DESC)',
@@ -882,10 +1171,12 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         'ALTER TABLE "PosMovement" ADD COLUMN IF NOT EXISTS business_expense_id varchar(64) NULL',
         'CREATE INDEX IF NOT EXISTS idx_pos_movement_shift ON "PosMovement"(tenant_id, shift_id, created_at DESC)',
         'CREATE INDEX IF NOT EXISTS "Variation_product_id_idx" ON "Variation" (product_id)',
+        'CREATE INDEX IF NOT EXISTS "Variation_tenant_product_id_idx" ON "Variation" (tenant_id, product_id, id)',
         'CREATE INDEX IF NOT EXISTS "Setting_tenant_id_idx" ON "Setting" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "ProductReferenceCatalog_tenant_id_idx" ON "ProductReferenceCatalog" (tenant_id)',
         'CREATE INDEX IF NOT EXISTS "ProductReferenceCatalog_tenant_catalog_idx" ON "ProductReferenceCatalog" (tenant_id, catalog_key, sort_order)',
         'CREATE UNIQUE INDEX IF NOT EXISTS "DiscountCode_tenant_code_uidx" ON "DiscountCode" (tenant_id, code)',
+        'CREATE INDEX IF NOT EXISTS "DiscountCode_tenant_created_cursor_idx" ON "DiscountCode" (tenant_id, created_at DESC, id DESC)',
         'CREATE INDEX IF NOT EXISTS "DiscountCode_tenant_active_idx" ON "DiscountCode" (tenant_id, is_active)',
         'CREATE INDEX IF NOT EXISTS "DiscountCode_tenant_window_idx" ON "DiscountCode" (tenant_id, starts_at, ends_at)',
         'CREATE INDEX IF NOT EXISTS "DiscountAudit_tenant_created_idx" ON "DiscountAudit" (tenant_id, created_at DESC)',
@@ -964,13 +1255,13 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
         }
     }
 
-    $stmtUser = $pdo->prepare('UPDATE "User" SET tenant_id = COALESCE(tenant_id, :tenant)');
+    $stmtUser = $pdo->prepare('UPDATE "User" SET tenant_id = :tenant WHERE NULLIF(BTRIM(tenant_id), \'\') IS NULL');
     $stmtUser->execute(['tenant' => $defaultTenant]);
 
-    $stmtCustomer = $pdo->prepare('UPDATE "Customer" SET tenant_id = COALESCE(tenant_id, :tenant)');
+    $stmtCustomer = $pdo->prepare('UPDATE "Customer" SET tenant_id = :tenant WHERE NULLIF(BTRIM(tenant_id), \'\') IS NULL');
     $stmtCustomer->execute(['tenant' => $defaultTenant]);
 
-    $stmtProduct = $pdo->prepare('UPDATE "Product" SET tenant_id = COALESCE(tenant_id, :tenant)');
+    $stmtProduct = $pdo->prepare('UPDATE "Product" SET tenant_id = :tenant WHERE NULLIF(BTRIM(tenant_id), \'\') IS NULL');
     $stmtProduct->execute(['tenant' => $defaultTenant]);
 
     $pdo->exec('
@@ -1012,16 +1303,140 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
           )
     ');
 
-    $stmtOrder = $pdo->prepare('UPDATE "Order" SET tenant_id = COALESCE(tenant_id, :tenant)');
+    $stmtOrder = $pdo->prepare('UPDATE "Order" SET tenant_id = :tenant WHERE NULLIF(BTRIM(tenant_id), \'\') IS NULL');
     $stmtOrder->execute(['tenant' => $defaultTenant]);
     $pdo->exec('UPDATE "Order" SET customer_id = COALESCE(customer_id, user_id) WHERE customer_id IS NULL AND user_id IS NOT NULL');
+    $pdo->exec(<<<'SQL'
+        UPDATE "Order" o
+        SET customer_name = COALESCE(
+                NULLIF(BTRIM(o.customer_name), ''),
+                NULLIF(BTRIM(o.shipping_address->>'name'), ''),
+                NULLIF(BTRIM(CONCAT_WS(' ', o.shipping_address->>'firstName', o.shipping_address->>'lastName')), ''),
+                NULLIF(BTRIM(o.billing_address->>'name'), ''),
+                NULLIF(BTRIM(CONCAT_WS(' ', o.billing_address->>'firstName', o.billing_address->>'lastName')), '')
+            ),
+            customer_email = COALESCE(
+                NULLIF(BTRIM(o.customer_email), ''),
+                NULLIF(BTRIM(o.shipping_address->>'email'), ''),
+                NULLIF(BTRIM(o.billing_address->>'email'), '')
+            ),
+            customer_phone = COALESCE(
+                NULLIF(BTRIM(o.customer_phone), ''),
+                NULLIF(BTRIM(o.shipping_address->>'phone'), ''),
+                NULLIF(BTRIM(o.billing_address->>'phone'), '')
+            ),
+            customer_document_type = COALESCE(
+                NULLIF(BTRIM(o.customer_document_type), ''),
+                NULLIF(BTRIM(o.billing_address->>'documentType'), ''),
+                NULLIF(BTRIM(o.shipping_address->>'documentType'), '')
+            ),
+            customer_document_number = COALESCE(
+                NULLIF(BTRIM(o.customer_document_number), ''),
+                NULLIF(BTRIM(o.billing_address->>'documentNumber'), ''),
+                NULLIF(BTRIM(o.shipping_address->>'documentNumber'), '')
+            ),
+            customer_company = COALESCE(
+                NULLIF(BTRIM(o.customer_company), ''),
+                NULLIF(BTRIM(o.billing_address->>'company'), ''),
+                NULLIF(BTRIM(o.billing_address->>'businessName'), ''),
+                NULLIF(BTRIM(o.shipping_address->>'company'), ''),
+                NULLIF(BTRIM(o.shipping_address->>'businessName'), '')
+            ),
+            sales_channel = COALESCE(
+                NULLIF(BTRIM(o.sales_channel), ''),
+                NULLIF(BTRIM(o.payment_details->>'channel'), '')
+            )
+        WHERE o.customer_snapshot_version < 1
+        SQL);
+    $pdo->exec(<<<'SQL'
+        UPDATE "Order" o
+        SET customer_name = COALESCE(NULLIF(BTRIM(o.customer_name), ''), NULLIF(BTRIM(c.name), '')),
+            customer_email = COALESCE(NULLIF(BTRIM(o.customer_email), ''), NULLIF(BTRIM(c.email), '')),
+            customer_phone = COALESCE(
+                NULLIF(BTRIM(o.customer_phone), ''),
+                NULLIF(BTRIM(c.profile->>'phone'), ''),
+                NULLIF(BTRIM(c.profile->>'mobile'), '')
+            ),
+            customer_document_type = COALESCE(
+                NULLIF(BTRIM(o.customer_document_type), ''),
+                NULLIF(BTRIM(c.document_type), '')
+            ),
+            customer_document_number = COALESCE(
+                NULLIF(BTRIM(o.customer_document_number), ''),
+                NULLIF(BTRIM(c.document_number), '')
+            ),
+            customer_company = COALESCE(
+                NULLIF(BTRIM(o.customer_company), ''),
+                NULLIF(BTRIM(c.business_name), '')
+            )
+        FROM "Customer" c
+        WHERE c.tenant_id = o.tenant_id
+          AND c.id = COALESCE(o.customer_id, o.user_id)
+          AND o.customer_snapshot_version < 1
+        SQL);
+    $pdo->exec('UPDATE "Order" SET customer_snapshot_version = 1 WHERE customer_snapshot_version < 1');
     $pdo->exec('UPDATE "ProductReview" SET customer_id = COALESCE(customer_id, user_id) WHERE customer_id IS NULL AND user_id IS NOT NULL');
 
     $stmtQuotation = $pdo->prepare('UPDATE "Quotation" SET tenant_id = COALESCE(tenant_id, :tenant)');
     $stmtQuotation->execute(['tenant' => $defaultTenant]);
 
-    $stmtSettingTenant = $pdo->prepare('UPDATE "Setting" SET tenant_id = COALESCE(tenant_id, :tenant) WHERE tenant_id IS NULL');
+    $stmtSettingTenant = $pdo->prepare('UPDATE "Setting" SET tenant_id = :tenant WHERE NULLIF(BTRIM(tenant_id), \'\') IS NULL');
     $stmtSettingTenant->execute(['tenant' => $defaultTenant]);
+
+    foreach (['User', 'Customer', 'Product', 'Order', 'Setting'] as $tenantTable) {
+        $pdo->exec(sprintf(
+            'ALTER TABLE "%s" ALTER COLUMN tenant_id SET NOT NULL',
+            str_replace('"', '""', $tenantTable)
+        ));
+    }
+
+    ensureTenantChildIsolation($pdo, 'Image', 'Product', 'product_id', [
+        'legacy_env' => 'ECOMMERCE_LEGACY_TENANT_ID',
+        'parent_unique_index' => 'Product_tenant_id_id_uidx',
+        'child_unique_index' => 'Image_tenant_id_id_uidx',
+        'child_parent_index' => 'Image_tenant_product_idx',
+        'constraint_name' => 'Image_product_tenant_fk',
+        'actions' => 'ON UPDATE CASCADE ON DELETE SET NULL (product_id)',
+    ]);
+    ensureTenantChildIsolation($pdo, 'Variation', 'Product', 'product_id', [
+        'legacy_env' => 'ECOMMERCE_LEGACY_TENANT_ID',
+        'parent_unique_index' => 'Product_tenant_id_id_uidx',
+        'child_unique_index' => 'Variation_tenant_id_id_uidx',
+        'child_parent_index' => 'Variation_tenant_product_idx',
+        'constraint_name' => 'Variation_product_tenant_fk',
+        'actions' => 'ON UPDATE CASCADE ON DELETE RESTRICT',
+    ]);
+    ensureTenantChildIsolation($pdo, 'OrderItem', 'Order', 'order_id', [
+        'legacy_env' => 'ECOMMERCE_LEGACY_TENANT_ID',
+        'parent_unique_index' => 'Order_tenant_id_id_uidx',
+        'child_unique_index' => 'OrderItem_tenant_id_id_uidx',
+        'child_parent_index' => 'OrderItem_tenant_order_idx',
+        'constraint_name' => 'OrderItem_order_tenant_fk',
+        'actions' => 'ON UPDATE CASCADE ON DELETE RESTRICT',
+    ]);
+    ensureTenantChildIsolation($pdo, 'CommerceBillingOutbox', 'Order', 'order_id', [
+        'legacy_env' => 'ECOMMERCE_LEGACY_TENANT_ID',
+        'parent_unique_index' => 'Order_tenant_id_id_uidx',
+        'child_unique_index' => 'CommerceBillingOutbox_tenant_id_id_uidx',
+        'child_parent_index' => 'CommerceBillingOutbox_tenant_order_idx',
+        'constraint_name' => 'commerce_billing_outbox_order_fk',
+        'actions' => 'ON UPDATE CASCADE ON DELETE RESTRICT',
+    ]);
+    ensureTenantChildIsolation($pdo, 'CommerceBillingOutboxAttempt', 'CommerceBillingOutbox', 'outbox_id', [
+        'legacy_env' => 'ECOMMERCE_LEGACY_TENANT_ID',
+        'parent_unique_index' => 'CommerceBillingOutbox_tenant_id_id_uidx',
+        'child_unique_index' => 'CommerceBillingOutboxAttempt_tenant_id_id_uidx',
+        'child_parent_index' => 'CommerceBillingOutboxAttempt_tenant_outbox_idx',
+        'constraint_name' => 'commerce_billing_attempt_outbox_fk',
+        'actions' => 'ON UPDATE CASCADE ON DELETE RESTRICT',
+    ]);
+    $pdo->exec('CREATE INDEX IF NOT EXISTS "OrderItem_tenant_product_idx" ON "OrderItem" (tenant_id, product_id)');
+    $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS "CommerceBillingOutbox_tenant_id_id_uidx" ON "CommerceBillingOutbox" (tenant_id, id)');
+    $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS "CommerceBillingOutbox_tenant_order_uidx" ON "CommerceBillingOutbox" (tenant_id, order_id)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS "CommerceBillingOutbox_due_idx" ON "CommerceBillingOutbox" (available_at, tenant_id, created_at) WHERE status IN (\'pending\', \'retry\', \'delivery_unknown\')');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS "CommerceBillingOutbox_lease_idx" ON "CommerceBillingOutbox" (locked_at) WHERE status = \'processing\'');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS "CommerceBillingOutbox_dead_idx" ON "CommerceBillingOutbox" (tenant_id, updated_at DESC) WHERE status = \'dead_letter\'');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS "CommerceBillingOutboxAttempt_outbox_idx" ON "CommerceBillingOutboxAttempt" (tenant_id, outbox_id, created_at)');
 
     $stmtSettingKeys = $pdo->prepare('
         UPDATE "Setting" s
@@ -1146,13 +1561,54 @@ function executeSchemaBootstrap(PDO $pdo, string $defaultTenant, array $options 
     }
 }
 
+function configuredTenantRows(array $tenants, string $defaultTenant): array {
+    $rows = [];
+    foreach ($tenants as $slug => $tenant) {
+        if (!is_string($slug) || $slug === '') {
+            continue;
+        }
+        $rows[] = [
+            'id' => (string)($tenant['id'] ?? $slug),
+            'name' => (string)($tenant['name'] ?? $slug),
+        ];
+    }
+
+    return $rows !== [] ? $rows : [['id' => $defaultTenant, 'name' => $defaultTenant]];
+}
+
+function syncConfiguredTenantRows(PDO $pdo, array $tenantRows): void {
+    $insertTenant = $pdo->prepare('
+        INSERT INTO "Tenant" (id, name)
+        VALUES (:id, :name)
+        ON CONFLICT (id) DO UPDATE
+        SET name = EXCLUDED.name
+    ');
+    foreach ($tenantRows as $row) {
+        $insertTenant->execute([
+            'id' => (string)($row['id'] ?? ''),
+            'name' => (string)($row['name'] ?? $row['id'] ?? ''),
+        ]);
+    }
+}
+
 function runSchemaBootstrap(): int {
+$tenantRlsMode = strtolower(trim((string)envValue('TENANT_RLS_MODE', 'off')));
+$schemaUsername = envValue('DB_USERNAME', 'postgres');
+$schemaPassword = envValue('DB_PASSWORD', 'postgres');
+if ($tenantRlsMode === 'enforce') {
+    $schemaUsername = envValue('DB_ADMIN_USERNAME', '');
+    $schemaPassword = envValue('DB_ADMIN_PASSWORD', '');
+    if ($schemaUsername === '' || $schemaPassword === '') {
+        fwrite(STDERR, "[schema] RLS enforce requires DB_ADMIN_USERNAME/DB_ADMIN_PASSWORD; the API role cannot bootstrap owner tables\n");
+        return 1;
+    }
+}
 $defaultConfig = [
     'host' => envValue('DB_HOST', 'db'),
     'port' => envValue('DB_PORT', '5432'),
     'database' => envValue('DB_DATABASE', 'ecommerce'),
-    'username' => envValue('DB_USERNAME', 'postgres'),
-    'password' => envValue('DB_PASSWORD', 'postgres'),
+    'username' => $schemaUsername,
+    'password' => $schemaPassword,
 ];
 
 $defaultTenant = envValue('DEFAULT_TENANT', 'paramascotasec');
@@ -1178,41 +1634,36 @@ foreach ($tenants as $tenant) {
         continue;
     }
     $tenantDb = is_array($tenant['db'] ?? null) ? $tenant['db'] : [];
+    if ($tenantRlsMode === 'enforce') {
+        unset($tenantDb['username'], $tenantDb['password']);
+    }
     $addTarget(normalizeConfig($defaultConfig, $tenantDb));
 }
 
-$tenantInsertRows = [];
-foreach ($tenants as $slug => $tenant) {
-    if (!is_string($slug) || $slug === '') {
-        continue;
-    }
-    $tenantInsertRows[] = [
-        'id' => (string)($tenant['id'] ?? $slug),
-        'name' => (string)($tenant['name'] ?? $slug),
-    ];
-}
-
-if (count($tenantInsertRows) === 0) {
-    $tenantInsertRows[] = ['id' => $defaultTenant, 'name' => $defaultTenant];
-}
+$tenantInsertRows = configuredTenantRows($tenants, (string)$defaultTenant);
 
 try {
-    foreach ($targets as $target) {
+    $connections = [];
+    // Preflight every configured legacy target before the first mutation. A
+    // single modular/FDW target makes standalone bootstrap fail closed.
+    foreach ($targets as $targetKey => $target) {
         $pdo = connect($target);
-        executeSchemaBootstrap($pdo, $defaultTenant);
-        $insertTenant = $pdo->prepare('
-            INSERT INTO "Tenant" (id, name)
-            SELECT :id, :name
-            WHERE NOT EXISTS (
-                SELECT 1 FROM "Tenant" WHERE id = :id_exists
-            )
-        ');
-        foreach ($tenantInsertRows as $row) {
-            $insertTenant->execute([
-                'id' => $row['id'],
-                'name' => $row['name'],
-                'id_exists' => $row['id'],
-            ]);
+        assertLegacySchemaBootstrapTopology($pdo);
+        $connections[$targetKey] = $pdo;
+    }
+    foreach ($targets as $target) {
+        $targetKey = implode('|', [$target['host'], $target['port'], $target['database'], $target['username']]);
+        $pdo = $connections[$targetKey];
+        $pdo->beginTransaction();
+        try {
+            executeSchemaBootstrap($pdo, $defaultTenant);
+            syncConfiguredTenantRows($pdo, $tenantInsertRows);
+            $pdo->commit();
+        } catch (Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $exception;
         }
         fwrite(STDOUT, sprintf(
             "[schema] ok host=%s db=%s user=%s\n",

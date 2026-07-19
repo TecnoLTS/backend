@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Application\UseCases;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
+use App\Shared\Tax\EcuadorSriVatCatalog;
 use BillingService\Billing\Application\Dto\Request\EmitInvoiceRequest;
 use BillingService\Billing\Application\Dto\Response\InvoiceResponse;
+use BillingService\Billing\Application\Services\SriErrorInterpreter;
 use BillingService\Billing\Infrastructure\Persistence\InvoiceRepository;
 use BillingService\Billing\Application\Ports\DocumentSignerInterface;
 use BillingService\Billing\Application\Ports\SriGatewayInterface;
@@ -95,6 +98,7 @@ class EmitInvoice
         $sequentialLockAcquired = true;
 
         $sequential = $this->invoiceRepository->nextSequentialForBranchAndEnvironment(
+            $this->clientContext,
             $branchId,
             $environmentKey
         );
@@ -152,17 +156,14 @@ class EmitInvoice
         $xml = $this->xmlBuilder->buildInvoiceXml($invoice);
         // Guardar XML generado (sin firmar)
         $accessKeyValue = $accessKey->value();
-        @mkdir('/var/www/html/storage/billing/xml/generados', 0777, true);
-        file_put_contents("/var/www/html/storage/billing/xml/generados/{$accessKeyValue}.xml", $xml);
+        $artifactStorage = new BillingArtifactStorage();
+        $artifactStorage->putXml('generados', $accessKeyValue, $xml);
 
         // Firmar XML
         $signedXml = $this->signer->sign($xml);
 
         // Guardar XML firmado
-        @mkdir('/var/www/html/storage/billing/xml/firmados', 0777, true);
-        file_put_contents("/var/www/html/storage/billing/xml/firmados/{$accessKeyValue}.xml", $signedXml);
-
-        $signedXmlPath = "/var/www/html/storage/billing/xml/firmados/{$accessKeyValue}.xml";
+        $signedXmlPath = $artifactStorage->putXml('firmados', $accessKeyValue, $signedXml);
         $this->invoiceRepository->createDraftInvoice($this->clientContext, $invoice, $requestPayload, $signedXmlPath);
         if ($sourceReferenceLockAcquired) {
             $this->invoiceRepository->releaseSourceReferenceLock($this->clientContext, $sourceReference);
@@ -175,7 +176,7 @@ class EmitInvoice
 
         $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
             'sri_status' => $sriResponse['estado'] ?? 'PENDING',
-            'sri_messages' => $sriResponse['comprobantes'] ?? null,
+            'sri_messages' => SriErrorInterpreter::enrich($sriResponse['comprobantes'] ?? null),
             'raw_response' => $sriResponse,
             'authorized_xml_received' => false,
             'reintento' => $this->shouldEnableRetry(
@@ -183,7 +184,7 @@ class EmitInvoice
                 false
             ),
         ]);
-        $this->invoiceRepository->markSequentialConsumed($branchId, $environmentKey, $sequential);
+        $this->invoiceRepository->markSequentialConsumed($this->clientContext, $branchId, $environmentKey, $sequential);
 
         // Actualizar estado del invoice según respuesta del SRI
         if (isset($sriResponse['estado']) && $sriResponse['estado'] === 'DEVUELTA') {
@@ -204,7 +205,7 @@ class EmitInvoice
 
             $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
                 'sri_status' => 'DEVUELTA',
-                'sri_messages' => $comprobantes['comprobante']['mensajes'] ?? [],
+                'sri_messages' => SriErrorInterpreter::enrich($comprobantes['comprobante']['mensajes'] ?? []),
                 'raw_response' => $sriResponse,
                 'authorized_xml_received' => false,
                 'reintento' => false,
@@ -225,19 +226,15 @@ class EmitInvoice
                         new \DateTimeImmutable($authResponse['fechaAutorizacion'])
                     );
 
-                    if (!empty($authResponse['comprobante'])) {
-                        $this->saveAuthorizedXml($accessKey->value(), (string) $authResponse['comprobante']);
-                    }
-
                     $authorizedXmlPath = !empty($authResponse['comprobante'])
-                        ? "/var/www/html/storage/billing/xml/autorizados/{$accessKeyValue}.xml"
+                        ? $this->saveAuthorizedXml($accessKey->value(), (string) $authResponse['comprobante'])
                         : null;
 
                     $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
                         'sri_status' => 'AUTORIZADO',
                         'authorization_number' => $authResponse['numeroAutorizacion'] ?? null,
                         'authorization_date' => $invoice->authorizationDate(),
-                        'sri_messages' => $authResponse['mensajes'] ?? [],
+                        'sri_messages' => SriErrorInterpreter::enrich($authResponse['mensajes'] ?? []),
                         'raw_response' => $authResponse,
                         'authorized_xml_path' => $authorizedXmlPath,
                         'authorized_xml_received' => !empty($authResponse['comprobante']),
@@ -269,7 +266,7 @@ class EmitInvoice
 
                     $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
                         'sri_status' => 'NO AUTORIZADO',
-                        'sri_messages' => $mensajes,
+                        'sri_messages' => SriErrorInterpreter::enrich($mensajes),
                         'raw_response' => $authResponse,
                         'authorized_xml_received' => false,
                         'reintento' => false,
@@ -281,7 +278,7 @@ class EmitInvoice
                 } else {
                     $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
                         'sri_status' => $authResponse['estado'] ?? 'EN PROCESAMIENTO',
-                        'sri_messages' => $authResponse['mensajes'] ?? [],
+                        'sri_messages' => SriErrorInterpreter::enrich($authResponse['mensajes'] ?? []),
                         'raw_response' => $authResponse,
                         'authorized_xml_received' => false,
                         'reintento' => $this->shouldEnableRetry(
@@ -294,13 +291,14 @@ class EmitInvoice
 
             } catch (\Exception $e) {
                 $this->logger->error('[EmitInvoice] Error al consultar autorización', [
-                    'error' => $e->getMessage()
+                    'error_type' => $e::class,
+                    'error_code' => (int)$e->getCode(),
                 ]);
 
                 $this->invoiceRepository->updateStatus($accessKey->value(), $this->clientContext, [
                     'sri_status' => 'EN PROCESAMIENTO',
-                    'sri_messages' => [['mensaje' => $e->getMessage()]],
-                    'raw_response' => ['exception' => $e->getMessage()],
+                    'sri_messages' => [['mensaje' => 'No se pudo consultar la autorizacion SRI.']],
+                    'raw_response' => ['exception_type' => $e::class],
                     'authorized_xml_received' => false,
                     'reintento' => $this->shouldEnableRetry('EN PROCESAMIENTO', false),
                 ]);
@@ -339,9 +337,23 @@ class EmitInvoice
             $discount = max(0.0, (float) ($item['discount'] ?? 0));
             $taxRate = $this->normalizeTaxRate($item['tax_rate'] ?? null);
             $lineSubtotal = $this->normalizeLineSubtotal($item['line_subtotal_net'] ?? null, $quantity, $unitPrice, $discount);
+            $taxCode = trim((string) ($item['tax_code'] ?? EcuadorSriVatCatalog::TAX_CODE));
+            if ($taxCode !== EcuadorSriVatCatalog::TAX_CODE) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Unsupported line tax code %s; Billing currently accepts Ecuador IVA code %s.',
+                    $taxCode === '' ? '(empty)' : $taxCode,
+                    EcuadorSriVatCatalog::TAX_CODE
+                ));
+            }
+            $legacyTaxExempt = filter_var($item['tax_exempt'] ?? false, FILTER_VALIDATE_BOOLEAN);
+            $taxTreatment = EcuadorSriVatCatalog::normalizeTreatment(
+                $item['tax_treatment'] ?? ($legacyTaxExempt ? EcuadorSriVatCatalog::TREATMENT_EXEMPT : null)
+            )
+                ?? EcuadorSriVatCatalog::inferTreatment($taxRate, $item['tax_percentage_code'] ?? null);
             $taxPercentageCode = $this->normalizeTaxPercentageCode(
                 $item['tax_percentage_code'] ?? null,
-                $taxRate
+                $taxRate,
+                $taxTreatment
             );
             $taxAmount = $this->normalizeTaxAmount($item['tax_amount'] ?? null, $lineSubtotal, $taxRate);
 
@@ -354,8 +366,9 @@ class EmitInvoice
                 'discount' => $discount,
                 'lineSubtotal' => $lineSubtotal,
                 'taxRate' => $taxRate,
-                'taxCode' => (string) ($item['tax_code'] ?? '2'),
+                'taxCode' => $taxCode,
                 'taxPercentageCode' => $taxPercentageCode,
+                'taxTreatment' => $taxTreatment,
                 'taxAmount' => $taxAmount,
                 'additional_detail' => $item['additional_detail'] ?? null,
             ];
@@ -367,8 +380,11 @@ class EmitInvoice
         $taxes = [];
 
         foreach ($items as $item) {
-            $taxCode = (string) ($item['taxCode'] ?? '2');
-            $codePercentage = (string) ($item['taxPercentageCode'] ?? '4');
+            if (!array_key_exists('taxCode', $item) || !array_key_exists('taxPercentageCode', $item)) {
+                throw new \InvalidArgumentException('Mapped invoice items require explicit tax identity.');
+            }
+            $taxCode = (string) $item['taxCode'];
+            $codePercentage = (string) $item['taxPercentageCode'];
             $groupKey = $taxCode . ':' . $codePercentage;
 
             if (!isset($taxes[$groupKey])) {
@@ -449,10 +465,9 @@ class EmitInvoice
         return max(0.0, round($total, 6));
     }
 
-    private function saveAuthorizedXml(string $accessKey, string $authorizedXml): void
+    private function saveAuthorizedXml(string $accessKey, string $authorizedXml): string
     {
-        @mkdir('/var/www/html/storage/billing/xml/autorizados', 0777, true);
-        file_put_contents("/var/www/html/storage/billing/xml/autorizados/{$accessKey}.xml", $authorizedXml);
+        return (new BillingArtifactStorage())->putXml('autorizados', $accessKey, $authorizedXml);
     }
 
     private function dispatchDomainEvent(DomainEvent $event): void
@@ -467,7 +482,8 @@ class EmitInvoice
             $this->logger->warning('[EmitInvoice] No se pudo registrar evento de dominio', [
                 'event_name' => $event->eventName(),
                 'event_id' => $event->eventId(),
-                'error' => $e->getMessage(),
+                'error_type' => $e::class,
+                'error_code' => (int)$e->getCode(),
             ]);
         }
     }
@@ -585,20 +601,20 @@ class EmitInvoice
     private function normalizeTaxRate(mixed $value): float
     {
         if ($value === null || $value === '') {
-            return 15.0;
+            throw new \InvalidArgumentException('Line tax_rate is required.');
         }
 
-        return max(0.0, round((float) $value, 2));
+        return EcuadorSriVatCatalog::assertSupportedRate($value);
     }
 
-    private function normalizeTaxPercentageCode(mixed $value, float $taxRate): string
+    private function normalizeTaxPercentageCode(mixed $value, float $taxRate, string $taxTreatment): string
     {
         $normalized = trim((string) $value);
         if ($normalized !== '') {
-            return $normalized;
+            return EcuadorSriVatCatalog::assertCodeMatches($taxRate, $taxTreatment, $normalized);
         }
 
-        return $taxRate <= 0 ? '0' : '4';
+        return EcuadorSriVatCatalog::percentageCode($taxRate, $taxTreatment);
     }
 
     private function normalizeLineSubtotal(mixed $value, float $quantity, float $unitPrice, float $discount): float
@@ -612,11 +628,26 @@ class EmitInvoice
 
     private function normalizeTaxAmount(mixed $value, float $lineSubtotal, float $taxRate): float
     {
+        $expected = round($lineSubtotal * ($taxRate / 100), 2);
         if ($value !== null && $value !== '') {
-            return max(0.0, round((float) $value, 6));
+            if (!is_numeric($value)) {
+                throw new \InvalidArgumentException('Line tax_amount must be numeric.');
+            }
+            $provided = max(0.0, round((float) $value, 2));
+            if (abs($provided - $expected) > 0.005) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Line tax_amount %.2f does not match taxable base %.2f at IVA %s%%; expected %.2f.',
+                    $provided,
+                    $lineSubtotal,
+                    rtrim(rtrim(number_format($taxRate, 2, '.', ''), '0'), '.'),
+                    $expected
+                ));
+            }
+
+            return $provided;
         }
 
-        return max(0.0, round($lineSubtotal * ($taxRate / 100), 6));
+        return max(0.0, $expected);
     }
 
     private function summarizeSriMessage(mixed $message): string

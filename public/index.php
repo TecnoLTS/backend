@@ -9,8 +9,12 @@ use App\Core\TenantContext;
 use App\Core\TenantResolver;
 use App\Core\Auth;
 use App\Core\AuthSurface;
+use App\Core\AdminIpAccessPolicy;
+use App\Core\InternalProxyTrust;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
+use App\Modules\IdentityPlatform\Controllers\HealthController;
 use App\Repositories\UserRepository;
+use App\Support\ModuleOpenApiDocument;
 
 ini_set('display_errors', '0');
 ini_set('html_errors', '0');
@@ -118,8 +122,41 @@ if (is_readable($envPath)) {
 }
 hydrate_process_environment();
 
-if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
-    $requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+// Liveness must remain independent from tenant discovery, PostgreSQL and every
+// other external dependency. Keep both the explicit probe and the historical
+// health alias on this fast path; readiness continues through /api/readyz.
+$bootstrapRequestMethod = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+$bootstrapRequestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$bootstrapLivenessPaths = ['/api/livez', '/api/health'];
+if (in_array($bootstrapRequestMethod, ['GET', 'HEAD'], true)
+    && in_array($bootstrapRequestPath, $bootstrapLivenessPaths, true)) {
+    header_remove('X-Powered-By');
+    Response::noStore();
+    if ($bootstrapRequestMethod === 'HEAD') {
+        http_response_code(200);
+        header('Content-Type: application/json; charset=utf-8');
+        exit;
+    }
+
+    (new HealthController())->live();
+    exit;
+}
+
+if ($bootstrapRequestMethod === 'GET') {
+    $requestPath = $bootstrapRequestPath;
+    if ($requestPath === '/openapi.json') {
+        $document = ModuleOpenApiDocument::build(dirname(__DIR__));
+        if (!headers_sent()) {
+            header('Content-Type: application/vnd.oai.openapi+json;version=3.1; charset=utf-8');
+            header('Cache-Control: no-store');
+        }
+
+        echo json_encode(
+            $document,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        );
+        exit;
+    }
     if ($requestPath === '/module.json') {
         $manifestPath = __DIR__ . '/../module.json';
         if (!is_readable($manifestPath)) {
@@ -146,24 +183,47 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
 
 header_remove('X-Powered-By');
 
-$tenants = require __DIR__ . '/../config/tenants.php';
+$configuredTenants = require __DIR__ . '/../config/tenants.php';
+$tenants = \App\Modules\IdentityPlatform\Infrastructure\TenantRuntimeRegistry::mergeConfigured(
+    is_array($configuredTenants) ? $configuredTenants : []
+);
 $host = null;
 $rawHttpHost = $_SERVER['HTTP_HOST'] ?? null;
 $normalizedHttpHost = is_string($rawHttpHost) ? preg_replace('/:\d+$/', '', strtolower(trim($rawHttpHost))) : null;
-$expectedInternalProxyToken = trim((string)($_ENV['INTERNAL_PROXY_TOKEN'] ?? ''));
-$previousInternalProxyToken = trim((string)($_ENV['INTERNAL_PROXY_TOKEN_PREVIOUS'] ?? ''));
 $providedInternalProxyToken = trim((string)($_SERVER['HTTP_X_INTERNAL_PROXY_TOKEN'] ?? ''));
-$trustedInternalProxyTokens = array_values(array_filter([$expectedInternalProxyToken, $previousInternalProxyToken], static fn($value) => $value !== ''));
-$hasTrustedInternalProxyToken = false;
-if ($providedInternalProxyToken !== '') {
-    foreach ($trustedInternalProxyTokens as $trustedToken) {
-        if (hash_equals($trustedToken, $providedInternalProxyToken)) {
-            $hasTrustedInternalProxyToken = true;
-            break;
-        }
-    }
+$internalProxyConfigurationError = InternalProxyTrust::configurationError($_ENV);
+if ($internalProxyConfigurationError !== null) {
+    error_log('[INTERNAL_PROXY_CONFIGURATION_INVALID] ' . $internalProxyConfigurationError);
+    respond_with_json_error('Configuracion interna no disponible', 503, 'INTERNAL_PROXY_CONFIGURATION_INVALID');
+    exit;
 }
+$trustedInternalProxyScope = InternalProxyTrust::resolveScope($_ENV, $providedInternalProxyToken);
+if ($providedInternalProxyToken !== '' && $trustedInternalProxyScope === null) {
+    respond_with_json_error('Credencial de proxy interno invalida', 403, 'INTERNAL_PROXY_CREDENTIAL_INVALID');
+    exit;
+}
+$providedAuthSurface = strtolower(trim((string)($_SERVER['HTTP_X_AUTH_SURFACE'] ?? '')));
+if (
+    $providedAuthSurface !== ''
+    && !InternalProxyTrust::allowsAuthSurface(
+        $trustedInternalProxyScope,
+        $providedAuthSurface,
+        $bootstrapRequestMethod,
+        $bootstrapRequestPath
+    )
+) {
+    respond_with_json_error('La superficie solicitada no pertenece a este proxy', 403, 'INTERNAL_PROXY_SCOPE_VIOLATION');
+    exit;
+}
+$hasTrustedInternalProxyToken = $trustedInternalProxyScope !== null;
+$GLOBALS['trusted_internal_proxy_scope'] = $trustedInternalProxyScope;
 $GLOBALS['trusted_internal_proxy_token'] = $hasTrustedInternalProxyToken;
+if ($trustedInternalProxyScope === InternalProxyTrust::STOREFRONT && $providedAuthSurface === '') {
+    // Server-side storefront requests without an explicit surface are always
+    // constrained to ecommerce; they cannot fall back to URI inference.
+    $_SERVER['HTTP_X_AUTH_SURFACE'] = AuthSurface::ECOMMERCE;
+    $providedAuthSurface = AuthSurface::ECOMMERCE;
+}
 $appEnv = strtolower((string)($_ENV['APP_ENV'] ?? 'production'));
 $proxyHeaderFlagEnabled = in_array(strtolower((string)($_ENV['TRUST_PROXY_HEADERS'] ?? 'false')), ['1', 'true', 'yes', 'on'], true);
 $isNonProduction = $appEnv === 'qa';
@@ -194,19 +254,6 @@ if ($host && strpos($host, ',') !== false) {
     $host = trim(explode(',', $host)[0]);
 }
 $normalizedResolvedHost = $host ? preg_replace('/:\d+$/', '', strtolower($host)) : null;
-$serviceAuthLocalHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
-$isInternalServiceHost = is_string($normalizedResolvedHost) && (
-    $normalizedResolvedHost === 'backend-http'
-    || str_ends_with($normalizedResolvedHost, '-backend-http')
-    || str_ends_with($normalizedResolvedHost, '.localhost')
-    || str_ends_with($normalizedResolvedHost, '.local')
-);
-$GLOBALS['trusted_internal_proxy_service_auth'] = $hasTrustedInternalProxyToken
-    && is_string($normalizedResolvedHost)
-    && (
-        in_array($normalizedResolvedHost, $serviceAuthLocalHosts, true)
-        || $isInternalServiceHost
-    );
 $tenant = TenantResolver::resolveFromHost($tenants, $host);
 if (!$tenant) {
     $localHosts = ['localhost', '127.0.0.1'];
@@ -227,6 +274,33 @@ if (!$tenant) {
 }
 TenantContext::set($tenant);
 
+// Tenant business traffic is published only after the edge controller has
+// attested this exact desired state. Keep bootstrap health/readiness reachable
+// so a pending tenant can complete provisioning; every other API fails closed
+// even if a stale APISIX route survived temporarily.
+$tenantDesiredStateHash = \App\Modules\IdentityPlatform\Infrastructure\TenantRuntimeRegistry::desiredStateHash($tenant);
+$tenantProvisioningStatus = strtolower(trim((string)($tenant['provisioning_status'] ?? 'pending_gateway')));
+$tenantProvisioningDesiredHash = strtolower(trim((string)($tenant['provisioning_desired_hash'] ?? '')));
+$tenantBusinessReady = $tenantProvisioningStatus === 'ready'
+    && preg_match('/^[a-f0-9]{64}$/', $tenantProvisioningDesiredHash) === 1
+    && hash_equals($tenantDesiredStateHash, $tenantProvisioningDesiredHash);
+$tenantBootstrapPaths = ['/api/health', '/api/livez', '/api/readyz'];
+$dashboardAdminHost = strtolower(trim((string)($_ENV['DASHBOARD_ADMIN_HOST'] ?? getenv('DASHBOARD_ADMIN_HOST') ?: '')));
+$isPlatformRecoveryHost = $dashboardAdminHost !== '' && $normalizedResolvedHost === $dashboardAdminHost;
+$isPlatformRecoveryPath = str_starts_with($bootstrapRequestPath, '/api/auth/')
+    || $bootstrapRequestPath === '/api/admin/tenants'
+    || str_starts_with($bootstrapRequestPath, '/api/admin/tenants/');
+if (!$tenantBusinessReady
+    && !in_array($bootstrapRequestPath, $tenantBootstrapPaths, true)
+    && !($isPlatformRecoveryHost && $isPlatformRecoveryPath)) {
+    respond_with_json_error(
+        'Tenant pendiente de verificacion del gateway',
+        503,
+        'TENANT_EDGE_PROVISIONING_INCOMPLETE'
+    );
+    exit;
+}
+
 $origin = $_SERVER['HTTP_ORIGIN'] ?? null;
 $isDev = $isNonProduction;
 $localHosts = ['localhost', '127.0.0.1'];
@@ -242,7 +316,8 @@ if ($origin) {
 }
 header('Content-Type: application/json');
 header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token, X-API-Key, Idempotency-Key');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Tenant, X-CSRF-Token, X-API-Key, Idempotency-Key, If-Match');
+header('Access-Control-Expose-Headers: ETag');
 header('Access-Control-Max-Age: 600');
 header('Vary: Origin');
 Response::noStore();
@@ -264,14 +339,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 if (!function_exists('client_ip_matches_allowlist')) {
     function normalize_ip_access_mode(string $mode): string
     {
-        $mode = strtolower(trim($mode));
-        if (in_array($mode, ['private', 'private-lan', 'lan'], true)) {
-            return 'private';
-        }
-        if ($mode === 'custom') {
-            return 'custom';
-        }
-        return 'off';
+        return AdminIpAccessPolicy::normalizeMode($mode);
     }
 
     function private_ip_rules(): array
@@ -288,29 +356,7 @@ if (!function_exists('client_ip_matches_allowlist')) {
 
     function ip_in_cidr(string $ip, string $cidr): bool
     {
-        if (!str_contains($cidr, '/')) {
-            return $ip === $cidr;
-        }
-
-        [$subnet, $prefixLength] = explode('/', $cidr, 2);
-        $ipBin = @inet_pton($ip);
-        $subnetBin = @inet_pton($subnet);
-        $prefix = (int)$prefixLength;
-        if ($ipBin === false || $subnetBin === false || strlen($ipBin) !== strlen($subnetBin)) {
-            return false;
-        }
-
-        $bytes = intdiv($prefix, 8);
-        $bits = $prefix % 8;
-        if ($bytes > 0 && substr($ipBin, 0, $bytes) !== substr($subnetBin, 0, $bytes)) {
-            return false;
-        }
-        if ($bits === 0) {
-            return true;
-        }
-
-        $mask = (~(0xff >> $bits)) & 0xff;
-        return (ord($ipBin[$bytes]) & $mask) === (ord($subnetBin[$bytes]) & $mask);
+        return AdminIpAccessPolicy::ipInCidr($ip, $cidr);
     }
 
     function get_client_ip(): string
@@ -340,34 +386,12 @@ if (!function_exists('client_ip_matches_allowlist')) {
 
     function ip_allowlist_rules(string $mode, string $allowlist): array
     {
-        $rules = array_values(array_filter(array_map('trim', explode(',', $allowlist))));
-        $normalizedMode = normalize_ip_access_mode($mode);
-        if ($normalizedMode === 'private') {
-            return array_values(array_unique(array_merge(private_ip_rules(), $rules)));
-        }
-        if ($normalizedMode === 'custom') {
-            return $rules;
-        }
-        if ($rules !== []) {
-            return $rules;
-        }
-        return [];
+        return AdminIpAccessPolicy::rules($mode, $allowlist);
     }
 
     function client_ip_matches_allowlist(string $ip, string $allowlist, string $mode = 'off'): bool
     {
-        $rules = ip_allowlist_rules($mode, $allowlist);
-        if ($rules === []) {
-            return true;
-        }
-
-        foreach ($rules as $rule) {
-            if (ip_in_cidr($ip, $rule)) {
-                return true;
-            }
-        }
-
-        return false;
+        return AdminIpAccessPolicy::matches($ip, $allowlist, $mode);
     }
 }
 
@@ -443,6 +467,8 @@ function is_public_api_request(string $uri, string $method): bool {
             '/api/settings/product-categories',
             '/api/settings/product-category-references',
             '/api/health',
+            '/api/livez',
+            '/api/readyz',
         ], true)) {
             return true;
         }
@@ -476,7 +502,8 @@ function is_public_api_request(string $uri, string $method): bool {
 $isPublic = is_public_api_request($uri, $method);
 $isPublicBillingApi = is_public_billing_api_request($uri, $method);
 $authCookieName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
-$csrfCookieName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+$csrfCookieBaseName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+$csrfCookieNames = AuthSurface::csrfCookieCandidates($csrfCookieBaseName);
 $csrfExemptPaths = [
     '/api/auth/login',
     '/api/auth/register',
@@ -536,7 +563,14 @@ if ($shouldEnforceCsrf) {
         }
     }
 
-    $csrfCookie = trim((string)($_COOKIE[$csrfCookieName] ?? ''));
+    $csrfCookie = '';
+    foreach ($csrfCookieNames as $candidateCookieName) {
+        $candidateValue = trim((string)($_COOKIE[$candidateCookieName] ?? ''));
+        if ($candidateValue !== '') {
+            $csrfCookie = $candidateValue;
+            break;
+        }
+    }
     $csrfHeader = trim((string)($_SERVER['HTTP_X_CSRF_TOKEN'] ?? ''));
     if ($csrfCookie === '' || $csrfHeader === '' || !hash_equals($csrfCookie, $csrfHeader)) {
         Response::error('Token CSRF inválido o ausente', 403, 'CSRF_TOKEN_INVALID');
@@ -558,7 +592,22 @@ if ($requiresAuth) {
     if ($adminOnly) {
         $adminIpMode = trim((string)($_ENV['ADMIN_IP_MODE'] ?? 'off'));
         $adminIpAllowlist = trim((string)($_ENV['ADMIN_IP_ALLOWLIST'] ?? ''));
-        if (normalize_ip_access_mode($adminIpMode) !== 'off' || $adminIpAllowlist !== '') {
+        $normalizedAdminIpMode = normalize_ip_access_mode($adminIpMode);
+        $adminPolicyError = AdminIpAccessPolicy::productionConfigurationError(
+            $appEnv,
+            $adminIpMode,
+            $adminIpAllowlist
+        );
+        if ($adminPolicyError !== null) {
+            error_log('[ADMIN_IP_POLICY_INVALID] ' . $adminPolicyError);
+            Response::error(
+                'La política de acceso administrativo no está disponible.',
+                503,
+                'ADMIN_IP_POLICY_INVALID'
+            );
+            exit;
+        }
+        if ($normalizedAdminIpMode !== 'off' || $adminIpAllowlist !== '') {
             $clientIp = get_client_ip();
             if (!client_ip_matches_allowlist($clientIp, $adminIpAllowlist, $adminIpMode)) {
                 Response::error('Acceso administrativo restringido desde esta IP', 403, 'ADMIN_IP_FORBIDDEN');
@@ -572,50 +621,48 @@ if ($requiresAuth) {
     $accessDecision = $tenantAccess->routeAccessDecision($routeCapability, $method, $uri);
     if (!empty($accessDecision['requiresPermission'])) {
         $payload = Auth::requireUser();
-        if (empty($payload['service_auth'])) {
-            $userRepository = new UserRepository();
-            $currentUser = $userRepository->getById((string)($payload['sub'] ?? ''));
-            if (!$currentUser) {
-                Response::error('Sesión inválida', 401, 'AUTH_TOKEN_REVOKED');
-                exit;
-            }
+        $userRepository = new UserRepository();
+        $currentUser = $userRepository->getById((string)($payload['sub'] ?? ''));
+        if (!$currentUser) {
+            Response::error('Sesión inválida', 401, 'AUTH_TOKEN_REVOKED');
+            exit;
+        }
 
-            $moduleKey = $accessDecision['module'] ?? null;
-            $isPlatformAdmin = $tenantAccess->userHasPermission(
-                $currentUser,
-                TenantContext::get() ?? [],
-                TenantAccessService::PLATFORM_ADMIN_PERMISSION
+        $moduleKey = $accessDecision['module'] ?? null;
+        $isPlatformAdmin = $tenantAccess->userHasPermission(
+            $currentUser,
+            TenantContext::get() ?? [],
+            TenantAccessService::PLATFORM_ADMIN_PERMISSION
+        );
+        if (!$isPlatformAdmin && !$tenantAccess->moduleEnabledForTenant($moduleKey, TenantContext::get() ?? [])) {
+            Response::error(
+                'El tenant no tiene contratado este módulo.',
+                403,
+                'TENANT_MODULE_NOT_ENABLED',
+                ['module' => $moduleKey]
             );
-            if (!$isPlatformAdmin && !$tenantAccess->moduleEnabledForTenant($moduleKey, TenantContext::get() ?? [])) {
-                Response::error(
-                    'El tenant no tiene contratado este módulo.',
-                    403,
-                    'TENANT_MODULE_NOT_ENABLED',
-                    ['module' => $moduleKey]
-                );
-                exit;
-            }
+            exit;
+        }
 
-            $requiredPermissions = is_array($accessDecision['permissions'] ?? null)
-                ? $accessDecision['permissions']
-                : [(string)($accessDecision['permission'] ?? '')];
-            $missingPermission = null;
-            foreach ($requiredPermissions as $permission) {
-                $permission = (string)$permission;
-                if (!$tenantAccess->userHasPermission($currentUser, TenantContext::get() ?? [], $permission)) {
-                    $missingPermission = $permission;
-                    break;
-                }
+        $requiredPermissions = is_array($accessDecision['permissions'] ?? null)
+            ? $accessDecision['permissions']
+            : [(string)($accessDecision['permission'] ?? '')];
+        $missingPermission = null;
+        foreach ($requiredPermissions as $permission) {
+            $permission = (string)$permission;
+            if (!$tenantAccess->userHasPermission($currentUser, TenantContext::get() ?? [], $permission)) {
+                $missingPermission = $permission;
+                break;
             }
-            if ($missingPermission !== null) {
-                Response::error(
-                    'No tienes permiso para usar esta función del módulo.',
-                    403,
-                    'TENANT_MODULE_PERMISSION_DENIED',
-                    ['permission' => $missingPermission, 'module' => $moduleKey]
-                );
-                exit;
-            }
+        }
+        if ($missingPermission !== null) {
+            Response::error(
+                'No tienes permiso para usar esta función del módulo.',
+                403,
+                'TENANT_MODULE_PERMISSION_DENIED',
+                ['permission' => $missingPermission, 'module' => $moduleKey]
+            );
+            exit;
         }
     }
 }

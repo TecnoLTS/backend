@@ -4,28 +4,38 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Persistence;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipher;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipherFactory;
 use InvalidArgumentException;
 use PDO;
 use RuntimeException;
 
 class BillingConfigurationRepository
 {
-    private const CERTIFICATE_UPLOAD_DIR = '/var/www/html/storage/billing/certs';
     private const CERTIFICATE_MAX_BYTES = 10485760;
+    private const SECRET_MAX_BYTES = 1024;
     private const MIN_RETRY_DELAY_SECONDS = 3600;
 
-    public function __construct(private readonly PDO $connection) {}
+    private readonly BillingSecretCipher $secretCipher;
+
+    public function __construct(private readonly PDO $connection, ?BillingSecretCipher $secretCipher = null)
+    {
+        $this->secretCipher = $secretCipher ?? BillingSecretCipherFactory::fromEnvironment();
+    }
 
     public function getConfiguration(array $clientContext, array $baseConfig): array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $row = $this->requireBranchRow($clientContext);
-        $retrySettings = $this->retrySettingsByEnvironment();
+        $retrySettings = $this->retrySettingsByEnvironment($tenantId);
 
         return $this->buildConfigurationPayload($row, $retrySettings, $baseConfig);
     }
 
     public function updateConfiguration(array $clientContext, array $payload, array $baseConfig): array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $current = $this->requireBranchRow($clientContext);
         $client = is_array($payload['client'] ?? null) ? $payload['client'] : [];
         $branch = is_array($payload['branch'] ?? null) ? $payload['branch'] : [];
@@ -49,15 +59,38 @@ class BillingConfigurationRepository
         $apiProduction = $this->payloadBool($environments['production']['enabled'] ?? null, $current['api_produccion']);
         $retryTest = $this->payloadBool($retries['test']['enabled'] ?? null, $current['reintentos_test']);
         $retryProduction = $this->payloadBool($retries['production']['enabled'] ?? null, $current['reintentos_produccion']);
-        $certificatePassword = $this->optionalString($credentials['certificate_password'] ?? $payload['certificate_password'] ?? null);
+        $certificatePasswordInput = $credentials['certificate_password'] ?? $payload['certificate_password'] ?? null;
+        $this->assertSafeSecretInput($certificatePasswordInput);
+        $certificatePassword = $this->optionalSecretString($certificatePasswordInput);
 
         $this->assertUniqueClientRuc($ruc, $clientId);
         $this->assertUniqueBranchCode($clientId, $branchCode, $emissionPoint, $branchId);
         if ($certificatePassword !== null && $certificatePassword !== '') {
             $this->validateStoredCertificatePassword($current['certificate_path'] ?? null, $certificatePassword);
         }
+        $currentCertificatePassword = $this->decryptRowSecret($current, 'certificate_password', false);
+        if (($certificatePassword === null || $certificatePassword === '')
+            && $this->secretCipher->isEncrypted((string)$current['certificate_password'])
+        ) {
+            // Compatibility never downgrades an existing authenticated
+            // envelope back to plaintext when an unrelated setting changes.
+            $certificateCiphertext = (string)$current['certificate_password'];
+        } else {
+            $certificateValue = ($certificatePassword !== null && $certificatePassword !== '')
+                ? $certificatePassword
+                : (string)$currentCertificatePassword;
+            $certificateCiphertext = $this->secretCipher->prepareForStorage(
+                $certificateValue,
+                $tenantId,
+                $branchId,
+                'certificate_password'
+            );
+            $certificateValue = str_repeat("\0", strlen($certificateValue));
+        }
+        // Authentication is required even when the caller keeps the existing value.
+        $currentCertificatePassword = str_repeat("\0", strlen((string)$currentCertificatePassword));
 
-        $retrySettings = $this->retrySettingsByEnvironment();
+        $retrySettings = $this->retrySettingsByEnvironment($tenantId);
         $testRetry = $this->normalizeRetryPayload($retries['test'] ?? null, $retrySettings['pruebas'] ?? [], 'pruebas');
         $productionRetry = $this->normalizeRetryPayload($retries['production'] ?? null, $retrySettings['produccion'] ?? [], 'produccion');
 
@@ -79,14 +112,12 @@ class BillingConfigurationRepository
                 'api_produccion' => $apiProduction,
                 'reintentos_test' => $retryTest,
                 'reintentos_produccion' => $retryProduction,
-                'certificate_password' => $certificatePassword !== null && $certificatePassword !== ''
-                    ? $certificatePassword
-                    : $current['certificate_password'],
+                'certificate_password' => $certificateCiphertext,
             ]);
-            $this->upsertRetrySetting('pruebas', $testRetry);
-            $this->upsertRetrySetting('produccion', $productionRetry);
-            $this->applySequencePayload($branchId, 'pruebas', $sequences['test'] ?? null);
-            $this->applySequencePayload($branchId, 'produccion', $sequences['production'] ?? null);
+            $this->upsertRetrySetting($tenantId, 'pruebas', $testRetry);
+            $this->upsertRetrySetting($tenantId, 'produccion', $productionRetry);
+            $this->applySequencePayload($tenantId, $branchId, 'pruebas', $sequences['test'] ?? null);
+            $this->applySequencePayload($tenantId, $branchId, 'produccion', $sequences['production'] ?? null);
             $this->connection->commit();
         } catch (\Throwable $exception) {
             if ($this->connection->inTransaction()) {
@@ -101,8 +132,9 @@ class BillingConfigurationRepository
     public function uploadCertificate(array $clientContext, array $upload, string $password, array $baseConfig): array
     {
         $row = $this->requireBranchRow($clientContext);
+        $tenantId = $this->requiredTenantId($clientContext);
         $branchId = (int) $row['branch_id'];
-        $password = trim($password);
+        $this->assertSafeSecretInput($password);
         if ($password === '') {
             throw new InvalidArgumentException('Ingresa la contraseña del certificado .p12.');
         }
@@ -127,16 +159,12 @@ class BillingConfigurationRepository
             throw new InvalidArgumentException('No se pudo leer el certificado. Revisa el archivo .p12 y su contraseña.');
         }
 
-        if (!is_dir(self::CERTIFICATE_UPLOAD_DIR) && !mkdir(self::CERTIFICATE_UPLOAD_DIR, 0770, true) && !is_dir(self::CERTIFICATE_UPLOAD_DIR)) {
-            throw new RuntimeException('No se pudo crear la carpeta de certificados.');
-        }
-
         $fileName = sprintf('branch_%d_%s_%s.p12', $branchId, gmdate('YmdHis'), bin2hex(random_bytes(4)));
-        $destination = self::CERTIFICATE_UPLOAD_DIR . '/' . $fileName;
-        if (!move_uploaded_file((string) $upload['tmp_name'], $destination) || !is_file($destination)) {
+        $certificateContents = file_get_contents((string) $upload['tmp_name']);
+        if (!is_string($certificateContents) || $certificateContents === '') {
             throw new RuntimeException('No se pudo guardar el certificado en el servidor.');
         }
-        @chmod($destination, 0600);
+        $destination = (new BillingArtifactStorage())->putCertificate($fileName, $certificateContents);
 
         $statement = $this->connection->prepare(
             'UPDATE client_branches
@@ -148,7 +176,12 @@ class BillingConfigurationRepository
         $statement->execute([
             'branch_id' => $branchId,
             'certificate_path' => $destination,
-            'certificate_password' => $password,
+            'certificate_password' => $this->secretCipher->prepareForStorage(
+                $password,
+                $tenantId,
+                $branchId,
+                'certificate_password'
+            ),
         ]);
 
         return $this->getConfiguration($clientContext, $baseConfig);
@@ -156,6 +189,10 @@ class BillingConfigurationRepository
 
     public function createBranch(array $clientContext, array $payload, array $baseConfig): array
     {
+        $tenantId = trim((string)($clientContext['tenant_id'] ?? ''));
+        if ($tenantId === '') {
+            throw new InvalidArgumentException('Tenant fiscal no resuelto.');
+        }
         $current = $this->requireBranchRow($clientContext);
         $clientId = (int) $current['client_id'];
         $branch = is_array($payload['branch'] ?? null) ? $payload['branch'] : $payload;
@@ -169,6 +206,8 @@ class BillingConfigurationRepository
         $apiProduction = $this->payloadBool($branch['api_production'] ?? $branch['api_produccion'] ?? $branch['apiProduction'] ?? null, $current['api_produccion']);
         $retryTest = $this->payloadBool($branch['retries_test'] ?? $branch['reintentos_test'] ?? null, $current['reintentos_test']);
         $retryProduction = $this->payloadBool($branch['retries_production'] ?? $branch['reintentos_produccion'] ?? null, $current['reintentos_produccion']);
+        $sourceCertificatePassword = $this->decryptRowSecret($current, 'certificate_password', false);
+        $sourceMailPassword = $this->decryptRowSecret($current, 'mail_password', true);
 
         $this->assertUniqueBranchCode($clientId, $code, $emissionPoint, 0);
         if ($isDefault && !$isActive) {
@@ -180,8 +219,17 @@ class BillingConfigurationRepository
             if ($isDefault) {
                 $this->clearDefaultBranches($clientId);
             }
+            $sequence = $this->connection->query(
+                "SELECT nextval(pg_get_serial_sequence('public.client_branches', 'id'))"
+            );
+            $newBranchId = $sequence ? (int)$sequence->fetchColumn() : 0;
+            if ($newBranchId <= 0) {
+                throw new RuntimeException('No se pudo reservar la nueva sucursal fiscal.');
+            }
             $statement = $this->connection->prepare(
                 'INSERT INTO client_branches (
+                    id,
+                    tenant_id,
                     client_id,
                     code,
                     emission_point,
@@ -207,6 +255,8 @@ class BillingConfigurationRepository
                     is_default,
                     is_active
                 ) VALUES (
+                    :id,
+                    :tenant_id,
                     :client_id,
                     :code,
                     :emission_point,
@@ -234,6 +284,8 @@ class BillingConfigurationRepository
                 )'
             );
             $statement->execute([
+                'id' => $newBranchId,
+                'tenant_id' => $tenantId,
                 'client_id' => $clientId,
                 'code' => $code,
                 'emission_point' => $emissionPoint,
@@ -241,13 +293,25 @@ class BillingConfigurationRepository
                 'address' => $address,
                 'logo_path' => $current['logo_path'] ?? null,
                 'certificate_path' => $current['certificate_path'],
-                'certificate_password' => $current['certificate_password'],
+                'certificate_password' => $this->secretCipher->prepareForStorage(
+                    (string)$sourceCertificatePassword,
+                    $tenantId,
+                    $newBranchId,
+                    'certificate_password'
+                ),
                 'mail_enabled' => $current['mail_enabled'] ?? null,
                 'mail_host' => $current['mail_host'] ?? null,
                 'mail_port' => $current['mail_port'] ?? null,
                 'mail_encryption' => $current['mail_encryption'] ?? null,
                 'mail_username' => $current['mail_username'] ?? null,
-                'mail_password' => $current['mail_password'] ?? null,
+                'mail_password' => $sourceMailPassword === null
+                    ? null
+                    : $this->secretCipher->prepareForStorage(
+                        $sourceMailPassword,
+                        $tenantId,
+                        $newBranchId,
+                        'mail_password'
+                    ),
                 'mail_from_address' => $current['mail_from_address'] ?? null,
                 'mail_from_name' => $current['mail_from_name'] ?? null,
                 'reply_to_address' => $current['reply_to_address'] ?? null,
@@ -265,6 +329,13 @@ class BillingConfigurationRepository
                 $this->connection->rollBack();
             }
             throw $exception;
+        } finally {
+            $sourceCertificatePassword = is_string($sourceCertificatePassword)
+                ? str_repeat("\0", strlen($sourceCertificatePassword))
+                : null;
+            $sourceMailPassword = is_string($sourceMailPassword)
+                ? str_repeat("\0", strlen($sourceMailPassword))
+                : null;
         }
 
         return $this->getConfiguration($clientContext, $baseConfig);
@@ -402,14 +473,18 @@ class BillingConfigurationRepository
                     ...$this->retryPayload($productionRetry),
                 ],
             ],
-            'sequences' => $this->sequencesPayload((int) $row['branch_id']),
-            'certificate' => $this->certificateMetadata($row['certificate_path'] ?? null, $row['certificate_password'] ?? null),
+            'sequences' => $this->sequencesPayload((string) $row['tenant_id'], (int) $row['branch_id']),
+            'certificate' => $this->certificateMetadata(
+                $row['certificate_path'] ?? null,
+                $this->decryptRowSecret($row, 'certificate_password', false)
+            ),
             'updated_at' => $row['updated_at'] ?? null,
         ];
     }
 
     private function requireBranchRow(array $clientContext): array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $clientId = (int) ($clientContext['client_id'] ?? 0);
         $branchId = (int) ($clientContext['resolved_branch_id'] ?? $clientContext['branch_id'] ?? 0);
         if ($clientId <= 0 || $branchId <= 0) {
@@ -418,6 +493,7 @@ class BillingConfigurationRepository
 
         $statement = $this->connection->prepare(
             'SELECT
+                c.tenant_id,
                 c.id AS client_id,
                 c.ruc,
                 c.business_name,
@@ -453,13 +529,15 @@ class BillingConfigurationRepository
                 ak.key_prefix,
                 ak.last_used_at AS api_key_last_used_at
              FROM clients c
-             INNER JOIN client_branches b ON b.client_id = c.id
-             LEFT JOIN api_keys ak ON ak.id = :api_key_id
-             WHERE c.id = :client_id
+             INNER JOIN client_branches b ON b.client_id = c.id AND b.tenant_id = c.tenant_id
+             LEFT JOIN api_keys ak ON ak.id = :api_key_id AND ak.tenant_id = c.tenant_id
+             WHERE c.tenant_id = :tenant_id
+               AND c.id = :client_id
                AND b.id = :branch_id
              LIMIT 1'
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'client_id' => $clientId,
             'branch_id' => $branchId,
             'api_key_id' => (int) ($clientContext['api_key_id'] ?? 0),
@@ -574,13 +652,15 @@ class BillingConfigurationRepository
         $statement->execute(['client_id' => $clientId]);
     }
 
-    private function retrySettingsByEnvironment(): array
+    private function retrySettingsByEnvironment(string $tenantId): array
     {
-        $statement = $this->connection->query(
+        $statement = $this->connection->prepare(
             'SELECT ambiente, max_retry_days, max_attempts, delay_seconds, is_active
-             FROM invoice_retry_settings'
+             FROM invoice_retry_settings
+             WHERE tenant_id = :tenant_id'
         );
-        $rows = $statement ? $statement->fetchAll() : [];
+        $statement->execute(['tenant_id' => $tenantId]);
+        $rows = $statement->fetchAll();
         $settings = [
             'pruebas' => $this->defaultRetrySetting('pruebas'),
             'produccion' => $this->defaultRetrySetting('produccion'),
@@ -643,12 +723,12 @@ class BillingConfigurationRepository
         ];
     }
 
-    private function upsertRetrySetting(string $ambiente, array $setting): void
+    private function upsertRetrySetting(string $tenantId, string $ambiente, array $setting): void
     {
         $statement = $this->connection->prepare(
-            'INSERT INTO invoice_retry_settings (ambiente, max_retry_days, max_attempts, delay_seconds, is_active)
-             VALUES (:ambiente, :max_retry_days, :max_attempts, :delay_seconds, :is_active)
-             ON CONFLICT (ambiente) DO UPDATE SET
+            'INSERT INTO invoice_retry_settings (tenant_id, ambiente, max_retry_days, max_attempts, delay_seconds, is_active)
+             VALUES (:tenant_id, :ambiente, :max_retry_days, :max_attempts, :delay_seconds, :is_active)
+             ON CONFLICT (tenant_id, ambiente) DO UPDATE SET
                 max_retry_days = EXCLUDED.max_retry_days,
                 max_attempts = EXCLUDED.max_attempts,
                 delay_seconds = EXCLUDED.delay_seconds,
@@ -656,6 +736,7 @@ class BillingConfigurationRepository
                 updated_at = NOW()'
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'ambiente' => $ambiente,
             'max_retry_days' => (int) $setting['max_retry_days'],
             'max_attempts' => (int) $setting['max_attempts'],
@@ -664,30 +745,32 @@ class BillingConfigurationRepository
         ]);
     }
 
-    private function sequencesPayload(int $branchId): array
+    private function sequencesPayload(string $tenantId, int $branchId): array
     {
         return [
-            'test' => $this->sequencePayload($branchId, 'pruebas'),
-            'production' => $this->sequencePayload($branchId, 'produccion'),
+            'test' => $this->sequencePayload($tenantId, $branchId, 'pruebas'),
+            'production' => $this->sequencePayload($tenantId, $branchId, 'produccion'),
         ];
     }
 
-    private function sequencePayload(int $branchId, string $ambiente): array
+    private function sequencePayload(string $tenantId, int $branchId, string $ambiente): array
     {
         $statement = $this->connection->prepare(
             'SELECT current_value, updated_at
              FROM branch_sequences
-             WHERE branch_id = :branch_id
+             WHERE tenant_id = :tenant_id
+               AND branch_id = :branch_id
                AND ambiente = :ambiente
              LIMIT 1'
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'branch_id' => $branchId,
             'ambiente' => $ambiente,
         ]);
         $row = $statement->fetch();
         $currentValue = is_array($row) ? max(0, (int) ($row['current_value'] ?? 0)) : 0;
-        $maxUsed = $this->maxUsedSequential($branchId, $ambiente);
+        $maxUsed = $this->maxUsedSequential($tenantId, $branchId, $ambiente);
         $nextValue = $currentValue + 1;
 
         return [
@@ -700,7 +783,7 @@ class BillingConfigurationRepository
         ];
     }
 
-    private function applySequencePayload(int $branchId, string $ambiente, mixed $payload): void
+    private function applySequencePayload(string $tenantId, int $branchId, string $ambiente, mixed $payload): void
     {
         if (!is_array($payload)) {
             return;
@@ -723,33 +806,71 @@ class BillingConfigurationRepository
 
         $currentValue = $nextValue - 1;
         $statement = $this->connection->prepare(
-            'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
-             VALUES (:branch_id, :ambiente, :current_value, NOW())
-             ON CONFLICT (branch_id, ambiente)
+            'INSERT INTO branch_sequences (tenant_id, branch_id, ambiente, current_value, updated_at)
+             VALUES (:tenant_id, :branch_id, :ambiente, :current_value, NOW())
+             ON CONFLICT (tenant_id, branch_id, ambiente)
              DO UPDATE SET current_value = EXCLUDED.current_value,
                            updated_at = NOW()'
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'branch_id' => $branchId,
             'ambiente' => $ambiente,
             'current_value' => $currentValue,
         ]);
+        if ($statement->rowCount() !== 1) {
+            throw new RuntimeException('No se pudo actualizar el secuencial fiscal del tenant autenticado.');
+        }
     }
 
-    private function maxUsedSequential(int $branchId, string $ambiente): int
+    private function maxUsedSequential(string $tenantId, int $branchId, string $ambiente): int
     {
         $statement = $this->connection->prepare(
             "SELECT COALESCE(MAX(NULLIF(regexp_replace(sequential, '\\D', '', 'g'), '')::BIGINT), 0)
              FROM invoice_headers
-             WHERE branch_id = :branch_id
+             WHERE tenant_id = :tenant_id
+               AND branch_id = :branch_id
                AND ambiente = :ambiente"
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'branch_id' => $branchId,
             'ambiente' => $ambiente,
         ]);
 
         return max(0, (int) $statement->fetchColumn());
+    }
+
+    private function requiredTenantId(array $clientContext): string
+    {
+        $tenantId = trim((string)($clientContext['tenant_id'] ?? ''));
+        if ($tenantId === '') {
+            throw new InvalidArgumentException('Tenant fiscal no resuelto.');
+        }
+
+        return $tenantId;
+    }
+
+    private function decryptRowSecret(array $row, string $field, bool $nullable): ?string
+    {
+        $value = $row[$field] ?? null;
+        if ($value === null) {
+            if ($nullable) {
+                return null;
+            }
+            throw new RuntimeException('El secreto fiscal requerido no esta configurado.');
+        }
+        if (!is_string($value)) {
+            throw new RuntimeException('El secreto fiscal guardado tiene un formato invalido.');
+        }
+
+        $tenantId = trim((string)($row['tenant_id'] ?? ''));
+        $branchId = (int)($row['branch_id'] ?? $row['resolved_branch_id'] ?? 0);
+        if ($tenantId === '' || $branchId <= 0) {
+            throw new RuntimeException('No se pudo resolver el contexto del secreto fiscal.');
+        }
+
+        return $this->secretCipher->decryptStored($value, $tenantId, $branchId, $field);
     }
 
     private function updateClient(int $clientId, array $values): void
@@ -957,22 +1078,47 @@ class BillingConfigurationRepository
                 '-out',
                 $tempPemPath,
                 '-passin',
-                'env:PM_CERT_PASSWORD',
+                'fd:3',
                 '-legacy',
             ],
             [
                 0 => ['pipe', 'r'],
                 1 => ['pipe', 'w'],
                 2 => ['pipe', 'w'],
+                3 => ['pipe', 'r'],
             ],
             $pipes,
             null,
-            [
-                'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-                'PM_CERT_PASSWORD' => $password,
-            ]
+            ['PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin']
         );
         if (!is_resource($process)) {
+            @unlink($tempPemPath);
+            return null;
+        }
+        if (!isset($pipes[3]) || !is_resource($pipes[3])) {
+            proc_terminate($process);
+            foreach ([0, 1, 2] as $descriptor) {
+                if (isset($pipes[$descriptor]) && is_resource($pipes[$descriptor])) {
+                    fclose($pipes[$descriptor]);
+                }
+            }
+            proc_close($process);
+            @unlink($tempPemPath);
+            return null;
+        }
+        $passwordBytes = $password . "\n";
+        $expectedBytes = strlen($passwordBytes);
+        $written = fwrite($pipes[3], $passwordBytes);
+        fclose($pipes[3]);
+        $passwordBytes = str_repeat("\0", strlen($passwordBytes));
+        if ($written !== $expectedBytes) {
+            proc_terminate($process);
+            foreach ([0, 1, 2] as $descriptor) {
+                if (isset($pipes[$descriptor]) && is_resource($pipes[$descriptor])) {
+                    fclose($pipes[$descriptor]);
+                }
+            }
+            proc_close($process);
             @unlink($tempPemPath);
             return null;
         }
@@ -1002,6 +1148,10 @@ class BillingConfigurationRepository
         $path = trim((string) $path);
         if ($path === '') {
             return null;
+        }
+        $artifacts = new BillingArtifactStorage();
+        if ($artifacts->exists($path)) {
+            return $artifacts->materialize($path);
         }
         if (is_file($path)) {
             return $path;
@@ -1077,6 +1227,32 @@ class BillingConfigurationRepository
         }
         $normalized = trim((string) $value);
         return $normalized !== '' ? $normalized : null;
+    }
+
+    private function optionalSecretString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $secret = (string)$value;
+        return $secret !== '' ? $secret : null;
+    }
+
+    private function assertSafeSecretInput(mixed $value): void
+    {
+        if ($value === null) {
+            return;
+        }
+
+        $secret = (string)$value;
+        if (strlen($secret) > self::SECRET_MAX_BYTES
+            || preg_match('/[\x00-\x1F\x7F]/', $secret) === 1
+        ) {
+            throw new InvalidArgumentException(
+                'La contraseña debe tener hasta 1024 bytes y no puede contener caracteres de control.'
+            );
+        }
     }
 
     private function payloadBool(mixed $value, mixed $default): bool

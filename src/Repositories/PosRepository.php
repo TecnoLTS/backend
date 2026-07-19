@@ -270,13 +270,15 @@ class PosRepository {
         return ['cash' => 0, 'electronic' => $total];
     }
 
-    public function listMovements(string $shiftId): array {
+    public function listMovements(string $shiftId, int $limit = 100): array {
+        $limit = max(1, min(100, $limit));
         $stmt = $this->db->prepare('
             SELECT id, shift_id, type, amount, description, business_expense_id, created_by_user_id, created_at
             FROM "PosMovement"
             WHERE tenant_id = :tenant_id
               AND shift_id = :shift_id
             ORDER BY created_at DESC, id DESC
+            LIMIT ' . $limit . '
         ');
         $stmt->execute([
             'tenant_id' => $this->getTenantId(),
@@ -286,12 +288,35 @@ class PosRepository {
         return array_map([$this, 'normalizeMovementRow'], $rows);
     }
 
+    /** @return array{income:float,expense:float,adjustments:float} */
+    private function movementTotals(string $shiftId): array {
+        $stmt = $this->db->prepare('
+            SELECT
+                COALESCE(SUM(amount) FILTER (WHERE LOWER(type) IN (\'income\', \'deposit\')), 0) AS income,
+                COALESCE(SUM(amount) FILTER (WHERE LOWER(type) IN (\'expense\', \'withdrawal\')), 0) AS expense,
+                COALESCE(SUM(amount) FILTER (WHERE LOWER(type) = \'adjustment\'), 0) AS adjustments
+            FROM "PosMovement"
+            WHERE tenant_id = :tenant_id
+              AND shift_id = :shift_id
+        ');
+        $stmt->execute([
+            'tenant_id' => $this->getTenantId(),
+            'shift_id' => $shiftId,
+        ]);
+        $row = $stmt->fetch() ?: [];
+        return [
+            'income' => round((float)($row['income'] ?? 0), 2),
+            'expense' => round((float)($row['expense'] ?? 0), 2),
+            'adjustments' => round((float)($row['adjustments'] ?? 0), 2),
+        ];
+    }
+
     public function buildShiftSummary(array $shift): array {
         $openedAt = (string)($shift['opened_at'] ?? '');
         $closedAt = $shift['closed_at'] ?? null;
         $openingCash = round((float)($shift['opening_cash'] ?? 0), 2);
         $orders = $this->getLocalPosOrders($openedAt, $closedAt, (string)($shift['id'] ?? ''));
-        $movements = $this->listMovements((string)$shift['id']);
+        $movementTotals = $this->movementTotals((string)$shift['id']);
 
         $ordersCount = 0;
         $salesTotal = 0;
@@ -321,20 +346,9 @@ class PosRepository {
             $electronicSales += round((float)($split['electronic'] ?? 0), 2);
         }
 
-        $movementIncome = 0;
-        $movementExpense = 0;
-        $movementAdjustments = 0;
-        foreach ($movements as $movement) {
-            $type = strtolower((string)($movement['type'] ?? 'income'));
-            $amount = round((float)($movement['amount'] ?? 0), 2);
-            if (in_array($type, ['income', 'deposit'], true)) {
-                $movementIncome += $amount;
-            } elseif (in_array($type, ['expense', 'withdrawal'], true)) {
-                $movementExpense += $amount;
-            } elseif ($type === 'adjustment') {
-                $movementAdjustments += $amount;
-            }
-        }
+        $movementIncome = $movementTotals['income'];
+        $movementExpense = $movementTotals['expense'];
+        $movementAdjustments = $movementTotals['adjustments'];
 
         $expectedCash = $openingCash + $cashSales + $movementIncome + $movementAdjustments - $movementExpense;
         $closingCash = isset($shift['closing_cash']) ? round((float)$shift['closing_cash'], 2) : null;

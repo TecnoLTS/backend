@@ -4,6 +4,8 @@ namespace App\Modules\Billing\Infrastructure;
 
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
+use App\Infrastructure\Storage\StorageManager;
 use App\Modules\Billing\Application\BillingGateway;
 use App\Modules\Billing\Domain\BillingDomain;
 use App\Services\BillingApiException;
@@ -15,6 +17,9 @@ use BillingService\Billing\Domain\ValueObjects\AccessKey;
 use BillingService\Billing\Infrastructure\Persistence\ApiKeyRepository;
 use BillingService\Billing\Infrastructure\Persistence\BillingConfigurationRepository;
 use BillingService\Billing\Infrastructure\Persistence\InvoiceRepository;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipherFactory;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipher;
+use BillingService\Billing\Infrastructure\Persistence\BillingSecretStorageAttestor;
 use BillingService\Billing\Infrastructure\Services\AuthorizedInvoiceMailer;
 use BillingService\Billing\Infrastructure\Services\RidePdfGenerator;
 use BillingService\Billing\Infrastructure\Services\RidePdfInvoiceDataFactory;
@@ -36,15 +41,19 @@ final class NativeBillingGateway implements BillingGateway {
     private array $baseConfig;
     private ?string $rawApiKey;
     private ?string $environmentOverride;
+    private BillingArtifactStorage $artifacts;
+    private BillingSecretCipher $secretCipher;
 
     public function __construct(?PDO $connection = null, ?string $rawApiKey = null, ?string $environmentOverride = null) {
         $this->connection = $connection ?? Database::getModuleInstance(BillingDomain::KEY);
-        $this->apiKeys = new ApiKeyRepository($this->connection);
-        $this->invoices = new InvoiceRepository($this->connection);
-        $this->configuration = new BillingConfigurationRepository($this->connection);
+        $this->secretCipher = BillingSecretCipherFactory::fromEnvironment();
+        $this->apiKeys = new ApiKeyRepository($this->connection, $this->secretCipher);
+        $this->invoices = new InvoiceRepository($this->connection, $this->secretCipher);
+        $this->configuration = new BillingConfigurationRepository($this->connection, $this->secretCipher);
         $this->logger = new NullLogger();
         $this->eventDispatcher = new PostgresDomainEventDispatcher($this->connection, $this->logger);
         $this->baseConfig = self::defaultSriConfig();
+        $this->artifacts = new BillingArtifactStorage();
         $this->rawApiKey = is_string($rawApiKey) && trim($rawApiKey) !== '' ? trim($rawApiKey) : null;
         $this->environmentOverride = is_string($environmentOverride) && trim($environmentOverride) !== ''
             ? self::normalizeEnvironment($environmentOverride)
@@ -71,6 +80,9 @@ final class NativeBillingGateway implements BillingGateway {
         if (!is_array($row) || empty($row['invoice_headers']) || empty($row['api_keys'])) {
             throw new \RuntimeException('DB fiscal facturacion no inicializada para driver nativo.');
         }
+        if (!$this->secretCipher->legacyPlaintextReadEnabled()) {
+            (new BillingSecretStorageAttestor($this->connection, $this->secretCipher))->requireValidatedSchema();
+        }
     }
 
     public function emitInvoice(array $payload): array {
@@ -89,6 +101,8 @@ final class NativeBillingGateway implements BillingGateway {
             'status' => 'healthy',
             'driver' => 'native',
             'database' => 'facturacion',
+            'storage_driver' => StorageManager::instance()->configuration()->driver,
+            'secret_storage' => $this->secretCipher->storagePhase(),
             'timestamp' => date('Y-m-d H:i:s'),
         ];
     }
@@ -106,9 +120,11 @@ final class NativeBillingGateway implements BillingGateway {
             $additionalInfo = $this->rawRequestAdditionalInfo($row);
             $accessKey = (string)($row['access_key'] ?? '');
             $pdfPath = $this->ridePdfPathForAccessKey($accessKey);
-            $exists = is_file($pdfPath);
+            $pdfMetadata = $this->artifacts->metadata($pdfPath);
+            $exists = $pdfMetadata !== null;
             $authorizedXmlPath = $this->localAuthorizedXmlPathForInvoice($row);
             $xmlExists = $authorizedXmlPath !== null;
+            $xmlMetadata = $xmlExists ? $this->artifacts->metadata((string)$authorizedXmlPath) : null;
             $isCancelled = $this->isCancelledRideInvoice($row);
             $canGenerate = $this->canGenerateRidePdf($row);
             $needsRefresh = $exists ? $this->ridePdfNeedsRefresh($pdfPath, $row) : false;
@@ -149,13 +165,17 @@ final class NativeBillingGateway implements BillingGateway {
                 'pdf_exists' => $exists,
                 'pdf_can_generate' => (!$exists || $needsRefresh) && $canGenerate && !$isCancelled,
                 'pdf_needs_refresh' => $needsRefresh,
-                'pdf_size' => $exists ? filesize($pdfPath) : null,
-                'pdf_modified_at' => $exists ? date(DATE_ATOM, (int)filemtime($pdfPath)) : null,
+                'pdf_size' => $pdfMetadata['size'] ?? null,
+                'pdf_modified_at' => isset($pdfMetadata['modified_at']) && $pdfMetadata['modified_at'] !== null
+                    ? date(DATE_ATOM, (int)$pdfMetadata['modified_at'])
+                    : null,
                 'authorized_xml_received' => $xmlExists,
                 'xml_exists' => $xmlExists,
                 'xml_url' => $xmlExists ? sprintf('/api/v1/invoices/%s/xml', $accessKey) : null,
-                'xml_size' => $xmlExists ? filesize((string)$authorizedXmlPath) : null,
-                'xml_modified_at' => $xmlExists ? date(DATE_ATOM, (int)filemtime((string)$authorizedXmlPath)) : null,
+                'xml_size' => $xmlMetadata['size'] ?? null,
+                'xml_modified_at' => isset($xmlMetadata['modified_at']) && $xmlMetadata['modified_at'] !== null
+                    ? date(DATE_ATOM, (int)$xmlMetadata['modified_at'])
+                    : null,
             ];
         }
 
@@ -236,8 +256,8 @@ final class NativeBillingGateway implements BillingGateway {
             throw new BillingApiException('XML autorizado no disponible todavía para esta clave de acceso', 404, 'native://billing/xml');
         }
 
-        $content = file_get_contents($xmlPath);
-        if (!is_string($content) || trim($content) === '') {
+        $content = $this->artifacts->read($xmlPath);
+        if (trim($content) === '') {
             throw new BillingApiException('XML autorizado vacío o no disponible', 404, 'native://billing/xml');
         }
 
@@ -252,8 +272,8 @@ final class NativeBillingGateway implements BillingGateway {
         $clientContext = $this->clientContext($this->defaultApiMode());
         $this->ensureInvoiceAccess($accessKey, $clientContext);
         $pdfPath = $this->generateRidePdfForAccessKey($accessKey, $clientContext, null);
-        $content = file_get_contents($pdfPath);
-        if (!is_string($content) || $content === '') {
+        $content = $this->artifacts->read($pdfPath);
+        if ($content === '') {
             throw new BillingApiException('RIDE PDF vacío o no disponible', 404, 'native://billing/ride.pdf');
         }
 
@@ -348,7 +368,8 @@ final class NativeBillingGateway implements BillingGateway {
             'logo_path' => self::env('BILLING_LOGO_PATH', self::env('LOGO_PATH', '/var/www/html/public/LogoVerde150.png')),
             'certificate' => [
                 'path' => self::env('SRI_CERT_PATH', self::env('CERT_PATH', $storagePath . '/certs/firma.p12')),
-                'password' => self::env('SRI_CERT_PASSWORD', self::env('CERT_PASSWORD', '')),
+                // Secret material is resolved from the tenant branch only.
+                'password' => '',
             ],
             'mail' => [
                 'enabled' => filter_var(self::env('MAIL_ENABLED', self::env('SMTP_HOST', '') !== '' ? 'true' : 'false'), FILTER_VALIDATE_BOOLEAN),
@@ -356,7 +377,8 @@ final class NativeBillingGateway implements BillingGateway {
                 'port' => (int)self::env('MAIL_PORT', self::env('SMTP_PORT', '465')),
                 'encryption' => self::env('MAIL_ENCRYPTION', self::env('SMTP_SECURE', 'ssl')),
                 'username' => self::env('MAIL_USERNAME', self::env('SMTP_USER', '')),
-                'password' => self::env('MAIL_PASSWORD', self::env('SMTP_PASS', '')),
+                // Never fall back to a platform SMTP password across tenants.
+                'password' => '',
                 'from_address' => self::env('MAIL_FROM_ADDRESS', ''),
                 'from_name' => self::env('MAIL_FROM_NAME', 'Facturacion Electronica'),
                 'reply_to_address' => self::env('MAIL_REPLY_TO_ADDRESS', ''),
@@ -431,7 +453,12 @@ final class NativeBillingGateway implements BillingGateway {
     }
 
     private function clientContext(?string $requiredApiMode): array {
-        $context = $this->apiKeys->findClientContextByRawKey($this->apiKey(), $requiredApiMode);
+        $tenantId = TenantContext::id() ?: TenantContext::slug();
+        $tenantId = is_string($tenantId) ? trim($tenantId) : '';
+        if ($tenantId === '') {
+            throw new \InvalidArgumentException('Tenant fiscal no resuelto.');
+        }
+        $context = $this->apiKeys->findClientContextByRawKey($this->apiKey(), $requiredApiMode, $tenantId);
         if (!is_array($context)) {
             $message = match ($requiredApiMode) {
                 'test' => 'API key fiscal inválida, revocada o sin acceso habilitado para API test',
@@ -441,11 +468,8 @@ final class NativeBillingGateway implements BillingGateway {
             throw new \InvalidArgumentException($message);
         }
 
-        $tenantId = TenantContext::id() ?: TenantContext::slug();
-        $context['tenant_id'] = is_string($tenantId) && trim($tenantId) !== ''
-            ? trim($tenantId)
-            : null;
-        $this->apiKeys->touchUsage((int)$context['api_key_id']);
+        $context['tenant_id'] = $tenantId;
+        $this->apiKeys->touchUsage((int)$context['api_key_id'], $tenantId);
         return $context;
     }
 
@@ -495,7 +519,7 @@ final class NativeBillingGateway implements BillingGateway {
         }
 
         $pdfPath = $this->ridePdfPathForAccessKey((string)($invoice['access_key'] ?? $accessKey));
-        $details = $this->invoices->findInvoiceDetailsForHeader((int)($invoice['id'] ?? 0));
+        $details = $this->invoices->findInvoiceDetailsForHeader($clientContext, (int)($invoice['id'] ?? 0));
         $localXmlPath = $this->localXmlPathForInvoice($invoice);
         $hasLocalDetailSource = $details !== [] || $this->rawRequestHasItems($invoice) || $localXmlPath !== null;
 
@@ -517,7 +541,7 @@ final class NativeBillingGateway implements BillingGateway {
         );
         $dataFactory = new RidePdfInvoiceDataFactory();
         $invoiceData = $details === [] && !$this->rawRequestHasItems($invoice) && $localXmlPath !== null
-            ? $dataFactory->fromXmlFile($localXmlPath)
+            ? $dataFactory->fromXmlFile($this->artifacts->materialize($localXmlPath))
             : $dataFactory->fromDatabase($invoice, $details, $resolvedConfig);
 
         if (empty($invoiceData['items'])) {
@@ -544,16 +568,14 @@ final class NativeBillingGateway implements BillingGateway {
         }
 
         foreach ($paths as $path) {
-            if (is_string($path) && $path !== '' && is_file($path)) {
+            if (is_string($path) && $path !== '' && $this->artifacts->exists($path)) {
                 return $path;
             }
         }
 
         $authorizedXml = $this->authorizedXmlFromRawResponse($invoice);
         if ($authorizedXml !== null && is_string($accessKey) && $accessKey !== '') {
-            $restoredPath = '/var/www/html/storage/billing/xml/autorizados/' . $accessKey . '.xml';
-            @mkdir(dirname($restoredPath), 0777, true);
-            file_put_contents($restoredPath, $authorizedXml);
+            $restoredPath = $this->artifacts->putXml('autorizados', $accessKey, $authorizedXml);
 
             return $restoredPath;
         }
@@ -578,7 +600,7 @@ final class NativeBillingGateway implements BillingGateway {
         }
 
         foreach ($paths as $path) {
-            if (is_string($path) && $path !== '' && is_file($path)) {
+            if (is_string($path) && $path !== '' && $this->artifacts->exists($path)) {
                 return $path;
             }
         }
@@ -588,7 +610,7 @@ final class NativeBillingGateway implements BillingGateway {
 
     private function ridePdfPathForAccessKey(string $accessKey): string {
         $normalized = $this->normalizeAccessKey($accessKey);
-        return '/var/www/html/storage/billing/pdf/rides/' . $normalized . '.pdf';
+        return $this->artifacts->rideReference($normalized);
     }
 
     private function canGenerateRidePdf(array $invoice): bool {
@@ -620,7 +642,8 @@ final class NativeBillingGateway implements BillingGateway {
     }
 
     private function ridePdfNeedsRefresh(string $pdfPath, array $invoice): bool {
-        if (!is_file($pdfPath)) {
+        $metadata = $this->artifacts->metadata($pdfPath);
+        if ($metadata === null) {
             return true;
         }
 
@@ -634,7 +657,9 @@ final class NativeBillingGateway implements BillingGateway {
             return false;
         }
 
-        return (int)filemtime($pdfPath) < $updatedTimestamp;
+        $modifiedAt = $metadata['modified_at'] ?? null;
+
+        return $modifiedAt !== null && (int)$modifiedAt < $updatedTimestamp;
     }
 
     private function rawRequestHasItems(array $invoice): bool {

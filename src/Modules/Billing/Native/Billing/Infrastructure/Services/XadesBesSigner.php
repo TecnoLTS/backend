@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Services;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
 use BillingService\Billing\Application\Ports\DocumentSignerInterface;
 use BillingService\Billing\Domain\Exceptions\SriException;
 use DOMDocument;
@@ -23,11 +24,12 @@ class XadesBesSigner implements DocumentSignerInterface
     public function sign(string $xml): string
     {
         try {
-            if (!is_file($this->certPath) || !is_readable($this->certPath)) {
+            $certPath = (new BillingArtifactStorage())->materialize($this->certPath);
+            if (!is_file($certPath) || !is_readable($certPath)) {
                 throw new Exception(sprintf('No se puede leer el certificado .p12 en %s', $this->certPath));
             }
 
-            $pkcs12 = file_get_contents($this->certPath);
+            $pkcs12 = file_get_contents($certPath);
             if ($pkcs12 === false) {
                 throw new Exception(sprintf('No se pudo cargar el certificado .p12 en %s', $this->certPath));
             }

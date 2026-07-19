@@ -9,6 +9,10 @@ class TenantContext {
         self::$tenant = $tenant;
     }
 
+    public static function clear(): void {
+        self::$tenant = null;
+    }
+
     public static function get(): ?array {
         return self::$tenant;
     }

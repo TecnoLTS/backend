@@ -128,8 +128,9 @@ if ($jwtSecret === '' || strlen($jwtSecret) < 32) {
 }
 
 $baseCookieName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
-$csrfCookieName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
+$csrfCookieBaseName = trim((string)($_ENV['AUTH_CSRF_COOKIE_NAME'] ?? 'pm_csrf')) ?: 'pm_csrf';
 $authCookieName = AuthSurface::authCookieName($baseCookieName, $surface);
+$csrfCookieName = AuthSurface::csrfCookieName($csrfCookieBaseName, $surface);
 $ttlSeconds = (new SessionSettingsService(new SettingsRepository()))
     ->ttlSecondsForRole((string)($user['role'] ?? 'customer'));
 $expiresAt = time() + $ttlSeconds;

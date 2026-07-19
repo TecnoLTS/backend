@@ -5,6 +5,7 @@ namespace App\Modules\LoyaltyRewards\Controllers;
 use App\Core\Auth;
 use App\Core\Response;
 use App\Core\TenantContext;
+use App\Infrastructure\Storage\PublicUploadUrlResolver;
 use App\Modules\LoyaltyRewards\Application\LoyaltyReportService;
 use App\Modules\LoyaltyRewards\Application\PurchaseSourceVerifier;
 use App\Modules\LoyaltyRewards\Domain\ExternalApiAccessException;
@@ -1390,10 +1391,6 @@ HTML;
         $this->respond(fn() => $this->repository->getNotificationCampaign($campaignId), 'LOYALTY_NOTIFICATION_DETAIL_FAILED');
     }
 
-    public function externalHealth(): void {
-        Response::json(['status' => 'ok', 'module' => 'loyalty-rewards']);
-    }
-
     public function externalProgram(): void {
         $this->handleExternal(function (): void {
             $this->externalClient('program:read');
@@ -1697,6 +1694,9 @@ HTML;
             return $path;
         }
         $path = '/' . ltrim($path, '/');
+        if (str_starts_with($path, '/uploads/')) {
+            return PublicUploadUrlResolver::runtime()->resolve($path);
+        }
         if (!str_starts_with($path, '/api')) {
             return $path;
         }

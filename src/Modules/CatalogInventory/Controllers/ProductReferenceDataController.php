@@ -2,4 +2,6 @@
 
 namespace App\Modules\CatalogInventory\Controllers;
 
-class ProductReferenceDataController extends \App\Controllers\SettingsController {}
+use App\Http\Shared\SettingsControllerBase;
+
+class ProductReferenceDataController extends SettingsControllerBase {}

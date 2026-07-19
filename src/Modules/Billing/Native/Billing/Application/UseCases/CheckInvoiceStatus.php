@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Application\UseCases;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
 use BillingService\Billing\Infrastructure\Persistence\InvoiceRepository;
 use BillingService\Billing\Application\Ports\SriGatewayInterface;
+use BillingService\Billing\Application\Services\SriErrorInterpreter;
 use BillingService\Billing\Domain\Events\InvoiceAuthorized;
 use BillingService\Billing\Domain\Events\InvoiceRejected;
 use BillingService\Billing\Infrastructure\Services\AuthorizedInvoiceMailer;
@@ -16,8 +18,6 @@ use Psr\Log\LoggerInterface;
 
 class CheckInvoiceStatus
 {
-    private const AUTHORIZED_XML_DIRECTORY = '/var/www/html/storage/billing/xml/autorizados';
-
     public function __construct(
         private readonly SriGatewayInterface $sriGateway,
         private readonly LoggerInterface $logger,
@@ -159,7 +159,7 @@ class CheckInvoiceStatus
                 'sri_status' => 'AUTORIZADO',
                 'authorization_number' => $authorization['numeroAutorizacion'] ?? null,
                 'authorization_date' => $authorization['fechaAutorizacion'] ?? null,
-                'sri_messages' => $authorization['mensajes'] ?? [],
+                'sri_messages' => SriErrorInterpreter::enrich($authorization['mensajes'] ?? []),
                 'raw_response' => $authorization,
                 'authorized_xml_path' => $authorizedXmlPath,
                 'authorized_xml_received' => $authorizedXmlExists,
@@ -181,7 +181,7 @@ class CheckInvoiceStatus
                 'sri_status' => $status,
                 'authorization_number' => $authorization['numeroAutorizacion'] ?? null,
                 'authorization_date' => $authorization['fechaAutorizacion'] ?? null,
-                'sri_messages' => $authorization['mensajes'] ?? [],
+                'sri_messages' => SriErrorInterpreter::enrich($authorization['mensajes'] ?? []),
                 'raw_response' => $authorization,
                 'authorized_xml_received' => $authorizedXmlExists,
                 'reintento' => $this->shouldEnableRetry($status, $authorizedXmlExists),
@@ -201,7 +201,7 @@ class CheckInvoiceStatus
             'status' => $status,
             'authorization_number' => $authorization['numeroAutorizacion'] ?? null,
             'authorization_date' => $authorization['fechaAutorizacion'] ?? null,
-            'messages' => $authorization['mensajes'] ?? [],
+            'messages' => SriErrorInterpreter::enrich($authorization['mensajes'] ?? []),
             'xml_url' => $this->authorizedXmlExists($accessKey)
                 ? sprintf('/api/v1/invoices/%s/xml', $accessKey)
                 : null,
@@ -218,7 +218,7 @@ class CheckInvoiceStatus
             return;
         }
 
-        $this->invoiceRepository->markSequentialConsumed($branchId, $environment, $sequential);
+        $this->invoiceRepository->markSequentialConsumed($this->clientContext, $branchId, $environment, $sequential);
     }
 
     private function hasLocalAuthorization(array $invoice): bool
@@ -234,7 +234,7 @@ class CheckInvoiceStatus
 
         return filter_var($invoice['authorized_xml_received'] ?? false, FILTER_VALIDATE_BOOLEAN)
             && $storedPath !== ''
-            && is_file($storedPath);
+            && (new BillingArtifactStorage())->exists($storedPath);
     }
 
     private function restoreAuthorizedXmlFromLocalCache(string $accessKey, array $invoice): ?string
@@ -350,8 +350,7 @@ class CheckInvoiceStatus
 
     private function saveAuthorizedXml(string $accessKey, string $authorizedXml): void
     {
-        @mkdir($this->authorizedXmlDirectory(), 0777, true);
-        file_put_contents($this->authorizedXmlPath($accessKey), $authorizedXml);
+        (new BillingArtifactStorage())->putXml('autorizados', $accessKey, $authorizedXml);
     }
 
     private function dispatchDomainEvent(DomainEvent $event): void
@@ -366,7 +365,8 @@ class CheckInvoiceStatus
             $this->logger->warning('[CheckInvoiceStatus] No se pudo registrar evento de dominio', [
                 'event_name' => $event->eventName(),
                 'event_id' => $event->eventId(),
-                'error' => $e->getMessage(),
+                'error_type' => $e::class,
+                'error_code' => (int)$e->getCode(),
             ]);
         }
     }
@@ -394,18 +394,12 @@ class CheckInvoiceStatus
 
     private function authorizedXmlExists(string $accessKey): bool
     {
-        return is_file($this->authorizedXmlPath($accessKey));
+        return (new BillingArtifactStorage())->exists($this->authorizedXmlPath($accessKey));
     }
 
     private function authorizedXmlPath(string $accessKey): string
     {
-        return sprintf('%s/%s.xml', $this->authorizedXmlDirectory(), $accessKey);
-    }
-
-    private function authorizedXmlDirectory(): string
-    {
-        $directory = rtrim((string) ($this->config['authorized_xml_directory'] ?? self::AUTHORIZED_XML_DIRECTORY), '/');
-        return $directory !== '' ? $directory : self::AUTHORIZED_XML_DIRECTORY;
+        return (new BillingArtifactStorage())->xmlReference('autorizados', $accessKey);
     }
 
     private function shouldForceSriRefresh(array $invoice): bool

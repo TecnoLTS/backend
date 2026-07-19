@@ -6,6 +6,8 @@ if (is_file($autoload)) {
     require_once $autoload;
 }
 
+use App\Support\ModularControllerBoundary;
+
 function fail(string $message): void {
     fwrite(STDERR, "[module-routes-check] {$message}\n");
     exit(1);
@@ -23,6 +25,23 @@ function assertRouteShape(array $route, string $source, int $index): void {
     }
 }
 
+function reflectionMethodSource(ReflectionMethod $method): string {
+    $fileName = $method->getFileName();
+    if (!is_string($fileName)) {
+        return '';
+    }
+    $lines = file($fileName);
+    if (!is_array($lines)) {
+        return '';
+    }
+
+    return implode('', array_slice(
+        $lines,
+        $method->getStartLine() - 1,
+        $method->getEndLine() - $method->getStartLine() + 1
+    ));
+}
+
 $moduleRouteFiles = glob($root . '/src/Modules/*/routes.php') ?: [];
 sort($moduleRouteFiles);
 if ($moduleRouteFiles === []) {
@@ -31,6 +50,30 @@ if ($moduleRouteFiles === []) {
 
 $allModuleRoutes = [];
 $seenRoutes = [];
+
+$moduleControllerFiles = glob($root . '/src/Modules/*/Controllers/*.php') ?: [];
+sort($moduleControllerFiles);
+foreach ($moduleControllerFiles as $controllerFile) {
+    $moduleName = basename(dirname($controllerFile, 2));
+    $controllerClass = 'App\\Modules\\' . $moduleName . '\\Controllers\\' . basename($controllerFile, '.php');
+    $source = file_get_contents($controllerFile);
+    if (!is_string($source)) {
+        fail(sprintf('No se pudo leer %s', $controllerFile));
+    }
+
+    foreach (ModularControllerBoundary::sourceViolations($source) as $violation) {
+        fail(sprintf('%s %s', $controllerFile, $violation));
+    }
+
+    if (!class_exists($controllerClass)) {
+        fail(sprintf('%s no declara la clase esperada %s', $controllerFile, $controllerClass));
+    }
+
+    $controllerReflection = new ReflectionClass($controllerClass);
+    foreach (ModularControllerBoundary::reflectionViolations($controllerReflection) as $violation) {
+        fail(sprintf('%s %s', $controllerClass, $violation));
+    }
+}
 
 foreach ($moduleRouteFiles as $routeFile) {
     $moduleName = basename(dirname($routeFile));
@@ -81,6 +124,30 @@ foreach ($moduleRouteFiles as $routeFile) {
             fail(sprintf('%s route %s %s apunta a metodo inexistente %s@%s', $routeFile, (string)$route['method'], (string)$route['path'], $handlerClass, $handlerMethod));
         }
 
+        $methodReflection = new ReflectionMethod($handlerClass, $handlerMethod);
+        if (str_starts_with($methodReflection->getDeclaringClass()->getName(), 'App\\Controllers\\')) {
+            fail(sprintf(
+                '%s route %s %s hereda el metodo %s desde el controlador legacy %s',
+                $routeFile,
+                (string)$route['method'],
+                (string)$route['path'],
+                $handlerMethod,
+                $methodReflection->getDeclaringClass()->getName()
+            ));
+        }
+
+        foreach (ModularControllerBoundary::httpHandlerListViolations(reflectionMethodSource($methodReflection)) as $violation) {
+            fail(sprintf(
+                '%s route %s %s handler %s@%s %s',
+                $routeFile,
+                (string)$route['method'],
+                (string)$route['path'],
+                $handlerClass,
+                $handlerMethod,
+                $violation
+            ));
+        }
+
         $routeKey = strtoupper((string)$route['method']) . ' ' . (string)$route['path'];
         if (isset($seenRoutes[$routeKey])) {
             fail(sprintf('%s duplica la ruta %s ya declarada en %s', $routeFile, $routeKey, $seenRoutes[$routeKey]));
@@ -112,7 +179,8 @@ foreach ($aggregatedRoutes as $index => $route) {
 }
 
 printf(
-    "[module-routes-check] OK modules=%d routes=%d\n",
+    "[module-routes-check] OK modules=%d controllers=%d routes=%d\n",
     count($moduleRouteFiles),
+    count($moduleControllerFiles),
     count($allModuleRoutes)
 );

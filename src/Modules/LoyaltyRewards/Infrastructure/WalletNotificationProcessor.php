@@ -21,6 +21,7 @@ final class WalletNotificationProcessor {
      * un resultado ambiguo queda `delivery_unknown` para respetar at-most-once.
      */
     public function sendRecipient(WalletMessenger $service, array $recipient, string $header, string $body): string {
+        $tenantId = $this->requiredTenantId($recipient['tenant_id'] ?? null);
         $attempts = max(1, (int)$recipient['attempts']);
         $status = 'sent';
         $messageId = null;
@@ -40,6 +41,7 @@ final class WalletNotificationProcessor {
         }
 
         return $this->persistRecipientResult(
+            $tenantId,
             (string)$recipient['id'],
             (string)$recipient['campaign_id'],
             $status,
@@ -50,27 +52,51 @@ final class WalletNotificationProcessor {
     }
 
     /** Drena los destinatarios pendientes de UNA campaña con un servicio ya resuelto. */
-    public function drainCampaign(string $campaignId, WalletMessenger $service, int $throttleMs = 0): array {
-        $campaign = $this->campaignRow($campaignId);
+    public function drainCampaign(
+        string $campaignId,
+        WalletMessenger $service,
+        int $throttleMs = 0,
+        ?string $expectedTenantId = null,
+        ?int $maxRecipients = null,
+        ?float $deadlineMonotonic = null
+    ): array {
+        $campaign = $this->campaignRow($campaignId, $expectedTenantId);
         if ($campaign === null) {
             return ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0, 'delivery_unknown' => 0];
         }
-        $this->markProcessing($campaignId);
+        $tenantId = $this->requiredTenantId($campaign['tenant_id'] ?? null);
+        $this->markProcessing($tenantId, $campaignId);
 
-        $this->recoverStaleClaims($campaignId);
+        $this->recoverStaleClaims($tenantId, $campaignId);
         $tally = ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0, 'delivery_unknown' => 0];
-        while (($row = $this->claimRecipient($campaignId)) !== null) {
+        $recipientBudget = $maxRecipients === null ? PHP_INT_MAX : max(0, $maxRecipients);
+        while ($tally['processed'] < $recipientBudget && !$this->deadlineReached($deadlineMonotonic)) {
+            $row = $this->claimRecipient($tenantId, $campaignId);
+            if ($row === null) {
+                break;
+            }
             $status = $this->sendRecipient($service, $row, (string)$campaign['title'], (string)$campaign['body']);
             $tally['processed']++;
             if (isset($tally[$status])) {
                 $tally[$status]++;
             }
-            if ($throttleMs > 0) {
-                usleep($throttleMs * 1000);
+            if ($throttleMs > 0
+                && $tally['processed'] < $recipientBudget
+                && !$this->deadlineReached($deadlineMonotonic)) {
+                $sleepMicros = $throttleMs * 1000;
+                if ($deadlineMonotonic !== null) {
+                    $remainingMicros = (int)floor(
+                        max(0.0, $deadlineMonotonic - self::monotonicSeconds()) * 1000000
+                    );
+                    $sleepMicros = min($sleepMicros, $remainingMicros);
+                }
+                if ($sleepMicros > 0) {
+                    usleep($sleepMicros);
+                }
             }
         }
 
-        $this->closeIfDone($campaignId);
+        $this->closeIfDone($tenantId, $campaignId);
         return $tally;
     }
 
@@ -81,18 +107,44 @@ final class WalletNotificationProcessor {
      * @param callable(string):(?WalletMessenger) $serviceResolver
      * @return array{processed:int,sent:int,skipped:int,failed:int,delivery_unknown:int}
      */
-    public function drainPending(int $limit, ?string $tenantId, callable $serviceResolver, int $throttleMs = 0): array {
-        $sql = "SELECT DISTINCT campaign_id, tenant_id
-                FROM loyalty_wallet_campaign_recipients
-                WHERE (status = 'pending' OR (status = 'sending' AND updated_at < NOW() - INTERVAL '15 minutes'))" . ($tenantId ? ' AND tenant_id = :tenant_id' : '') .
-                ' ORDER BY campaign_id ASC LIMIT ' . max(1, $limit);
+    public function drainPending(
+        int $limit,
+        ?string $tenantId,
+        callable $serviceResolver,
+        int $throttleMs = 0,
+        ?float $deadlineMonotonic = null
+    ): array {
+        // `limit` is deliberately a global recipient budget, not a campaign
+        // count. A large campaign therefore yields cooperatively across cycles.
+        $recipientBudget = max(1, min($limit, 10000));
+        $sql = "WITH pending_campaigns AS (
+                    SELECT campaign_id,
+                           tenant_id,
+                           MIN(updated_at) AS oldest_pending_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY tenant_id
+                               ORDER BY MIN(updated_at) ASC, campaign_id ASC
+                           ) AS tenant_position
+                    FROM loyalty_wallet_campaign_recipients
+                    WHERE (status = 'pending' OR (status = 'sending' AND updated_at < NOW() - INTERVAL '15 minutes'))" . ($tenantId ? ' AND tenant_id = :tenant_id' : '') .
+                "   GROUP BY tenant_id, campaign_id
+                )
+                SELECT campaign_id, tenant_id
+                  FROM pending_campaigns
+                 ORDER BY tenant_position ASC, oldest_pending_at ASC, tenant_id ASC, campaign_id ASC
+                 LIMIT " . min($recipientBudget, 1000);
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($tenantId ? ['tenant_id' => $tenantId] : []);
         $campaigns = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
         $tally = ['processed' => 0, 'sent' => 0, 'skipped' => 0, 'failed' => 0, 'delivery_unknown' => 0];
         $servicesByTenant = [];
+        $campaignQuota = max(1, (int)ceil($recipientBudget / max(1, count($campaigns))));
         foreach ($campaigns as $c) {
+            $remaining = $recipientBudget - $tally['processed'];
+            if ($remaining <= 0 || $this->deadlineReached($deadlineMonotonic)) {
+                break;
+            }
             $t = (string)$c['tenant_id'];
             if (!array_key_exists($t, $servicesByTenant)) {
                 $servicesByTenant[$t] = $serviceResolver($t);
@@ -101,12 +153,32 @@ final class WalletNotificationProcessor {
             if ($service === null) {
                 continue;
             }
-            $part = $this->drainCampaign((string)$c['campaign_id'], $service, $throttleMs);
+            if ($this->deadlineReached($deadlineMonotonic)) {
+                break;
+            }
+            $part = $this->drainCampaign(
+                (string)$c['campaign_id'],
+                $service,
+                $throttleMs,
+                $t,
+                min($remaining, $campaignQuota),
+                $deadlineMonotonic
+            );
             foreach ($tally as $k => $_) {
                 $tally[$k] += $part[$k];
             }
         }
         return $tally;
+    }
+
+    private function deadlineReached(?float $deadlineMonotonic): bool
+    {
+        return $deadlineMonotonic !== null && self::monotonicSeconds() >= $deadlineMonotonic;
+    }
+
+    private static function monotonicSeconds(): float
+    {
+        return hrtime(true) / 1000000000;
     }
 
     /**
@@ -115,6 +187,7 @@ final class WalletNotificationProcessor {
      * conserva ese estado terminal y no vuelve a incrementar la campana.
      */
     private function persistRecipientResult(
+        string $tenantId,
         string $id,
         string $campaignId,
         string $status,
@@ -127,11 +200,11 @@ final class WalletNotificationProcessor {
             $this->pdo->beginTransaction();
         }
         try {
-            $updated = $this->updateRecipient($id, $status, $attempts, $messageId, $error);
+            $updated = $this->updateRecipient($tenantId, $id, $status, $attempts, $messageId, $error);
             if ($updated) {
-                $this->bumpCampaign($campaignId, $status);
+                $this->bumpCampaign($tenantId, $campaignId, $status);
             } else {
-                $status = $this->recipientStatus($id) ?? 'delivery_unknown';
+                $status = $this->recipientStatus($tenantId, $id) ?? 'delivery_unknown';
             }
             if ($ownsTransaction) {
                 $this->pdo->commit();
@@ -146,31 +219,31 @@ final class WalletNotificationProcessor {
         }
     }
 
-    private function updateRecipient(string $id, string $status, int $attempts, ?string $messageId, ?string $error): bool {
+    private function updateRecipient(string $tenantId, string $id, string $status, int $attempts, ?string $messageId, ?string $error): bool {
         $stmt = $this->pdo->prepare(
             'UPDATE loyalty_wallet_campaign_recipients
              SET status = :status, attempts = :attempts, message_id = :message_id, last_error = :last_error, updated_at = NOW()
-             WHERE id = :id AND status = \'sending\''
+             WHERE tenant_id = :tenant_id AND id = :id AND status = \'sending\''
         );
         $stmt->execute([
             'status' => $status, 'attempts' => $attempts, 'message_id' => $messageId,
-            'last_error' => $error, 'id' => $id,
+            'last_error' => $error, 'tenant_id' => $tenantId, 'id' => $id,
         ]);
 
         return $stmt->rowCount() === 1;
     }
 
-    private function recipientStatus(string $id): ?string {
+    private function recipientStatus(string $tenantId, string $id): ?string {
         $stmt = $this->pdo->prepare(
-            'SELECT status FROM loyalty_wallet_campaign_recipients WHERE id = :id LIMIT 1'
+            'SELECT status FROM loyalty_wallet_campaign_recipients WHERE tenant_id = :tenant_id AND id = :id LIMIT 1'
         );
-        $stmt->execute(['id' => $id]);
+        $stmt->execute(['tenant_id' => $tenantId, 'id' => $id]);
         $status = $stmt->fetchColumn();
 
         return is_string($status) && $status !== '' ? $status : null;
     }
 
-    private function bumpCampaign(string $campaignId, string $kind): void {
+    private function bumpCampaign(string $tenantId, string $campaignId, string $kind): void {
         $column = [
             'sent' => 'sent_count',
             'skipped' => 'skipped_count',
@@ -182,59 +255,69 @@ final class WalletNotificationProcessor {
         }
         $extra = $kind === 'delivery_unknown' ? ', failed_count = failed_count + 1' : '';
         $this->pdo->prepare(
-            "UPDATE loyalty_wallet_campaigns SET {$column} = {$column} + 1{$extra} WHERE id = :id"
-        )->execute(['id' => $campaignId]);
+            "UPDATE loyalty_wallet_campaigns SET {$column} = {$column} + 1{$extra} WHERE tenant_id = :tenant_id AND id = :id"
+        )->execute(['tenant_id' => $tenantId, 'id' => $campaignId]);
     }
 
-    private function markProcessing(string $campaignId): void {
+    private function markProcessing(string $tenantId, string $campaignId): void {
         $this->pdo->prepare(
             "UPDATE loyalty_wallet_campaigns
              SET status = 'processing', started_at = COALESCE(started_at, NOW())
-             WHERE id = :id AND status = 'pending'"
-        )->execute(['id' => $campaignId]);
+             WHERE tenant_id = :tenant_id AND id = :id AND status = 'pending'"
+        )->execute(['tenant_id' => $tenantId, 'id' => $campaignId]);
     }
 
     /** Cierra la campaña si no quedan destinatarios pendientes ni en envio. */
-    private function closeIfDone(string $campaignId): void {
+    private function closeIfDone(string $tenantId, string $campaignId): void {
         $pending = (int)$this->scalar(
-            "SELECT COUNT(*) FROM loyalty_wallet_campaign_recipients WHERE campaign_id = :id AND status IN ('pending', 'sending')",
-            ['id' => $campaignId]
+            "SELECT COUNT(*) FROM loyalty_wallet_campaign_recipients WHERE tenant_id = :tenant_id AND campaign_id = :id AND status IN ('pending', 'sending')",
+            ['tenant_id' => $tenantId, 'id' => $campaignId]
         );
         if ($pending > 0) {
             return;
         }
-        $failed = (int)$this->scalar('SELECT failed_count FROM loyalty_wallet_campaigns WHERE id = :id', ['id' => $campaignId]);
+        $failed = (int)$this->scalar(
+            'SELECT failed_count FROM loyalty_wallet_campaigns WHERE tenant_id = :tenant_id AND id = :id',
+            ['tenant_id' => $tenantId, 'id' => $campaignId]
+        );
         $status = $failed > 0 ? 'completed_with_errors' : 'completed';
         $this->pdo->prepare(
-            'UPDATE loyalty_wallet_campaigns SET status = :status, finished_at = NOW() WHERE id = :id'
-        )->execute(['status' => $status, 'id' => $campaignId]);
+            'UPDATE loyalty_wallet_campaigns SET status = :status, finished_at = NOW() WHERE tenant_id = :tenant_id AND id = :id'
+        )->execute(['status' => $status, 'tenant_id' => $tenantId, 'id' => $campaignId]);
     }
 
-    private function campaignRow(string $campaignId): ?array {
-        $stmt = $this->pdo->prepare('SELECT id, title, body FROM loyalty_wallet_campaigns WHERE id = :id LIMIT 1');
-        $stmt->execute(['id' => $campaignId]);
+    private function campaignRow(string $campaignId, ?string $expectedTenantId): ?array {
+        $expectedTenantId = trim((string)$expectedTenantId);
+        $sql = 'SELECT id, tenant_id, title, body FROM loyalty_wallet_campaigns WHERE id = :id';
+        $params = ['id' => $campaignId];
+        if ($expectedTenantId !== '') {
+            $sql .= ' AND tenant_id = :tenant_id';
+            $params['tenant_id'] = $expectedTenantId;
+        }
+        $stmt = $this->pdo->prepare($sql . ' LIMIT 1');
+        $stmt->execute($params);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         return $row === false ? null : $row;
     }
 
-    private function claimRecipient(string $campaignId): ?array
+    private function claimRecipient(string $tenantId, string $campaignId): ?array
     {
         $this->pdo->beginTransaction();
         try {
             $stmt = $this->pdo->prepare(
-                "SELECT r.id, r.campaign_id, r.member_id, r.account_id, r.attempts,
+                "SELECT r.id, r.tenant_id, r.campaign_id, r.member_id, r.account_id, r.attempts,
                         p.external_object_id AS object_id
                  FROM loyalty_wallet_campaign_recipients r
                  LEFT JOIN loyalty_wallet_passes p
                    ON p.tenant_id = r.tenant_id
                   AND p.member_id = r.member_id
                   AND p.platform = 'google'
-                 WHERE r.campaign_id = :cid AND r.status = 'pending'
+                 WHERE r.tenant_id = :tenant_id AND r.campaign_id = :cid AND r.status = 'pending'
                  ORDER BY r.id ASC
                  FOR UPDATE OF r SKIP LOCKED
                  LIMIT 1"
             );
-            $stmt->execute(['cid' => $campaignId]);
+            $stmt->execute(['tenant_id' => $tenantId, 'cid' => $campaignId]);
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($row === false) {
                 $this->pdo->commit();
@@ -244,9 +327,9 @@ final class WalletNotificationProcessor {
             $updated = $this->pdo->prepare(
                 "UPDATE loyalty_wallet_campaign_recipients
                  SET status = 'sending', attempts = :attempts, updated_at = NOW()
-                 WHERE id = :id AND status = 'pending'"
+                 WHERE tenant_id = :tenant_id AND id = :id AND status = 'pending'"
             );
-            $updated->execute(['attempts' => $attempts, 'id' => (string)$row['id']]);
+            $updated->execute(['attempts' => $attempts, 'tenant_id' => $tenantId, 'id' => (string)$row['id']]);
             if ($updated->rowCount() !== 1) {
                 throw new \RuntimeException('No se pudo reclamar el destinatario Wallet.');
             }
@@ -263,7 +346,7 @@ final class WalletNotificationProcessor {
         }
     }
 
-    private function recoverStaleClaims(string $campaignId): void
+    private function recoverStaleClaims(string $tenantId, string $campaignId): void
     {
         $stmt = $this->pdo->prepare(
             "WITH stale AS (
@@ -271,20 +354,22 @@ final class WalletNotificationProcessor {
                 SET status = 'delivery_unknown',
                     last_error = COALESCE(last_error, 'Envio interrumpido despues de iniciar; no se reintentara automaticamente.'),
                     updated_at = NOW()
-                WHERE campaign_id = :campaign_id
+                WHERE tenant_id = :tenant_id
+                  AND campaign_id = :campaign_id
                   AND status = 'sending'
                   AND updated_at < NOW() - INTERVAL '15 minutes'
-                RETURNING campaign_id
+                RETURNING tenant_id, campaign_id
              ), tally AS (
-                SELECT campaign_id, COUNT(*)::integer AS total FROM stale GROUP BY campaign_id
+                SELECT tenant_id, campaign_id, COUNT(*)::integer AS total FROM stale GROUP BY tenant_id, campaign_id
              )
              UPDATE loyalty_wallet_campaigns c
              SET delivery_unknown_count = c.delivery_unknown_count + tally.total,
                  failed_count = c.failed_count + tally.total
              FROM tally
-             WHERE c.id = tally.campaign_id"
+             WHERE c.tenant_id = tally.tenant_id
+               AND c.id = tally.campaign_id"
         );
-        $stmt->execute(['campaign_id' => $campaignId]);
+        $stmt->execute(['tenant_id' => $tenantId, 'campaign_id' => $campaignId]);
     }
 
     private function isKnownPreSendSkip(\RuntimeException $exception): bool
@@ -301,5 +386,15 @@ final class WalletNotificationProcessor {
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
         return $stmt->fetchColumn();
+    }
+
+    private function requiredTenantId(mixed $value): string
+    {
+        $tenantId = trim((string)$value);
+        if ($tenantId === '') {
+            throw new \RuntimeException('La operacion Wallet no tiene un tenant_id resuelto.');
+        }
+
+        return $tenantId;
     }
 }

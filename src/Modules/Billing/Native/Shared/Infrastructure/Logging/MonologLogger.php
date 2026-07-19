@@ -39,15 +39,23 @@ class MonologLogger implements LoggerInterface
     private function resolveLogPath(): string
     {
         $configuredPath = $_ENV['LOG_PATH'] ?? '';
-        $channel = strtolower(trim((string) ($_ENV['LOG_CHANNEL'] ?? 'single')));
+        $channel = strtolower(trim((string) ($_ENV['LOG_CHANNEL'] ?? 'stderr')));
+
+        if (in_array($channel, ['stderr', 'errorlog'], true)) {
+            return 'php://stderr';
+        }
+
+        if ($channel === 'stdout') {
+            return 'php://stdout';
+        }
 
         if ($channel === 'daily') {
             $baseDirectory = $this->resolveBaseLogDirectory($configuredPath);
             return sprintf('%s/%s.log', rtrim($baseDirectory, '/'), date('Y/m/d'));
         }
 
-        if (!empty($_ENV['LOG_PATH'])) {
-            return $_ENV['LOG_PATH'];
+        if ($configuredPath !== '') {
+            return $configuredPath;
         }
 
         if (is_dir('/var/www/html/storage/billing/logs')) {

@@ -4,17 +4,21 @@ declare(strict_types=1);
 
 namespace App\Modules\LoyaltyRewards\Application;
 
-use App\Core\Database;
-use App\Modules\Billing\Domain\BillingDomain;
-use App\Modules\Commerce\Domain\CommerceDomain;
+use App\Modules\LoyaltyRewards\Application\Ports\BillingPurchaseSource;
+use App\Modules\LoyaltyRewards\Application\Ports\EcommercePurchaseSource;
 use App\Modules\LoyaltyRewards\Domain\DecimalMath;
 use App\Modules\LoyaltyRewards\Domain\PurchaseVerificationException;
 use App\Modules\LoyaltyRewards\Domain\ReferenceNormalizer;
-use PDO;
 
 final class PurchaseSourceVerifier
 {
     public const STAFF_POS_SOURCE = 'staff_pos';
+
+    public function __construct(
+        private readonly EcommercePurchaseSource $ecommercePurchases,
+        private readonly BillingPurchaseSource $billingPurchases
+    ) {
+    }
 
     public function verify(
         string $tenantId,
@@ -132,23 +136,16 @@ final class PurchaseSourceVerifier
 
     private function verifyEcommerce(string $tenantId, array $member, string $amount, string $currency, string $reference): array
     {
-        $pdo = Database::getModuleInstance(CommerceDomain::KEY);
-        $statement = $pdo->prepare(
-            "SELECT id, tenant_id AS source_tenant_id, customer_id, user_id, status, total, invoice_number, billing_address
-             FROM \"Order\"
-             WHERE tenant_id = :tenant_id
-               AND UPPER(regexp_replace(BTRIM(COALESCE(invoice_number, id)), '\\s+', ' ', 'g')) = :reference
-             ORDER BY created_at DESC
-             LIMIT 2"
-        );
-        $statement->execute(['tenant_id' => $tenantId, 'reference' => $reference]);
-        $rows = $statement->fetchAll(PDO::FETCH_ASSOC);
-        if (count($rows) !== 1) {
+        $matches = $this->ecommercePurchases->findMatches($tenantId, $reference);
+        if (count($matches) !== 1) {
             throw $this->mismatch('purchase_ecommerce_not_found', 'La orden ecommerce no existe o no es univoca para este tenant.', [
-                'matches' => count($rows),
+                'matches' => count($matches),
             ], 409);
         }
-        $order = $rows[0];
+        $order = $matches->single();
+        if ($order === null) {
+            throw new \LogicException('El puerto ecommerce devolvio un conteo incoherente.');
+        }
         if (!hash_equals($tenantId, trim((string)($order['source_tenant_id'] ?? '')))) {
             throw $this->mismatch('purchase_ecommerce_tenant_mismatch', 'La orden ecommerce pertenece a otro tenant.', [], 409);
         }
@@ -182,40 +179,16 @@ final class PurchaseSourceVerifier
 
     private function verifyBilling(string $tenantId, array $member, string $amount, string $currency, string $reference): array
     {
-        $pdo = Database::getModuleInstance(BillingDomain::KEY);
-        $statement = $pdo->prepare(
-            "SELECT ih.id, ih.tenant_id AS source_tenant_id,
-                    bc.tenant_id AS billing_customer_tenant_id,
-                    ih.source_reference, ih.access_key, ih.authorization_number,
-                    ih.total_with_tax, ih.sri_status, ih.authorized_xml_received,
-                    bc.identification, bc.email, bc.id AS billing_customer_id
-             FROM invoice_headers ih
-             JOIN billing_customers bc
-               ON bc.id = ih.billing_customer_id
-              AND bc.tenant_id = :billing_customer_tenant_id
-             WHERE ih.tenant_id = :invoice_tenant_id
-               AND (
-                    UPPER(regexp_replace(BTRIM(COALESCE(ih.source_reference, ih.access_key, ih.authorization_number)), '\\s+', ' ', 'g')) = :reference
-                 OR UPPER(regexp_replace(BTRIM(COALESCE(ih.access_key, '')), '\\s+', ' ', 'g')) = :reference_access
-                 OR UPPER(regexp_replace(BTRIM(COALESCE(ih.authorization_number, '')), '\\s+', ' ', 'g')) = :reference_authorization
-               )
-             ORDER BY ih.created_at DESC
-             LIMIT 2"
-        );
-        $statement->execute([
-            'billing_customer_tenant_id' => $tenantId,
-            'invoice_tenant_id' => $tenantId,
-            'reference' => $reference,
-            'reference_access' => $reference,
-            'reference_authorization' => $reference,
-        ]);
-        $rows = $statement->fetchAll(PDO::FETCH_ASSOC);
-        if (count($rows) !== 1) {
+        $matches = $this->billingPurchases->findMatches($tenantId, $reference);
+        if (count($matches) !== 1) {
             throw $this->mismatch('purchase_billing_not_found', 'El comprobante fiscal no existe o no es univoco para este tenant.', [
-                'matches' => count($rows),
+                'matches' => count($matches),
             ], 409);
         }
-        $invoice = $rows[0];
+        $invoice = $matches->single();
+        if ($invoice === null) {
+            throw new \LogicException('El puerto Billing devolvio un conteo incoherente.');
+        }
         if (
             !hash_equals($tenantId, trim((string)($invoice['source_tenant_id'] ?? '')))
             || !hash_equals($tenantId, trim((string)($invoice['billing_customer_tenant_id'] ?? '')))

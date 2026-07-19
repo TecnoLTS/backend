@@ -2,11 +2,19 @@
 
 namespace App\Modules\Billing\Controllers;
 
+use App\Modules\Billing\Application\Ports\BillingOrderAccountingPort;
+use App\Modules\Billing\Infrastructure\BillingCommercePortsFactory;
 use App\Modules\Billing\Infrastructure\NativeBillingGateway;
 use App\Services\BillingApiException;
 
 final class PublicBillingController {
     private const CERTIFICATE_MAX_BYTES = 10485760;
+
+    private ?BillingOrderAccountingPort $orderAccounting;
+
+    public function __construct(?BillingOrderAccountingPort $orderAccounting = null) {
+        $this->orderAccounting = $orderAccounting;
+    }
 
     public function health(): void {
         $this->jsonSuccess([
@@ -131,8 +139,51 @@ final class PublicBillingController {
             $payload = $this->jsonBody(false);
             $reason = trim((string)($payload['reason'] ?? ''));
 
-            return $this->gateway($apiMode)->cancelAndReissueInvoice($accessKey, $reason, $this->environment($apiMode));
+            $result = $this->gateway($apiMode)->cancelAndReissueInvoice($accessKey, $reason, $this->environment($apiMode));
+            $this->syncOrderBillingMetadata($result);
+
+            return $result;
         });
+    }
+
+    private function syncOrderBillingMetadata(array $result): void {
+        $oldInvoice = is_array($result['old_invoice'] ?? null) ? $result['old_invoice'] : [];
+        $newInvoice = is_array($result['new_invoice'] ?? null) ? $result['new_invoice'] : [];
+        $orderId = trim((string)($newInvoice['source_reference'] ?? $oldInvoice['source_reference'] ?? ''));
+        if ($orderId === '') {
+            return;
+        }
+
+        $this->orderAccounting()->updateBillingMetadata($orderId, [
+            'provider' => 'billing-sri',
+            'status' => 'reissued',
+            'invoice_status' => $newInvoice['sri_status'] ?? null,
+            'access_key' => $newInvoice['access_key'] ?? null,
+            'sequential' => $this->formatSequential($newInvoice),
+            'issue_date' => $newInvoice['issue_date'] ?? null,
+            'total' => $newInvoice['total'] ?? null,
+            'authorization_number' => $newInvoice['authorization_number'] ?? null,
+            'authorization_date' => $newInvoice['authorization_date'] ?? null,
+            'reissued_at' => date('c'),
+            'reissued_from_access_key' => $oldInvoice['access_key'] ?? null,
+            'last_attempt_at' => date('c'),
+            'last_error' => null,
+        ]);
+    }
+
+    private function orderAccounting(): BillingOrderAccountingPort {
+        return $this->orderAccounting ??= BillingCommercePortsFactory::orders();
+    }
+
+    private function formatSequential(array $invoice): ?string {
+        $establishment = trim((string)($invoice['establishment_code'] ?? ''));
+        $emissionPoint = trim((string)($invoice['emission_point'] ?? ''));
+        $sequential = trim((string)($invoice['sequential'] ?? ''));
+        if ($establishment === '' || $emissionPoint === '' || $sequential === '') {
+            return null;
+        }
+
+        return sprintf('%s-%s-%s', $establishment, $emissionPoint, str_pad($sequential, 9, '0', STR_PAD_LEFT));
     }
 
     private function gateway(string $apiMode): NativeBillingGateway {
@@ -192,10 +243,14 @@ final class PublicBillingController {
             $this->jsonError($exception->getMessage(), $exception->httpStatusCode());
         } catch (\InvalidArgumentException $exception) {
             $this->jsonError($exception->getMessage(), $this->isAuthFailure($exception->getMessage()) ? 401 : 400);
+        } catch (\PDOException $exception) {
+            $this->logInternalFailure('PUBLIC_BILLING_DATABASE_ERROR', $exception);
+            $this->jsonError('Error interno del servidor', 500);
         } catch (\RuntimeException $exception) {
-            $this->jsonError($exception->getMessage(), 409);
+            $this->logInternalFailure('PUBLIC_BILLING_RUNTIME_ERROR', $exception);
+            $this->jsonError('No se pudo completar la operacion de facturacion.', 409);
         } catch (\Throwable $exception) {
-            error_log('[PUBLIC_BILLING_ERROR] ' . $exception->getMessage());
+            $this->logInternalFailure('PUBLIC_BILLING_ERROR', $exception);
             $this->jsonError('Error interno del servidor', 500);
         }
     }
@@ -234,9 +289,17 @@ final class PublicBillingController {
                 $this->fileUnavailableDetails($documentType)
             );
         } catch (\Throwable $exception) {
-            error_log('[PUBLIC_BILLING_FILE_ERROR] ' . $exception->getMessage());
+            $this->logInternalFailure('PUBLIC_BILLING_FILE_ERROR', $exception);
             $this->jsonError('Error interno del servidor', 500);
         }
+    }
+
+    private function logInternalFailure(string $event, \Throwable $exception): void {
+        error_log(json_encode([
+            'event' => $event,
+            'error_type' => $exception::class,
+            'exception_code' => (int)$exception->getCode(),
+        ], JSON_UNESCAPED_SLASHES));
     }
 
     private function fileErrorStatus(BillingApiException $exception): int {

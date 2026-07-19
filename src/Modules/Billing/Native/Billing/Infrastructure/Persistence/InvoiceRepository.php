@@ -4,13 +4,21 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Persistence;
 
+use App\Shared\Tax\EcuadorSriVatCatalog;
 use BillingService\Billing\Domain\Entities\Invoice;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipher;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipherFactory;
 use DateTimeImmutable;
 use PDO;
 
 class InvoiceRepository
 {
-    public function __construct(private readonly PDO $connection) {}
+    private readonly BillingSecretCipher $secretCipher;
+
+    public function __construct(private readonly PDO $connection, ?BillingSecretCipher $secretCipher = null)
+    {
+        $this->secretCipher = $secretCipher ?? BillingSecretCipherFactory::fromEnvironment();
+    }
 
     public function tryAcquireMaintenanceLock(string $accessKey): bool
     {
@@ -53,7 +61,8 @@ class InvoiceRepository
     private function sourceReferenceLockKey(array $clientContext, string $sourceReference): string
     {
         return sprintf(
-            'invoice-source-reference:%d:%d:%s',
+            'invoice-source-reference:%s:%d:%d:%s',
+            $this->requiredTenantId($clientContext),
             (int) ($clientContext['client_id'] ?? 0),
             (int) ($clientContext['resolved_branch_id'] ?? $clientContext['branch_id'] ?? 0),
             trim($sourceReference)
@@ -73,6 +82,7 @@ class InvoiceRepository
                 updated_at = NOW()
             FROM invoice_retry_settings AS irs
             WHERE COALESCE(ih.reintento, FALSE) = TRUE
+              AND irs.tenant_id = ih.tenant_id
               AND irs.ambiente = COALESCE(ih.ambiente, 'pruebas')
               AND (
                     irs.is_active = FALSE
@@ -91,10 +101,11 @@ class InvoiceRepository
             UPDATE invoice_headers AS ih
             SET reintento = FALSE,
                 updated_at = NOW()
-            FROM client_branches AS b
-            LEFT JOIN invoice_retry_settings AS irs ON TRUE
+            FROM client_branches AS b, invoice_retry_settings AS irs
             WHERE COALESCE(ih.reintento, FALSE) = TRUE
+              AND b.tenant_id = ih.tenant_id
               AND b.id = ih.branch_id
+              AND irs.tenant_id = ih.tenant_id
               AND irs.ambiente = COALESCE(ih.ambiente, 'pruebas')
               AND (
                     COALESCE(ih.intentos, 0) >= COALESCE(irs.max_attempts, :default_max_attempts)
@@ -117,6 +128,7 @@ class InvoiceRepository
 
     public function incrementRetryAttempts(string $accessKey, array $clientContext): void
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $scopeBranchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -125,10 +137,12 @@ class InvoiceRepository
                 SET intentos = COALESCE(intentos, 0) + 1,
                     updated_at = NOW()
                 WHERE access_key = :access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id';
 
         $parameters = [
             'access_key' => $accessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -150,6 +164,7 @@ class InvoiceRepository
         $statement = $this->connection->prepare(<<<'SQL'
             SELECT
                 ih.access_key,
+                ih.tenant_id,
                 ih.issue_date,
                 ih.sri_status,
                 COALESCE(ih.intentos, 0) AS intentos,
@@ -196,11 +211,12 @@ class InvoiceRepository
                 b.reply_to_address,
                 b.reply_to_name
             FROM invoice_headers ih
-            INNER JOIN clients c ON c.id = ih.client_id AND c.is_active = TRUE
-            LEFT JOIN api_keys ak ON ak.id = ih.api_key_id
-            LEFT JOIN client_branches b ON b.id = ih.branch_id
+            INNER JOIN clients c ON c.tenant_id = ih.tenant_id AND c.id = ih.client_id AND c.is_active = TRUE
+            LEFT JOIN api_keys ak ON ak.tenant_id = ih.tenant_id AND ak.id = ih.api_key_id
+            LEFT JOIN client_branches b ON b.tenant_id = ih.tenant_id AND b.id = ih.branch_id
             LEFT JOIN invoice_retry_settings irs
-                ON irs.ambiente = COALESCE(ih.ambiente, 'pruebas')
+                ON irs.tenant_id = ih.tenant_id
+               AND irs.ambiente = COALESCE(ih.ambiente, 'pruebas')
                AND irs.is_active = TRUE
             WHERE COALESCE(ih.reintento, FALSE) = TRUE
               AND COALESCE(ih.authorized_xml_received, FALSE) = FALSE
@@ -215,7 +231,15 @@ class InvoiceRepository
                     ih.last_sri_check_at IS NULL
                     OR ih.last_sri_check_at <= NOW() - (GREATEST(COALESCE(irs.delay_seconds, :min_age_seconds), :min_age_seconds) * INTERVAL '1 second')
               )
-            ORDER BY ih.last_sri_check_at ASC NULLS FIRST, ih.created_at ASC
+            ORDER BY
+                ROW_NUMBER() OVER (
+                    PARTITION BY ih.tenant_id
+                    ORDER BY ih.last_sri_check_at ASC NULLS FIRST, ih.created_at ASC, ih.access_key ASC
+                ) ASC,
+                ih.last_sri_check_at ASC NULLS FIRST,
+                ih.created_at ASC,
+                ih.tenant_id ASC,
+                ih.access_key ASC
             LIMIT :limit
             SQL
         );
@@ -225,44 +249,94 @@ class InvoiceRepository
         $statement->execute();
 
         $rows = $statement->fetchAll();
+        $candidates = [];
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if (!is_array($row)) {
+                throw new \RuntimeException('Billing recovery read an invalid candidate.');
+            }
+            $candidates[] = $this->decryptCandidateSecrets($row);
+        }
 
-        return is_array($rows) ? $rows : [];
+        return $candidates;
     }
 
-    public function nextSequentialForBranchAndEnvironment(int $branchId, string $environment): string
+    private function decryptCandidateSecrets(array $candidate): array
     {
+        $tenantId = trim((string)($candidate['tenant_id'] ?? ''));
+        $branchId = (int)($candidate['resolved_branch_id'] ?? 0);
+        if ($tenantId === '' || $branchId <= 0) {
+            throw new \RuntimeException('Billing recovery secret context is incomplete.');
+        }
+
+        $certificate = $candidate['certificate_password'] ?? null;
+        if (!is_string($certificate)) {
+            throw new \RuntimeException('Billing recovery certificate secret is missing.');
+        }
+        $candidate['certificate_password'] = $this->secretCipher->decryptStored(
+            $certificate,
+            $tenantId,
+            $branchId,
+            'certificate_password'
+        );
+
+        if ($candidate['mail_password'] !== null) {
+            if (!is_string($candidate['mail_password'])) {
+                throw new \RuntimeException('Billing recovery mail secret is malformed.');
+            }
+            $candidate['mail_password'] = $this->secretCipher->decryptStored(
+                $candidate['mail_password'],
+                $tenantId,
+                $branchId,
+                'mail_password'
+            );
+        }
+
+        return $candidate;
+    }
+
+    public function nextSequentialForBranchAndEnvironment(array $clientContext, int $branchId, string $environment): string
+    {
+        $tenantId = $this->requiredTenantId($clientContext);
         $this->connection->beginTransaction();
 
         try {
             $ensureStatement = $this->connection->prepare(
-                'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
-                 VALUES (:branch_id, :ambiente, 0, NOW())
-                 ON CONFLICT (branch_id, ambiente) DO NOTHING'
+                'INSERT INTO branch_sequences (tenant_id, branch_id, ambiente, current_value, updated_at)
+                 VALUES (:tenant_id, :branch_id, :ambiente, 0, NOW())
+                 ON CONFLICT (tenant_id, branch_id, ambiente) DO NOTHING'
             );
             $ensureStatement->execute([
+                'tenant_id' => $tenantId,
                 'branch_id' => $branchId,
                 'ambiente' => $environment,
             ]);
 
             $lockStatement = $this->connection->prepare(
                 'SELECT current_value
-                   FROM branch_sequences
-                  WHERE branch_id = :branch_id
+                  FROM branch_sequences
+                  WHERE tenant_id = :tenant_id
+                    AND branch_id = :branch_id
                     AND ambiente = :ambiente
                   FOR UPDATE'
             );
             $lockStatement->execute([
+                'tenant_id' => $tenantId,
                 'branch_id' => $branchId,
                 'ambiente' => $environment,
             ]);
 
-            $candidate = max(1, ((int) $lockStatement->fetchColumn()) + 1);
+            $currentValue = $lockStatement->fetchColumn();
+            if ($currentValue === false) {
+                throw new \RuntimeException('El secuencial fiscal no pertenece al tenant autenticado.');
+            }
+            $candidate = max(1, ((int) $currentValue) + 1);
             $usageStatement = $this->connection->prepare(
                 'SELECT access_key,
                         source_reference,
                         UPPER(COALESCE(sri_status, \'\')) AS sri_status
                    FROM invoice_headers
-                  WHERE branch_id = :branch_id
+                  WHERE tenant_id = :tenant_id
+                    AND branch_id = :branch_id
                     AND ambiente = :ambiente
                     AND sequential = :sequential
                     AND cancelled_at IS NULL
@@ -296,6 +370,7 @@ class InvoiceRepository
             while (true) {
                 $sequential = str_pad((string) $candidate, 9, '0', STR_PAD_LEFT);
                 $usageStatement->execute([
+                    'tenant_id' => $tenantId,
                     'branch_id' => $branchId,
                     'ambiente' => $environment,
                     'sequential' => $sequential,
@@ -321,33 +396,58 @@ class InvoiceRepository
         }
     }
 
-    public function markSequentialConsumed(int $branchId, string $environment, string $sequential): void
+    public function markSequentialConsumed(array $clientContext, int $branchId, string $environment, string $sequential): void
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $consumedValue = (int) ltrim($sequential, '0');
         if ($consumedValue < 1) {
             return;
         }
 
         $statement = $this->connection->prepare(
-            'INSERT INTO branch_sequences (branch_id, ambiente, current_value, updated_at)
-             VALUES (:branch_id, :ambiente, :current_value, NOW())
-             ON CONFLICT (branch_id, ambiente)
+            'INSERT INTO branch_sequences (tenant_id, branch_id, ambiente, current_value, updated_at)
+             VALUES (:tenant_id, :branch_id, :ambiente, :current_value, NOW())
+             ON CONFLICT (tenant_id, branch_id, ambiente)
              DO UPDATE SET current_value = GREATEST(branch_sequences.current_value, EXCLUDED.current_value),
                            updated_at = NOW()'
         );
         $statement->execute([
+            'tenant_id' => $tenantId,
             'branch_id' => $branchId,
             'ambiente' => $environment,
             'current_value' => $consumedValue,
         ]);
+        if ($statement->rowCount() !== 1) {
+            throw new \RuntimeException('El secuencial fiscal no pertenece al tenant autenticado.');
+        }
+    }
+
+    public function advanceSequentialAfterSriCollision(
+        array $clientContext,
+        int $branchId,
+        string $environment,
+        string $rejectedSequential
+    ): void {
+        $numeric = (int) ltrim($rejectedSequential, '0');
+        if ($numeric < 1) {
+            throw new \InvalidArgumentException('El secuencial rechazado por el SRI no es valido.');
+        }
+
+        // There is no SRI web-service operation that returns the maximum
+        // sequential. A code 45 only proves that this exact number is occupied;
+        // consume it and let the allocator try the immediately following value.
+        $this->markSequentialConsumed(
+            $clientContext,
+            $branchId,
+            $environment,
+            str_pad((string) $numeric, 9, '0', STR_PAD_LEFT)
+        );
     }
 
     public function createDraftInvoice(array $clientContext, Invoice $invoice, array $requestPayload, string $signedXmlPath): int
     {
-        $tenantId = trim((string)($clientContext['tenant_id'] ?? ''));
-        $billingCustomerId = $tenantId !== ''
-            ? $this->upsertBillingCustomer($tenantId, $invoice)
-            : null;
+        $tenantId = $this->requiredTenantId($clientContext);
+        $billingCustomerId = $this->upsertBillingCustomer($tenantId, $invoice);
         $statement = $this->connection->prepare(
             'INSERT INTO invoice_headers (
                 tenant_id,
@@ -407,7 +507,7 @@ class InvoiceRepository
         );
 
         $params = [
-            'tenant_id' => $tenantId !== '' ? $tenantId : null,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
             'branch_id' => (int) $clientContext['resolved_branch_id'],
             'api_key_id' => (int) $clientContext['api_key_id'],
@@ -438,7 +538,7 @@ class InvoiceRepository
         $statement->execute($params);
 
         $invoiceId = (int) $statement->fetchColumn();
-        $this->insertInvoiceDetails($invoiceId, $invoice);
+        $this->insertInvoiceDetails($tenantId, $invoiceId, $invoice);
 
         return $invoiceId;
     }
@@ -478,6 +578,7 @@ class InvoiceRepository
         string $newAccessKey,
         string $reason
     ): void {
+        $tenantId = $this->requiredTenantId($clientContext);
         $scopeBranchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -498,6 +599,7 @@ class InvoiceRepository
                     raw_response = COALESCE(raw_response, \'{}\'::jsonb) || CAST(:raw_response_patch AS JSONB),
                     updated_at = NOW()
                 WHERE access_key = :old_access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id
                   AND UPPER(COALESCE(sri_status, \'\')) <> \'AUTORIZADO\'';
 
@@ -507,6 +609,7 @@ class InvoiceRepository
             'new_access_key' => $newAccessKey,
             'raw_response_patch' => json_encode($patch, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             'old_access_key' => $oldAccessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -529,6 +632,7 @@ class InvoiceRepository
 
     public function linkReplacementToOriginal(string $newAccessKey, array $clientContext, string $oldAccessKey): void
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $scopeBranchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -537,11 +641,13 @@ class InvoiceRepository
                 SET replaced_access_key = :old_access_key,
                     updated_at = NOW()
                 WHERE access_key = :new_access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id';
 
         $parameters = [
             'old_access_key' => $oldAccessKey,
             'new_access_key' => $newAccessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -560,6 +666,7 @@ class InvoiceRepository
 
     public function updateStatus(string $accessKey, array $clientContext, array $data): void
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $scopeBranchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -576,6 +683,7 @@ class InvoiceRepository
                     last_sri_check_at = NOW(),
                     updated_at = NOW()
                 WHERE access_key = :access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id';
 
         $parameters = [
@@ -588,6 +696,7 @@ class InvoiceRepository
             'authorized_xml_received' => (bool) ($data['authorized_xml_received'] ?? false),
             'reintento' => array_key_exists('reintento', $data) ? (bool) $data['reintento'] : null,
             'access_key' => $accessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -622,6 +731,7 @@ class InvoiceRepository
 
     public function markMailAsSent(string $accessKey, array $clientContext): void
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $scopeBranchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -630,10 +740,12 @@ class InvoiceRepository
                 SET mail_sent_at = COALESCE(mail_sent_at, NOW()),
                     updated_at = NOW()
                 WHERE access_key = :access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id';
 
         $parameters = [
             'access_key' => $accessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -654,17 +766,27 @@ class InvoiceRepository
 
     public function findInvoiceForClient(string $accessKey, array $clientContext): ?array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $branchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
 
-        $sql = 'SELECT *
+        $sql = 'SELECT id, tenant_id, client_id, branch_id, api_key_id, source_reference,
+                       access_key, authorization_number, authorization_date, issue_date,
+                       customer_name, customer_identification, customer_email,
+                       total_with_tax, establishment_code, emission_point,
+                       sequential, ambiente, sri_status, sri_messages, raw_request, raw_response, authorized_xml_path,
+                       authorized_xml_received, cancelled_at, cancellation_reason,
+                       replacement_access_key, replaced_access_key,
+                       reintento, intentos, mail_sent_at, last_sri_check_at, created_at, updated_at
                 FROM invoice_headers
                 WHERE access_key = :access_key
+                  AND tenant_id = :tenant_id
                   AND client_id = :client_id';
 
         $parameters = [
             'access_key' => $accessKey,
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -693,6 +815,7 @@ class InvoiceRepository
 
     public function findActiveInvoiceBySourceReference(array $clientContext, string $sourceReference): ?array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $sourceReference = trim($sourceReference);
         if ($sourceReference === '') {
             return null;
@@ -704,7 +827,8 @@ class InvoiceRepository
 
         $sql = 'SELECT *
                 FROM invoice_headers
-                WHERE client_id = :client_id
+                WHERE tenant_id = :tenant_id
+                  AND client_id = :client_id
                   AND source_reference = :source_reference
                   AND cancelled_at IS NULL
                   AND replacement_access_key IS NULL
@@ -727,6 +851,7 @@ class InvoiceRepository
                   )';
 
         $parameters = [
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
             'source_reference' => $sourceReference,
         ];
@@ -756,6 +881,7 @@ class InvoiceRepository
 
     public function listRideInvoicesForClient(array $clientContext, int $limit = 100, bool $includeCancelled = false): array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $branchId = isset($clientContext['branch_id']) && $clientContext['branch_id'] !== null
             ? (int) $clientContext['branch_id']
             : null;
@@ -787,9 +913,11 @@ class InvoiceRepository
                     created_at,
                     updated_at
                 FROM invoice_headers
-                WHERE client_id = :client_id';
+                WHERE tenant_id = :tenant_id
+                  AND client_id = :client_id';
 
         $parameters = [
+            'tenant_id' => $tenantId,
             'client_id' => (int) $clientContext['client_id'],
         ];
 
@@ -828,8 +956,9 @@ class InvoiceRepository
         return is_array($rows) ? $rows : [];
     }
 
-    public function findInvoiceDetailsForHeader(int $invoiceHeaderId): array
+    public function findInvoiceDetailsForHeader(array $clientContext, int $invoiceHeaderId): array
     {
+        $tenantId = $this->requiredTenantId($clientContext);
         $statement = $this->connection->prepare(
             'SELECT
                 line_number,
@@ -842,11 +971,16 @@ class InvoiceRepository
                 discount,
                 line_subtotal,
                 tax_amount,
-                tax_rate
+                tax_rate,
+                tax_code,
+                tax_percentage_code,
+                tax_treatment
             FROM invoice_details
-            WHERE invoice_header_id = :invoice_header_id
+            WHERE tenant_id = :tenant_id
+              AND invoice_header_id = :invoice_header_id
             ORDER BY line_number ASC'
         );
+        $statement->bindValue(':tenant_id', $tenantId, PDO::PARAM_STR);
         $statement->bindValue(':invoice_header_id', $invoiceHeaderId, PDO::PARAM_INT);
         $statement->execute();
 
@@ -855,10 +989,11 @@ class InvoiceRepository
         return is_array($rows) ? $rows : [];
     }
 
-    private function insertInvoiceDetails(int $invoiceId, Invoice $invoice): void
+    private function insertInvoiceDetails(string $tenantId, int $invoiceId, Invoice $invoice): void
     {
         $statement = $this->connection->prepare(
             'INSERT INTO invoice_details (
+                tenant_id,
                 invoice_header_id,
                 line_number,
                 product_code,
@@ -870,8 +1005,12 @@ class InvoiceRepository
                 discount,
                 line_subtotal,
                 tax_amount,
-                tax_rate
+                tax_rate,
+                tax_code,
+                tax_percentage_code,
+                tax_treatment
             ) VALUES (
+                :tenant_id,
                 :invoice_header_id,
                 :line_number,
                 :product_code,
@@ -883,18 +1022,44 @@ class InvoiceRepository
                 :discount,
                 :line_subtotal,
                 :tax_amount,
-                :tax_rate
+                :tax_rate,
+                :tax_code,
+                :tax_percentage_code,
+                :tax_treatment
             )'
         );
 
         foreach ($invoice->items() as $index => $item) {
+            foreach (['taxRate', 'taxCode', 'taxPercentageCode', 'taxTreatment', 'taxAmount'] as $required) {
+                if (!array_key_exists($required, $item)) {
+                    throw new \InvalidArgumentException(sprintf(
+                        'Invoice detail is missing required fiscal identity field %s.',
+                        $required
+                    ));
+                }
+            }
             $quantity = (float) ($item['quantity'] ?? 0);
             $unitPrice = (float) ($item['unitPrice'] ?? 0);
             $discount = (float) ($item['discount'] ?? 0);
             $lineSubtotal = (float) ($item['lineSubtotal'] ?? (($quantity * $unitPrice) - $discount));
-            $taxAmount = (float) ($item['taxAmount'] ?? ($lineSubtotal * ((float) ($item['taxRate'] ?? 15) / 100)));
+            $taxAmount = (float) $item['taxAmount'];
+            $taxRate = EcuadorSriVatCatalog::assertSupportedRate($item['taxRate']);
+            $taxCode = trim((string)$item['taxCode']);
+            if ($taxCode !== EcuadorSriVatCatalog::TAX_CODE) {
+                throw new \InvalidArgumentException('Invoice detail contains an unsupported SRI tax code.');
+            }
+            $taxTreatment = EcuadorSriVatCatalog::normalizeTreatment($item['taxTreatment']);
+            if ($taxTreatment === null) {
+                throw new \InvalidArgumentException('Invoice detail taxTreatment is required.');
+            }
+            $taxPercentageCode = EcuadorSriVatCatalog::assertCodeMatches(
+                $taxRate,
+                $taxTreatment,
+                $item['taxPercentageCode']
+            );
 
             $statement->execute([
+                'tenant_id' => $tenantId,
                 'invoice_header_id' => $invoiceId,
                 'line_number' => $index + 1,
                 'product_code' => $item['code'] ?? null,
@@ -906,7 +1071,10 @@ class InvoiceRepository
                 'discount' => $discount,
                 'line_subtotal' => round($lineSubtotal, 6),
                 'tax_amount' => round($taxAmount, 6),
-                'tax_rate' => round((float) ($item['taxRate'] ?? 15), 2),
+                'tax_rate' => $taxRate,
+                'tax_code' => $taxCode,
+                'tax_percentage_code' => $taxPercentageCode,
+                'tax_treatment' => $taxTreatment,
             ]);
         }
     }
@@ -922,5 +1090,15 @@ class InvoiceRepository
         }
 
         return null;
+    }
+
+    private function requiredTenantId(array $clientContext): string
+    {
+        $tenantId = trim((string)($clientContext['tenant_id'] ?? ''));
+        if ($tenantId === '') {
+            throw new \RuntimeException('La operacion fiscal no tiene un tenant_id resuelto.');
+        }
+
+        return $tenantId;
     }
 }

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Services;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
+use App\Shared\Tax\EcuadorSriVatSummary;
 use BillingService\Billing\Infrastructure\Persistence\InvoiceRepository;
 use DateTimeImmutable;
 use DOMDocument;
@@ -14,9 +16,6 @@ use Psr\Log\LoggerInterface;
 
 class AuthorizedInvoiceMailer
 {
-    private const SIGNED_XML_DIRECTORY = '/var/www/html/storage/billing/xml/firmados';
-    private const AUTHORIZED_XML_DIRECTORY = '/var/www/html/storage/billing/xml/autorizados';
-
     public function __construct(
         private readonly RidePdfGenerator $ridePdfGenerator,
         private readonly LoggerInterface $logger,
@@ -49,12 +48,14 @@ class AuthorizedInvoiceMailer
         } catch (MailException $exception) {
             $this->logger->error('[Mail] Error enviando correo de factura', [
                 'access_key' => $accessKey,
-                'error' => $exception->getMessage(),
+                'error_type' => $exception::class,
+                'error_code' => (int)$exception->getCode(),
             ]);
         } catch (\RuntimeException $exception) {
             $this->logger->warning('[Mail] No fue posible enviar correo de factura', [
                 'access_key' => $accessKey,
-                'error' => $exception->getMessage(),
+                'error_type' => $exception::class,
+                'error_code' => (int)$exception->getCode(),
             ]);
         }
     }
@@ -139,11 +140,14 @@ class AuthorizedInvoiceMailer
             'issue_date' => $this->queryString($xpath, '//infoFactura/fechaEmision'),
             'subtotal' => $this->queryString($xpath, '//infoFactura/totalSinImpuestos'),
             'subtotal_0' => $summary['subtotal_0'],
+            'subtotal_exempt' => $summary['subtotal_exempt'],
+            'subtotal_taxed' => $summary['subtotal_taxed'],
             'subtotal_15' => $summary['subtotal_15'],
             'discount_total' => $this->queryString($xpath, '//infoFactura/totalDescuento'),
             'iva_15' => $summary['iva_15'],
+            'tax_summary' => $summary['tax_summary'],
             'service_10' => $this->queryString($xpath, '//infoFactura/propina'),
-            'tax_total' => $this->queryString($xpath, 'sum(//infoFactura/totalConImpuestos/totalImpuesto/valor)'),
+            'tax_total' => $summary['tax_total'],
             'total' => $this->queryString($xpath, '//infoFactura/importeTotal'),
             'payments' => $payments,
             'payment_method' => $payments[0]['method'] ?? '',
@@ -164,28 +168,32 @@ class AuthorizedInvoiceMailer
 
     private function extractSummaryData(DOMXPath $xpath): array
     {
-        $subtotal0 = 0.0;
-        $subtotal15 = 0.0;
-        $iva15 = 0.0;
+        $entries = [];
 
         foreach ($xpath->query('//infoFactura/totalConImpuestos/totalImpuesto') as $taxNode) {
-            $taxCode = $this->queryString($xpath, 'codigo', $taxNode);
-            $percentageCode = $this->queryString($xpath, 'codigoPorcentaje', $taxNode);
-
-            if ($taxCode === '2' && $percentageCode === '0') {
-                $subtotal0 += (float) $this->queryString($xpath, 'baseImponible', $taxNode);
-            }
-
-            if ($taxCode === '2' && $percentageCode === '4') {
-                $subtotal15 += (float) $this->queryString($xpath, 'baseImponible', $taxNode);
-                $iva15 += (float) $this->queryString($xpath, 'valor', $taxNode);
-            }
+            $entries[] = [
+                'tax_code' => $this->queryString($xpath, 'codigo', $taxNode),
+                'percentage_code' => $this->queryString($xpath, 'codigoPorcentaje', $taxNode),
+                'base' => $this->queryString($xpath, 'baseImponible', $taxNode),
+                'amount' => $this->queryString($xpath, 'valor', $taxNode),
+            ];
         }
 
+        $summary = EcuadorSriVatSummary::summarize($entries);
+
         return [
-            'subtotal_0' => number_format($subtotal0, 2, '.', ''),
-            'subtotal_15' => number_format($subtotal15, 2, '.', ''),
-            'iva_15' => number_format($iva15, 2, '.', ''),
+            'subtotal_0' => number_format($summary['subtotal_zero_rated'], 2, '.', ''),
+            'subtotal_exempt' => number_format($summary['subtotal_exempt'], 2, '.', ''),
+            'subtotal_taxed' => number_format($summary['subtotal_taxed'], 2, '.', ''),
+            'subtotal_15' => number_format($summary['subtotal_15'], 2, '.', ''),
+            'iva_15' => number_format($summary['iva_15'], 2, '.', ''),
+            'tax_total' => number_format($summary['tax_total'], 2, '.', ''),
+            'tax_summary' => array_map(static fn(array $group): array => [
+                ...$group,
+                'rate' => $group['rate'] === null ? null : number_format($group['rate'], 2, '.', ''),
+                'base' => number_format($group['base'], 2, '.', ''),
+                'amount' => number_format($group['amount'], 2, '.', ''),
+            ], $summary['groups']),
         ];
     }
 
@@ -247,13 +255,15 @@ class AuthorizedInvoiceMailer
             <p><strong>Número de autorización:</strong> %s<br>
             <strong>Fecha de autorización:</strong> %s<br>
             <strong>Total:</strong> %s USD</p>
+            <p><strong>Resumen tributario:</strong><br>%s</p>
             <p>Adjuntamos el RIDE en PDF y el XML firmado.</p>
             <p>Este correo fue generado automáticamente.</p>',
             htmlspecialchars($invoiceData['customer_name'], ENT_QUOTES, 'UTF-8'),
             htmlspecialchars($invoiceData['formatted_sequential'], ENT_QUOTES, 'UTF-8'),
             htmlspecialchars($authorizationNumber ?? 'PENDIENTE', ENT_QUOTES, 'UTF-8'),
             htmlspecialchars($authorizationDate ?? 'PENDIENTE', ENT_QUOTES, 'UTF-8'),
-            htmlspecialchars($invoiceData['total'], ENT_QUOTES, 'UTF-8')
+            htmlspecialchars($invoiceData['total'], ENT_QUOTES, 'UTF-8'),
+            $this->buildTaxSummaryMailHtml($invoiceData)
         );
     }
 
@@ -265,12 +275,37 @@ class AuthorizedInvoiceMailer
             <p><strong>Factura:</strong> %s<br>
             <strong>Total:</strong> %s USD<br>
             <strong>XML autorizado disponible:</strong> %s</p>
+            <p><strong>Resumen tributario:</strong><br>%s</p>
             <p>Se adjunta el RIDE generado con la información actual y el XML firmado disponible en la aplicación.</p>',
             htmlspecialchars($invoiceData['customer_name'], ENT_QUOTES, 'UTF-8'),
             htmlspecialchars($invoiceData['formatted_sequential'], ENT_QUOTES, 'UTF-8'),
             htmlspecialchars($invoiceData['total'], ENT_QUOTES, 'UTF-8'),
-            $authorizedXmlExists ? 'SI' : 'NO'
+            $authorizedXmlExists ? 'SI' : 'NO',
+            $this->buildTaxSummaryMailHtml($invoiceData)
         );
+    }
+
+    private function buildTaxSummaryMailHtml(array $invoiceData): string
+    {
+        $lines = [];
+        foreach ($invoiceData['tax_summary'] ?? [] as $group) {
+            if (!is_array($group)) {
+                continue;
+            }
+            $label = htmlspecialchars((string)($group['label'] ?? 'Impuesto'), ENT_QUOTES, 'UTF-8');
+            $base = htmlspecialchars((string)($group['base'] ?? '0.00'), ENT_QUOTES, 'UTF-8');
+            $amount = (float)($group['amount'] ?? 0);
+            $lines[] = sprintf('Base %s: %s USD', $label, $base);
+            if ($amount > 0.0) {
+                $lines[] = sprintf(
+                    '%s: %s USD',
+                    $label,
+                    htmlspecialchars(number_format($amount, 2, '.', ''), ENT_QUOTES, 'UTF-8')
+                );
+            }
+        }
+
+        return $lines === [] ? 'Sin desglose tributario.' : implode('<br>', $lines);
     }
 
     private function normalizeAuthorizationDate(DateTimeImmutable|string|null $authorizationDate): ?string
@@ -301,11 +336,12 @@ class AuthorizedInvoiceMailer
             throw new \RuntimeException('El envío de correo está deshabilitado.');
         }
 
-        $signedXmlPath = sprintf('%s/%s.xml', self::SIGNED_XML_DIRECTORY, $accessKey);
-        $authorizedXmlPath = sprintf('%s/%s.xml', self::AUTHORIZED_XML_DIRECTORY, $accessKey);
-        $authorizedXmlExists = is_file($authorizedXmlPath);
+        $artifacts = new BillingArtifactStorage();
+        $signedXmlReference = $artifacts->xmlReference('firmados', $accessKey);
+        $authorizedXmlReference = $artifacts->xmlReference('autorizados', $accessKey);
+        $authorizedXmlExists = $artifacts->exists($authorizedXmlReference);
 
-        if (!is_file($signedXmlPath)) {
+        if (!$artifacts->exists($signedXmlReference)) {
             throw new \RuntimeException('No existe el XML firmado para la clave indicada.');
         }
 
@@ -313,18 +349,20 @@ class AuthorizedInvoiceMailer
             throw new \RuntimeException('El XML autorizado aún no está disponible para la clave indicada.');
         }
 
+        $signedXmlPath = $artifacts->materialize($signedXmlReference);
         $invoiceData = $this->extractInvoiceData($signedXmlPath);
         if ($invoiceData['customer_email'] === '') {
             throw new \RuntimeException('La factura no contiene correo del cliente en el XML firmado.');
         }
 
         $authorizationDateText = $this->normalizeAuthorizationDate($authorizationDate);
-        $ridePdfPath = $this->ridePdfGenerator->generate(
+        $ridePdfReference = $this->ridePdfGenerator->generate(
             $accessKey,
             $invoiceData,
             $authorizationNumber,
             $authorizationDateText
         );
+        $ridePdfPath = $artifacts->materialize($ridePdfReference);
 
         $mailer = new PHPMailer(true);
         $mailer->isSMTP();

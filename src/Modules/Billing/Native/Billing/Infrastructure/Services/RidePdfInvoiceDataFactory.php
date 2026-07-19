@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Services;
 
+use App\Shared\Tax\EcuadorSriVatCatalog;
+use App\Shared\Tax\EcuadorSriVatSummary;
 use DOMDocument;
 use DOMXPath;
 
@@ -17,19 +19,29 @@ class RidePdfInvoiceDataFactory
 
         $rawRequest = $this->decodeJson($invoice['raw_request'] ?? null);
         $additionalInfo = is_array($rawRequest['additional_info'] ?? null) ? $rawRequest['additional_info'] : [];
-        $subtotal0 = 0.0;
-        $subtotalTaxed = 0.0;
+        $calculatedSubtotal = 0.0;
+        $taxEntries = [];
         $items = [];
 
         foreach ($details as $detail) {
             $lineSubtotal = (float) ($detail['line_subtotal'] ?? 0);
-            $taxRate = (float) ($detail['tax_rate'] ?? 0);
-
-            if ($taxRate <= 0.0) {
-                $subtotal0 += $lineSubtotal;
-            } else {
-                $subtotalTaxed += $lineSubtotal;
-            }
+            $calculatedSubtotal += $lineSubtotal;
+            $taxRate = EcuadorSriVatCatalog::assertSupportedRate($detail['tax_rate'] ?? 0);
+            $taxCode = trim((string)($detail['tax_code'] ?? EcuadorSriVatCatalog::TAX_CODE));
+            $percentageCode = trim((string)($detail['tax_percentage_code'] ?? ''));
+            $treatment = EcuadorSriVatCatalog::normalizeTreatment($detail['tax_treatment'] ?? null)
+                ?? EcuadorSriVatCatalog::inferTreatment($taxRate, $percentageCode);
+            $percentageCode = $percentageCode === ''
+                ? EcuadorSriVatCatalog::percentageCode($taxRate, $treatment)
+                : EcuadorSriVatCatalog::assertCodeMatches($taxRate, $treatment, $percentageCode);
+            $taxEntries[] = [
+                'tax_code' => $taxCode,
+                'percentage_code' => $percentageCode,
+                'rate' => $taxRate,
+                'treatment' => $treatment,
+                'base' => $lineSubtotal,
+                'amount' => $detail['tax_amount'] ?? 0,
+            ];
 
             $items[] = [
                 'code' => (string) ($detail['product_code'] ?? ''),
@@ -40,17 +52,26 @@ class RidePdfInvoiceDataFactory
                 'unit_price' => $this->formatNumber($detail['unit_price'] ?? 0, 6),
                 'discount' => $this->formatNumber($detail['discount'] ?? 0, 2),
                 'total' => $this->formatNumber($lineSubtotal, 2),
+                'tax_rate' => $this->formatNumber($taxRate, 2),
+                'tax_percentage_code' => $percentageCode,
+                'tax_treatment' => $treatment,
             ];
         }
 
-        $calculatedSubtotal = round($subtotal0 + $subtotalTaxed, 2);
+        $taxSummary = EcuadorSriVatSummary::summarize($taxEntries);
+        $calculatedSubtotal = round($calculatedSubtotal, 2);
         $total = (float) ($invoice['total_with_tax'] ?? 0);
         $subtotal = $calculatedSubtotal > 0
             ? $calculatedSubtotal
             : (float) ($invoice['subtotal_without_tax'] ?? 0);
-        $taxTotal = (float) ($invoice['total_tax'] ?? 0);
-        if ($taxTotal <= 0.0 && $total > $subtotal) {
-            $taxTotal = round($total - $subtotal, 2);
+        $taxTotal = round((float)$taxSummary['tax_total'], 2);
+        $storedTaxTotal = round((float)($invoice['total_tax'] ?? $taxTotal), 2);
+        if (abs($storedTaxTotal - $taxTotal) > 0.01) {
+            throw new \RuntimeException(sprintf(
+                'La factura persistida tiene un total IVA incoherente: cabecera %.2f, detalles %.2f.',
+                $storedTaxTotal,
+                $taxTotal
+            ));
         }
         $paymentMethod = (string) (($invoice['payment_method_label'] ?? '') ?: 'Sin utilizacion del sistema financiero');
         $paymentTotal = $total > 0 ? $total : ($subtotal + $taxTotal);
@@ -78,10 +99,13 @@ class RidePdfInvoiceDataFactory
             'environment' => $ambiente === 'produccion' ? 'PRODUCCION' : 'PRUEBAS',
             'access_key' => (string) ($invoice['access_key'] ?? ''),
             'subtotal' => $this->formatNumber($subtotal, 2),
-            'subtotal_0' => $this->formatNumber($subtotal0, 2),
-            'subtotal_15' => $this->formatNumber($subtotalTaxed, 2),
+            'subtotal_0' => $this->formatNumber($taxSummary['subtotal_zero_rated'], 2),
+            'subtotal_exempt' => $this->formatNumber($taxSummary['subtotal_exempt'], 2),
+            'subtotal_taxed' => $this->formatNumber($taxSummary['subtotal_taxed'], 2),
+            'subtotal_15' => $this->formatNumber($taxSummary['subtotal_15'], 2),
             'discount_total' => $this->formatNumber($this->sumDetails($details, 'discount'), 2),
-            'iva_15' => $this->formatNumber($taxTotal, 2),
+            'iva_15' => $this->formatNumber($taxSummary['iva_15'], 2),
+            'tax_summary' => $this->formatTaxGroups($taxSummary['groups']),
             'service_10' => '0.00',
             'tax_total' => $this->formatNumber($taxTotal, 2),
             'total' => $this->formatNumber($paymentTotal, 2),
@@ -132,7 +156,7 @@ class RidePdfInvoiceDataFactory
                 }
             }
 
-            $items[] = [
+            $itemData = [
                 'code' => $this->queryString($xpath, 'codigoPrincipal', $detailNode),
                 'auxiliary_code' => $this->queryString($xpath, 'codigoAuxiliar', $detailNode),
                 'description' => $this->queryString($xpath, 'descripcion', $detailNode),
@@ -142,6 +166,19 @@ class RidePdfInvoiceDataFactory
                 'discount' => $this->queryString($xpath, 'descuento', $detailNode),
                 'total' => $this->queryString($xpath, 'precioTotalSinImpuesto', $detailNode),
             ];
+            $taxNodes = $xpath->query('impuestos/impuesto', $detailNode);
+            $taxNode = $taxNodes instanceof \DOMNodeList ? $taxNodes->item(0) : null;
+            if ($taxNode instanceof \DOMNode) {
+                $rate = EcuadorSriVatCatalog::assertSupportedRate(
+                    $this->queryString($xpath, 'tarifa', $taxNode)
+                );
+                $percentageCode = $this->queryString($xpath, 'codigoPorcentaje', $taxNode);
+                $treatment = EcuadorSriVatCatalog::inferTreatment($rate, $percentageCode);
+                $itemData['tax_rate'] = $this->formatNumber($rate, 2);
+                $itemData['tax_percentage_code'] = $percentageCode;
+                $itemData['tax_treatment'] = $treatment;
+            }
+            $items[] = $itemData;
         }
 
         $email = '';
@@ -169,11 +206,14 @@ class RidePdfInvoiceDataFactory
             'issue_date' => $this->queryString($xpath, '//infoFactura/fechaEmision'),
             'subtotal' => $this->queryString($xpath, '//infoFactura/totalSinImpuestos'),
             'subtotal_0' => $summary['subtotal_0'],
+            'subtotal_exempt' => $summary['subtotal_exempt'],
+            'subtotal_taxed' => $summary['subtotal_taxed'],
             'subtotal_15' => $summary['subtotal_15'],
             'discount_total' => $this->queryString($xpath, '//infoFactura/totalDescuento'),
             'iva_15' => $summary['iva_15'],
+            'tax_summary' => $summary['tax_summary'],
             'service_10' => $this->queryString($xpath, '//infoFactura/propina') ?: '0.00',
-            'tax_total' => $this->queryString($xpath, 'sum(//infoFactura/totalConImpuestos/totalImpuesto/valor)'),
+            'tax_total' => $summary['tax_total'],
             'total' => $total,
             'payment_method' => $payments[0]['method'] ?? '',
             'payment_total' => $payments[0]['total'] ?? $total,
@@ -219,7 +259,7 @@ class RidePdfInvoiceDataFactory
                 'discount' => $discount,
                 'line_subtotal' => round($lineSubtotal, 6),
                 'tax_amount' => round((float) ($item['tax_amount'] ?? $item['taxAmount'] ?? 0), 6),
-                'tax_rate' => (float) ($item['tax_rate'] ?? $item['taxRate'] ?? 0),
+                ...$this->taxProfileFromRawItem($item),
             ];
         }
 
@@ -228,29 +268,73 @@ class RidePdfInvoiceDataFactory
 
     private function extractSummaryData(DOMXPath $xpath): array
     {
-        $subtotal0 = 0.0;
-        $subtotal15 = 0.0;
-        $iva15 = 0.0;
+        $entries = [];
 
         foreach ($xpath->query('//infoFactura/totalConImpuestos/totalImpuesto') as $taxNode) {
-            $taxCode = $this->queryString($xpath, 'codigo', $taxNode);
-            $percentageCode = $this->queryString($xpath, 'codigoPorcentaje', $taxNode);
-
-            if ($taxCode === '2' && $percentageCode === '0') {
-                $subtotal0 += (float) $this->queryString($xpath, 'baseImponible', $taxNode);
-            }
-
-            if ($taxCode === '2' && $percentageCode === '4') {
-                $subtotal15 += (float) $this->queryString($xpath, 'baseImponible', $taxNode);
-                $iva15 += (float) $this->queryString($xpath, 'valor', $taxNode);
-            }
+            $entries[] = [
+                'tax_code' => $this->queryString($xpath, 'codigo', $taxNode),
+                'percentage_code' => $this->queryString($xpath, 'codigoPorcentaje', $taxNode),
+                'base' => $this->queryString($xpath, 'baseImponible', $taxNode),
+                'amount' => $this->queryString($xpath, 'valor', $taxNode),
+            ];
         }
 
+        $summary = EcuadorSriVatSummary::summarize($entries);
+
         return [
-            'subtotal_0' => $this->formatNumber($subtotal0, 2),
-            'subtotal_15' => $this->formatNumber($subtotal15, 2),
-            'iva_15' => $this->formatNumber($iva15, 2),
+            'subtotal_0' => $this->formatNumber($summary['subtotal_zero_rated'], 2),
+            'subtotal_exempt' => $this->formatNumber($summary['subtotal_exempt'], 2),
+            'subtotal_taxed' => $this->formatNumber($summary['subtotal_taxed'], 2),
+            'subtotal_15' => $this->formatNumber($summary['subtotal_15'], 2),
+            'iva_15' => $this->formatNumber($summary['iva_15'], 2),
+            'tax_summary' => $this->formatTaxGroups($summary['groups']),
+            'tax_total' => $this->formatNumber($summary['tax_total'], 2),
         ];
+    }
+
+    /** @return array{tax_rate: float, tax_code: string, tax_percentage_code: string, tax_treatment: string} */
+    private function taxProfileFromRawItem(array $item): array
+    {
+        $taxCode = trim((string)($item['tax_code'] ?? EcuadorSriVatCatalog::TAX_CODE));
+        if ($taxCode !== EcuadorSriVatCatalog::TAX_CODE) {
+            throw new \InvalidArgumentException('Billing raw invoice detail contains an unsupported tax code.');
+        }
+        $percentageCode = trim((string)($item['tax_percentage_code'] ?? $item['taxPercentageCode'] ?? ''));
+        $rawRate = $item['tax_rate'] ?? $item['taxRate'] ?? null;
+        if (($rawRate === null || $rawRate === '') && $percentageCode === '') {
+            throw new \InvalidArgumentException('Billing raw invoice detail lacks explicit IVA rate and SRI percentage code.');
+        }
+        $rate = ($rawRate === null || $rawRate === '') && $percentageCode !== ''
+            ? EcuadorSriVatCatalog::rateForPercentageCode($percentageCode)
+            : EcuadorSriVatCatalog::assertSupportedRate($rawRate);
+        $legacyExempt = filter_var($item['tax_exempt'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $treatment = EcuadorSriVatCatalog::normalizeTreatment(
+            $item['tax_treatment'] ?? ($legacyExempt ? EcuadorSriVatCatalog::TREATMENT_EXEMPT : null)
+        ) ?? EcuadorSriVatCatalog::inferTreatment($rate, $percentageCode);
+        $percentageCode = $percentageCode === ''
+            ? EcuadorSriVatCatalog::percentageCode($rate, $treatment)
+            : EcuadorSriVatCatalog::assertCodeMatches($rate, $treatment, $percentageCode);
+
+        return [
+            'tax_rate' => $rate,
+            'tax_code' => $taxCode,
+            'tax_percentage_code' => $percentageCode,
+            'tax_treatment' => $treatment,
+        ];
+    }
+
+    /** @param list<array<string, mixed>> $groups */
+    private function formatTaxGroups(array $groups): array
+    {
+        return array_map(fn(array $group): array => [
+            'tax_code' => (string)$group['tax_code'],
+            'percentage_code' => (string)$group['percentage_code'],
+            'rate' => $group['rate'] === null ? null : $this->formatNumber($group['rate'], 2),
+            'treatment' => (string)$group['treatment'],
+            'label' => (string)$group['label'],
+            'base' => $this->formatNumber($group['base'], 2),
+            'amount' => $this->formatNumber($group['amount'], 2),
+        ], $groups);
     }
 
     private function extractPayments(DOMXPath $xpath): array

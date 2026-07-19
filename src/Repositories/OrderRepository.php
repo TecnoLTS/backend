@@ -2,9 +2,14 @@
 
 namespace App\Repositories;
 
+use App\Modules\Commerce\Application\TenantDefaultTaxRate;
+use App\Modules\Commerce\Domain\ProductTaxPolicy;
+
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Modules\Commerce\Application\OrderListSummary;
 use App\Modules\Commerce\Domain\CommerceDomain;
+use App\Modules\Commerce\Infrastructure\CommerceBillingOutboxRepository;
 use App\Repositories\FinancialPeriodRepository;
 use PDO;
 
@@ -28,109 +33,136 @@ class OrderRepository {
         $this->discountRepository = new DiscountRepository($this->db);
     }
 
-    public function getAll(array $options = []) {
-        $limit = filter_var($options['limit'] ?? 100, FILTER_VALIDATE_INT, [
-            'options' => [
-                'min_range' => 1,
-                'max_range' => 300,
-            ],
-        ]);
-        $safeLimit = $limit === false ? 100 : (int)$limit;
+    /**
+     * @param array{limit?:int,cursor?:array{createdAt:string,id:string}|null} $options
+     * @return array{items:array<int,array<string,mixed>>,nextPosition:array{createdAt:string,id:string}|null}
+     */
+    public function getPageResult(array $options = []): array {
+        return $this->getOrderSummaryPage(null, $options);
+    }
 
-        // Lean but operationally useful list for admin table.
+    /**
+     * @deprecated HTTP list handlers must call getPageResult() explicitly.
+     */
+    public function getPage(array $options = []) {
+        return $this->getPageResult($options)['items'];
+    }
+
+    /**
+     * @deprecated HTTP list handlers must call getPageResult() explicitly.
+     */
+    public function getAll(array $options = []) {
+        return $this->getPage($options);
+    }
+
+    /**
+     * @param array{limit?:int,cursor?:array{createdAt:string,id:string}|null} $options
+     * @return array{items:array<int,array<string,mixed>>,nextPosition:array{createdAt:string,id:string}|null}
+     */
+    public function getByUserIdPage($userId, array $options = []): array {
+        return $this->getOrderSummaryPage((string)$userId, $options);
+    }
+
+    /**
+     * Consulta unica para ambos canales de listado. Solo emite el DTO
+     * order-summary-v1; los campos grandes y las lineas se consultan por id.
+     *
+     * @param array{limit?:int,cursor?:array{createdAt:string,id:string}|null} $options
+     * @return array{items:array<int,array<string,mixed>>,nextPosition:array{createdAt:string,id:string}|null}
+     */
+    private function getOrderSummaryPage(?string $userId, array $options): array {
+        $limit = filter_var($options['limit'] ?? 100, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1, 'max_range' => OrderListSummary::MAX_PAGE_SIZE],
+        ]);
+        $safeLimit = $limit === false ? OrderListSummary::MAX_PAGE_SIZE : (int)$limit;
+        $cursor = is_array($options['cursor'] ?? null) ? $options['cursor'] : null;
+        $cursorFilter = $cursor !== null
+            ? ' AND (o.created_at, o.id) < (:cursor_created_at, :cursor_id)'
+            : '';
+        $userFilter = $userId !== null ? ' AND o.user_id = :user_id' : '';
+
         $stmt = $this->db->prepare('
             SELECT
                 o.id,
                 o.user_id,
                 o.total,
-                o.status,
+                LEFT(o.status, 32) AS status,
                 o.created_at,
-                o.delivery_method,
-                o.payment_method,
-                o.order_notes,
-                o.shipping_address,
-                o.billing_address,
-                o.payment_details,
-                o.invoice_number,
-                o.invoice_created_at,
-                o.invoice_data,
-                u.name as user_name,
-                u.email as user_email,
-                COUNT(oi.id) AS items_count
-            FROM "Order" o 
+                LEFT(o.delivery_method, 32) AS delivery_method,
+                LEFT(o.payment_method, 64) AS payment_method,
+                LEFT(COALESCE(NULLIF(BTRIM(o.customer_name), \'\'), NULLIF(BTRIM(u.name), \'\')), 80) AS customer_name,
+                LEFT(COALESCE(NULLIF(BTRIM(o.customer_email), \'\'), NULLIF(BTRIM(u.email), \'\')), 254) AS customer_email,
+                LEFT(o.customer_phone, 40) AS customer_phone,
+                LEFT(o.customer_document_type, 32) AS customer_document_type,
+                LEFT(o.customer_document_number, 64) AS customer_document_number,
+                LEFT(o.customer_company, 80) AS customer_company,
+                LEFT(o.sales_channel, 32) AS sales_channel,
+                COALESCE(item_totals.items_count, 0) AS items_count,
+                COALESCE(item_totals.units_count, 0) AS units_count,
+                COALESCE(item_totals.mixed_vat_rates, false) AS mixed_vat_rates,
+                COALESCE(o.items_subtotal, 0) AS items_subtotal,
+                COALESCE(o.vat_subtotal, 0) AS vat_subtotal,
+                COALESCE(o.vat_rate, 0) AS vat_rate,
+                COALESCE(o.vat_amount, 0) AS vat_amount,
+                COALESCE(o.shipping, 0) AS shipping,
+                COALESCE(o.shipping_base, o.shipping, 0) AS shipping_base,
+                COALESCE(o.shipping_tax_rate, 0) AS shipping_tax_rate,
+                COALESCE(o.shipping_tax_amount, 0) AS shipping_tax_amount,
+                LEFT(o.discount_code, 80) AS discount_code,
+                COALESCE(o.discount_total, 0) AS discount_total,
+                LEFT(o.invoice_number, 80) AS invoice_number,
+                o.invoice_created_at
+            FROM "Order" o
             LEFT JOIN "Customer" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
-            LEFT JOIN "OrderItem" oi ON oi.order_id = o.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::bigint AS items_count,
+                    COALESCE(SUM(GREATEST(oi.quantity, 0)), 0)::bigint AS units_count,
+                    COUNT(DISTINCT COALESCE(oi.tax_rate, o.vat_rate, 0))
+                        FILTER (WHERE GREATEST(oi.quantity, 0) > 0) > 1 AS mixed_vat_rates
+                FROM "OrderItem" oi
+                WHERE oi.order_id = o.id
+                  AND oi.tenant_id = o.tenant_id
+            ) item_totals ON true
             WHERE o.tenant_id = :tenant_id
-            GROUP BY
-                o.id,
-                o.user_id,
-                o.total,
-                o.status,
-                o.created_at,
-                o.delivery_method,
-                o.payment_method,
-                o.order_notes,
-                o.shipping_address,
-                o.billing_address,
-                o.payment_details,
-                o.invoice_number,
-                o.invoice_created_at,
-                o.invoice_data,
-                u.name,
-                u.email
-            ORDER BY o.created_at DESC
+            ' . $userFilter . '
+            ' . $cursorFilter . '
+            ORDER BY o.created_at DESC, o.id DESC
             LIMIT :limit
         ');
         $stmt->bindValue(':tenant_id', $this->getTenantId(), PDO::PARAM_STR);
-        $stmt->bindValue(':limit', $safeLimit, PDO::PARAM_INT);
+        if ($userId !== null) {
+            $stmt->bindValue(':user_id', $userId, PDO::PARAM_STR);
+        }
+        if ($cursor !== null) {
+            $stmt->bindValue(':cursor_created_at', (string)$cursor['createdAt'], PDO::PARAM_STR);
+            $stmt->bindValue(':cursor_id', (string)$cursor['id'], PDO::PARAM_STR);
+        }
+        $stmt->bindValue(':limit', $safeLimit + 1, PDO::PARAM_INT);
         $stmt->execute();
-        return $stmt->fetchAll();
+        $orders = $stmt->fetchAll() ?: [];
+        $hasMore = count($orders) > $safeLimit;
+        if ($hasMore) {
+            $orders = array_slice($orders, 0, $safeLimit);
+        }
+
+        $orders = OrderListSummary::projectRows($orders);
+
+        $last = $orders !== [] ? $orders[array_key_last($orders)] : null;
+        return [
+            'items' => $orders,
+            'nextPosition' => $hasMore && $last !== null ? [
+                'createdAt' => (string)$last['created_at'],
+                'id' => (string)$last['id'],
+            ] : null,
+        ];
     }
 
+    /**
+     * @deprecated HTTP list handlers must call getByUserIdPage().
+     */
     public function getByUserId($userId) {
-        $stmt = $this->db->prepare('
-            SELECT o.*, u.name as user_name, u.email as user_email
-            FROM "Order" o
-            LEFT JOIN "Customer" u ON o.user_id = u.id AND u.tenant_id = o.tenant_id
-            WHERE o.user_id = :user_id AND o.tenant_id = :tenant_id
-            ORDER BY o.created_at DESC
-        ');
-        $stmt->execute([
-            'user_id' => $userId,
-            'tenant_id' => $this->getTenantId()
-        ]);
-        $orders = $stmt->fetchAll();
-
-        if (!$orders) {
-            return [];
-        }
-
-        $orderIds = array_map(fn($order) => $order['id'], $orders);
-        $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
-        $stmtItems = $this->db->prepare('
-            SELECT oi.*
-            FROM "OrderItem" oi
-            JOIN "Order" o ON oi.order_id = o.id
-            WHERE oi.order_id IN (' . $placeholders . ')
-              AND o.tenant_id = ?
-        ');
-        $params = $orderIds;
-        $params[] = $this->getTenantId();
-        $stmtItems->execute($params);
-        $items = $stmtItems->fetchAll();
-
-        $itemsByOrder = [];
-        foreach ($items as $item) {
-            $itemsByOrder[$item['order_id']][] = $item;
-        }
-
-        foreach ($orders as &$order) {
-            $order['items'] = $itemsByOrder[$order['id']] ?? [];
-            $order = $this->addTaxBreakdown($order);
-        }
-        unset($order);
-
-        return $orders;
+        return $this->getByUserIdPage($userId)['items'];
     }
 
     public function getById($id) {
@@ -150,7 +182,7 @@ class OrderRepository {
             $stmtItems = $this->db->prepare('
                 SELECT oi.*
                 FROM "OrderItem" oi
-                JOIN "Order" o ON oi.order_id = o.id
+                JOIN "Order" o ON oi.order_id = o.id AND oi.tenant_id = o.tenant_id
                 WHERE oi.order_id = :order_id
                   AND o.tenant_id = :tenant_id
             ');
@@ -189,8 +221,8 @@ class OrderRepository {
             $nextActive = !$skipInventoryImpact && $this->orderAffectsInventory($nextStatus);
 
             if ($currentActive !== $nextActive) {
-                $stmtItems = $this->db->prepare('SELECT id, product_id, quantity, unit_cost, cost_total FROM "OrderItem" WHERE order_id = :order_id');
-                $stmtItems->execute(['order_id' => $id]);
+                $stmtItems = $this->db->prepare('SELECT id, product_id, quantity, unit_cost, cost_total FROM "OrderItem" WHERE tenant_id = :tenant_id AND order_id = :order_id');
+                $stmtItems->execute(['tenant_id' => $tenantId, 'order_id' => $id]);
                 $items = $stmtItems->fetchAll();
                 $stmtLockProduct = $this->db->prepare('
                     SELECT quantity, cost
@@ -204,6 +236,7 @@ class OrderRepository {
                     SET unit_cost = :unit_cost,
                         cost_total = :cost_total
                     WHERE id = :id
+                      AND tenant_id = :tenant_id
                 ');
 
                 if ($currentActive && !$nextActive) {
@@ -257,6 +290,7 @@ class OrderRepository {
                         );
                         $stmtUpdateOrderItemCost->execute([
                             'id' => (string)$item['id'],
+                            'tenant_id' => $tenantId,
                             'unit_cost' => round((float)($allocation['unit_cost'] ?? 0), 4),
                             'cost_total' => round((float)($allocation['cost_total'] ?? 0), 4)
                         ]);
@@ -279,6 +313,7 @@ class OrderRepository {
                 'tenant_id' => $tenantId,
                 'status' => $nextStatus
             ]);
+            $this->enqueueBillingCommandIfFinal($tenantId, (string)$id, $nextStatus, 'status_transition');
             $this->db->commit();
             return $this->getById($id);
         } catch (\Exception $e) {
@@ -432,8 +467,8 @@ class OrderRepository {
 
             $stmt = $this->db->prepare('
                 SELECT p.id, p.legacy_id, p.price, p.cost, p.name, p.quantity, p.attributes,
-                       (SELECT url FROM "Image" WHERE product_id = p.id ORDER BY id LIMIT 1) as image
-                FROM "Product" p 
+                       (SELECT url FROM "Image" WHERE tenant_id = p.tenant_id AND product_id = p.id ORDER BY id LIMIT 1) as image
+                FROM "Product" p
                 WHERE (p.id = :id OR p.legacy_id = :id) AND p.tenant_id = :tenant_id
             ');
             $stmt->execute([
@@ -459,6 +494,7 @@ class OrderRepository {
                 }
             }
             $itemTaxRate = $this->getProductTaxRateForAttributes($attributes);
+            $itemTaxExempt = ProductTaxPolicy::isExempt($attributes);
             $itemTaxMultiplier = 1 + ($itemTaxRate / 100);
             $expirationDateRaw = trim((string)($attributes['expirationDate'] ?? $attributes['expiryDate'] ?? ''));
             if ($expirationDateRaw !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $expirationDateRaw) === 1) {
@@ -480,8 +516,11 @@ class OrderRepository {
                     $baseUnitPrice = $itemTaxMultiplier > 0 ? round($priceWithTax / $itemTaxMultiplier, 4) : $priceWithTax;
                 }
                 $overrideTaxRate = $item['tax_rate'] ?? null;
-                if ($overrideTaxRate !== null && $overrideTaxRate !== '' && is_numeric($overrideTaxRate)) {
-                    $itemTaxRate = max(0, (float)$overrideTaxRate);
+                if (!$itemTaxExempt
+                    && $overrideTaxRate !== null
+                    && $overrideTaxRate !== ''
+                    && is_numeric($overrideTaxRate)) {
+                    $itemTaxRate = ProductTaxPolicy::normalizeRate($overrideTaxRate) ?? $itemTaxRate;
                     $itemTaxMultiplier = 1 + ($itemTaxRate / 100);
                     $baseUnitPrice = $itemTaxMultiplier > 0 ? round($priceWithTax / $itemTaxMultiplier, 4) : $priceWithTax;
                 }
@@ -521,7 +560,12 @@ class OrderRepository {
                 'price' => $priceWithTax,
                 'price_net' => $baseUnitPrice,
                 'tax_rate' => round($itemTaxRate, 2),
-                'tax_exempt' => $itemTaxRate <= 0,
+                'tax_exempt' => $itemTaxExempt,
+                'tax_treatment' => $itemTaxExempt
+                    ? ProductTaxPolicy::TREATMENT_EXEMPT
+                    : ($itemTaxRate === 0.0
+                        ? ProductTaxPolicy::TREATMENT_ZERO_RATED
+                        : ProductTaxPolicy::TREATMENT_TAXED),
                 'total' => $lineTotal
             ];
         }
@@ -544,6 +588,8 @@ class OrderRepository {
         $discountAllocations = $this->allocateDiscountAcrossLineTotals($itemGrossLineTotals, $discountTotal);
 
         $itemsNetSubtotal = 0.0;
+        $vatSubtotalBeforeDiscount = 0.0;
+        $vatAmountBeforeDiscount = 0.0;
         $vatSubtotal = 0.0;
         $vatAmount = 0.0;
         foreach ($itemsWithDetails as $index => &$item) {
@@ -552,6 +598,7 @@ class OrderRepository {
             $grossLineTotal = round((float)($itemGrossLineTotals[$index] ?? 0), 2);
             $allocatedDiscount = round((float)($discountAllocations[$index] ?? 0), 2);
             $discountedGrossLine = round(max(0, $grossLineTotal - $allocatedDiscount), 2);
+            $taxBreakdownBeforeDiscount = $this->splitGrossAmountByTaxRate($grossLineTotal, $itemTaxRate);
             $taxBreakdown = $this->splitGrossAmountByTaxRate($discountedGrossLine, $itemTaxRate);
             $discountedNetLine = $taxBreakdown['net'];
             $discountedTaxAmount = $taxBreakdown['tax'];
@@ -563,6 +610,8 @@ class OrderRepository {
             $item['total'] = $discountedGrossLine;
 
             $itemsNetSubtotal += $discountedGrossLine;
+            $vatSubtotalBeforeDiscount += $taxBreakdownBeforeDiscount['net'];
+            $vatAmountBeforeDiscount += $taxBreakdownBeforeDiscount['tax'];
             $vatSubtotal += $discountedNetLine;
             $vatAmount += $discountedTaxAmount;
         }
@@ -583,6 +632,8 @@ class OrderRepository {
             'subtotal' => round($itemsNetSubtotal, 2),
             'items_subtotal_before_discount' => round($itemsGrossSubtotal, 2),
             'vat_rate' => round($displayVatRate, 2),
+            'vat_subtotal_before_discount' => round($vatSubtotalBeforeDiscount, 2),
+            'vat_amount_before_discount' => round($vatAmountBeforeDiscount, 2),
             'vat_subtotal' => round($vatSubtotal, 2),
             'vat_amount' => round($vatAmount, 2),
             'mixed_vat_rates' => $mixedVatRates,
@@ -879,11 +930,8 @@ class OrderRepository {
         if ($this->taxRateCache !== null) {
             return $this->taxRateCache;
         }
-        $settings = new \App\Repositories\SettingsRepository();
-        $value = $settings->get('vat_rate');
-        $rate = is_numeric($value) ? floatval($value) : 0;
-        $this->taxRateCache = $rate;
-        return $rate;
+        $this->taxRateCache = TenantDefaultTaxRate::current();
+        return $this->taxRateCache;
     }
 
     private function normalizeProductAttributes($value): array {
@@ -923,16 +971,11 @@ class OrderRepository {
     }
 
     private function isProductTaxExempt(array $attributes): bool {
-        return $this->normalizeBooleanAttribute(
-            $attributes['taxExempt'] ?? ($attributes['tax_exempt'] ?? false),
-            false
-        );
+        return ProductTaxPolicy::isExempt($attributes);
     }
 
     private function getProductTaxRateForAttributes(array $attributes): float {
-        return $this->isProductTaxExempt($attributes)
-            ? 0.0
-            : max(0.0, (float)$this->getTaxRate());
+        return ProductTaxPolicy::rate($attributes, $this->getTaxRate());
     }
 
     private function getProductTaxMultiplierForAttributes(array $attributes): float {
@@ -1005,6 +1048,108 @@ class OrderRepository {
         return trim((string)$value);
     }
 
+    /**
+     * Conserva un snapshot escalar de contacto para listados y auditoria.
+     * Los documentos JSON completos siguen reservados para el detalle.
+     *
+     * @return array<string,?string>
+     */
+    private function resolveCustomerSnapshot(array $data): array {
+        $shipping = is_array($data['shipping_address'] ?? null) ? $data['shipping_address'] : [];
+        $billing = is_array($data['billing_address'] ?? null) ? $data['billing_address'] : [];
+        $customer = [];
+        $customerId = trim((string)($data['customer_id'] ?? $data['user_id'] ?? ''));
+        if ($customerId !== '') {
+            $stmt = $this->db->prepare('
+                SELECT name, email, document_type, document_number, business_name, profile
+                FROM "Customer"
+                WHERE tenant_id = :tenant_id
+                  AND id = :customer_id
+                LIMIT 1
+            ');
+            $stmt->execute([
+                'tenant_id' => $this->getTenantId(),
+                'customer_id' => $customerId,
+            ]);
+            $customer = $stmt->fetch() ?: [];
+        }
+        $profile = $customer['profile'] ?? null;
+        if (is_string($profile)) {
+            $decoded = json_decode($profile, true);
+            $profile = is_array($decoded) ? $decoded : [];
+        }
+        if (!is_array($profile)) {
+            $profile = [];
+        }
+
+        return [
+            'customer_name' => $this->firstSnapshotText([
+                $data['customer_name'] ?? null,
+                $shipping['name'] ?? null,
+                $this->addressSnapshotName($shipping),
+                $billing['name'] ?? null,
+                $this->addressSnapshotName($billing),
+                $customer['name'] ?? null,
+            ], 160),
+            'customer_email' => $this->firstSnapshotText([
+                $data['customer_email'] ?? null,
+                $shipping['email'] ?? null,
+                $billing['email'] ?? null,
+                $customer['email'] ?? null,
+            ], 254),
+            'customer_phone' => $this->firstSnapshotText([
+                $data['customer_phone'] ?? null,
+                $shipping['phone'] ?? null,
+                $billing['phone'] ?? null,
+                $profile['phone'] ?? null,
+                $profile['mobile'] ?? null,
+            ], 40),
+            'customer_document_type' => $this->firstSnapshotText([
+                $data['customer_document_type'] ?? null,
+                $billing['documentType'] ?? $billing['document_type'] ?? null,
+                $shipping['documentType'] ?? $shipping['document_type'] ?? null,
+                $customer['document_type'] ?? null,
+            ], 32),
+            'customer_document_number' => $this->firstSnapshotText([
+                $data['customer_document_number'] ?? $data['customer_document'] ?? null,
+                $billing['documentNumber'] ?? $billing['document_number'] ?? null,
+                $shipping['documentNumber'] ?? $shipping['document_number'] ?? null,
+                $customer['document_number'] ?? null,
+            ], 64),
+            'customer_company' => $this->firstSnapshotText([
+                $data['customer_company'] ?? null,
+                $billing['company'] ?? $billing['businessName'] ?? $billing['business_name'] ?? null,
+                $shipping['company'] ?? $shipping['businessName'] ?? $shipping['business_name'] ?? null,
+                $customer['business_name'] ?? null,
+            ], 160),
+            'sales_channel' => $this->firstSnapshotText([
+                is_array($data['payment_details'] ?? null) ? ($data['payment_details']['channel'] ?? null) : null,
+                $data['request_channel'] ?? null,
+            ], 32),
+        ];
+    }
+
+    private function addressSnapshotName(array $address): ?string {
+        $firstName = trim((string)($address['firstName'] ?? $address['first_name'] ?? ''));
+        $lastName = trim((string)($address['lastName'] ?? $address['last_name'] ?? ''));
+        $name = trim($firstName . ' ' . $lastName);
+        return $name !== '' ? $name : null;
+    }
+
+    /** @param array<int,mixed> $values */
+    private function firstSnapshotText(array $values, int $maxCharacters): ?string {
+        foreach ($values as $value) {
+            $normalized = trim((string)($value ?? ''));
+            if ($normalized === '') {
+                continue;
+            }
+            return function_exists('mb_substr')
+                ? mb_substr($normalized, 0, $maxCharacters, 'UTF-8')
+                : substr($normalized, 0, $maxCharacters);
+        }
+        return null;
+    }
+
     public function create($data, $baseUrl = null) {
         $this->db->beginTransaction();
         try {
@@ -1013,6 +1158,9 @@ class OrderRepository {
             if (is_string($paymentDetails)) {
                 $decoded = json_decode($paymentDetails, true);
                 $paymentDetails = is_array($decoded) ? $decoded : null;
+            }
+            if (is_array($paymentDetails)) {
+                $data['payment_details'] = $paymentDetails;
             }
             $channel = strtolower(trim((string)($paymentDetails['channel'] ?? '')));
             $isHistoricalImport = $channel === 'historical_import';
@@ -1068,6 +1216,7 @@ class OrderRepository {
                 }
                 $data['billing_address'] = $billingAddress;
             }
+            $customerSnapshot = $this->resolveCustomerSnapshot($data);
 
             // Inteligencia de Negocio: El Backend recalcula y valida TODO.
             $quote = $this->calculateQuote(
@@ -1098,14 +1247,21 @@ class OrderRepository {
                 ]);
             }
             $orderStatus = strtolower(trim((string)($data['status'] ?? 'pending')));
-            
-            $stmt = $this->db->prepare('INSERT INTO "Order" ("id", "tenant_id", "user_id", "customer_id", "total", "status", "created_at", "shipping_address", "billing_address", "payment_method", "delivery_method", "payment_details", "items_subtotal", "vat_subtotal", "vat_rate", "vat_amount", "shipping", "shipping_base", "shipping_tax_rate", "shipping_tax_amount", "discount_code", "discount_total", "discount_snapshot", "order_notes") VALUES (:id, :tenant_id, :user_id, :customer_id, :total, :status, ' . $createdAtExpression . ', :shipping_address, :billing_address, :payment_method, :delivery_method, :payment_details, :items_subtotal, :vat_subtotal, :vat_rate, :vat_amount, :shipping, :shipping_base, :shipping_tax_rate, :shipping_tax_amount, :discount_code, :discount_total, :discount_snapshot, :order_notes)');
-            
+
+            $stmt = $this->db->prepare('INSERT INTO "Order" ("id", "tenant_id", "user_id", "customer_id", "customer_name", "customer_email", "customer_phone", "customer_document_type", "customer_document_number", "customer_company", "sales_channel", "customer_snapshot_version", "total", "status", "created_at", "shipping_address", "billing_address", "payment_method", "delivery_method", "payment_details", "items_subtotal", "vat_subtotal", "vat_rate", "vat_amount", "shipping", "shipping_base", "shipping_tax_rate", "shipping_tax_amount", "discount_code", "discount_total", "discount_snapshot", "order_notes") VALUES (:id, :tenant_id, :user_id, :customer_id, :customer_name, :customer_email, :customer_phone, :customer_document_type, :customer_document_number, :customer_company, :sales_channel, 1, :total, :status, ' . $createdAtExpression . ', :shipping_address, :billing_address, :payment_method, :delivery_method, :payment_details, :items_subtotal, :vat_subtotal, :vat_rate, :vat_amount, :shipping, :shipping_base, :shipping_tax_rate, :shipping_tax_amount, :discount_code, :discount_total, :discount_snapshot, :order_notes)');
+
             $orderParams = [
                 'id' => $data['id'],
                 'tenant_id' => $this->getTenantId(),
                 'user_id' => $data['user_id'],
                 'customer_id' => $data['customer_id'] ?? $data['user_id'],
+                'customer_name' => $customerSnapshot['customer_name'],
+                'customer_email' => $customerSnapshot['customer_email'],
+                'customer_phone' => $customerSnapshot['customer_phone'],
+                'customer_document_type' => $customerSnapshot['customer_document_type'],
+                'customer_document_number' => $customerSnapshot['customer_document_number'],
+                'customer_company' => $customerSnapshot['customer_company'],
+                'sales_channel' => $customerSnapshot['sales_channel'],
                 'total' => $quote['total'],
                 'status' => $orderStatus,
                 'shipping_address' => json_encode($data['shipping_address'] ?? null),
@@ -1131,7 +1287,7 @@ class OrderRepository {
             }
             $stmt->execute($orderParams);
 
-            $stmtItem = $this->db->prepare('INSERT INTO "OrderItem" ("id", "order_id", "product_id", "product_name", "product_image", "quantity", "price", "price_net", "net_total", "tax_rate", "tax_amount", "unit_cost", "cost_total") VALUES (:id, :order_id, :product_id, :product_name, :product_image, :quantity, :price, :price_net, :net_total, :tax_rate, :tax_amount, :unit_cost, :cost_total)');
+            $stmtItem = $this->db->prepare('INSERT INTO "OrderItem" ("id", "tenant_id", "order_id", "product_id", "product_name", "product_image", "quantity", "price", "price_net", "net_total", "tax_rate", "tax_amount", "unit_cost", "cost_total") VALUES (:id, :tenant_id, :order_id, :product_id, :product_name, :product_image, :quantity, :price, :price_net, :net_total, :tax_rate, :tax_amount, :unit_cost, :cost_total)');
             $stmtUpdateStock = $this->db->prepare('UPDATE "Product" SET quantity = quantity - :qty, sold = sold + :qty WHERE id = :id AND tenant_id = :tenant_id AND quantity >= :qty');
             $stmtLockProduct = $this->db->prepare('
                 SELECT quantity, cost
@@ -1145,6 +1301,7 @@ class OrderRepository {
                 SET unit_cost = :unit_cost,
                     cost_total = :cost_total
                 WHERE id = :id
+                  AND tenant_id = :tenant_id
             ');
 
             foreach ($quote['items'] as $item) {
@@ -1153,6 +1310,7 @@ class OrderRepository {
                 $previewCostTotal = round((float)($item['cost_total'] ?? ($previewUnitCost * (int)($item['quantity'] ?? 0))), 4);
                 $stmtItem->execute([
                     'id' => $orderItemId,
+                    'tenant_id' => $this->getTenantId(),
                     'order_id' => $data['id'],
                     'product_id' => $item['product_id'],
                     'product_name' => $item['product_name'],
@@ -1187,6 +1345,7 @@ class OrderRepository {
                     );
                     $stmtUpdateOrderItemCost->execute([
                         'id' => $orderItemId,
+                        'tenant_id' => $this->getTenantId(),
                         'unit_cost' => round((float)($allocation['unit_cost'] ?? 0), 4),
                         'cost_total' => round((float)($allocation['cost_total'] ?? 0), 4)
                     ]);
@@ -1217,6 +1376,13 @@ class OrderRepository {
                 ]);
             }
 
+            $this->enqueueBillingCommandIfFinal(
+                $this->getTenantId(),
+                (string)$data['id'],
+                $orderStatus,
+                'order_created'
+            );
+
             $this->db->commit();
             return $this->getById($data['id']);
 
@@ -1237,6 +1403,47 @@ class OrderRepository {
     private function realizedSalesConditionForStatus($status) {
         $normalized = strtolower(trim((string)$status));
         return in_array($normalized, ['delivered', 'completed'], true);
+    }
+
+    private function enqueueBillingCommandIfFinal(
+        string $tenantId,
+        string $orderId,
+        string $status,
+        string $trigger
+    ): void {
+        if (!$this->realizedSalesConditionForStatus($status)) {
+            return;
+        }
+
+        $tenant = TenantContext::get() ?? [];
+        $domains = is_array($tenant['domains'] ?? null) ? $tenant['domains'] : [];
+        $targetHost = strtolower(trim((string)($domains[0] ?? '')));
+        if ($targetHost === '') {
+            $targetHost = strtolower(trim((string)(parse_url((string)($tenant['app_url'] ?? ''), PHP_URL_HOST) ?: '')));
+        }
+        if (preg_match('/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', $targetHost) !== 1) {
+            throw new \RuntimeException('Tenant Billing target host is unavailable; final Order transition was not committed.');
+        }
+
+        $sriEnvironment = strtolower(trim((string)($_ENV['SRI_ENVIRONMENT'] ?? getenv('SRI_ENVIRONMENT') ?: 'produccion')));
+        $apiMode = in_array($sriEnvironment, ['test', 'testing', 'pruebas', 'qa'], true) ? 'test' : 'production';
+        $maxAttempts = filter_var(
+            $_ENV['BILLING_OUTBOX_MAX_ATTEMPTS'] ?? getenv('BILLING_OUTBOX_MAX_ATTEMPTS') ?: 12,
+            FILTER_VALIDATE_INT,
+            ['options' => ['min_range' => 1, 'max_range' => 100]]
+        );
+
+        (new CommerceBillingOutboxRepository($this->db))->enqueueForOrder(
+            $tenantId,
+            $orderId,
+            $status,
+            [
+                'target_host' => $targetHost,
+                'api_mode' => $apiMode,
+                'trigger' => $trigger,
+            ],
+            $maxAttempts === false ? 12 : (int)$maxAttempts
+        );
     }
 
     private function orderAffectsInventory($status) {
@@ -3203,7 +3410,7 @@ class OrderRepository {
                 : max(0, $fallbackTaxRate);
             $lineTaxExempt = isset($item['tax_exempt'])
                 ? $this->normalizeBooleanAttribute($item['tax_exempt'], false)
-                : ($lineTaxRate <= 0);
+                : (($item['tax_treatment'] ?? null) === ProductTaxPolicy::TREATMENT_EXEMPT);
             if ($lineTaxExempt) {
                 $lineTaxRate = 0.0;
             }
@@ -3412,9 +3619,15 @@ class OrderRepository {
         $itemsSubtotal = isset($order['items_subtotal']) ? (float)$order['items_subtotal'] : 0;
         $storedVatSubtotal = isset($order['vat_subtotal']) ? (float)$order['vat_subtotal'] : 0;
         $storedVatAmount = isset($order['vat_amount']) ? (float)$order['vat_amount'] : 0;
-        $storedVatRate = isset($order['vat_rate']) ? (float)$order['vat_rate'] : 0;
+        $hasStoredVatRate = array_key_exists('vat_rate', $order)
+            && $order['vat_rate'] !== null
+            && $order['vat_rate'] !== ''
+            && is_numeric($order['vat_rate']);
+        $storedVatRate = $hasStoredVatRate
+            ? (ProductTaxPolicy::normalizeRate($order['vat_rate']) ?? 0.0)
+            : null;
         $itemSummary = is_array($items) && count($items) > 0
-            ? $this->summarizeOrderItemsTax($items, $storedVatRate > 0 ? $storedVatRate : $taxRate)
+            ? $this->summarizeOrderItemsTax($items, $hasStoredVatRate ? $storedVatRate : $taxRate)
             : null;
 
         if ($itemsSubtotal <= 0 && is_array($itemSummary)) {
@@ -3427,7 +3640,7 @@ class OrderRepository {
         $taxAmount = $storedVatAmount > 0
             ? $storedVatAmount
             : (is_array($itemSummary) ? (float)($itemSummary['tax_amount'] ?? 0) : 0);
-        $order['vat_rate'] = $storedVatRate > 0
+        $order['vat_rate'] = $hasStoredVatRate
             ? $storedVatRate
             : (is_array($itemSummary) ? (float)($itemSummary['vat_rate'] ?? $taxRate) : $taxRate);
         $order['mixed_vat_rates'] = is_array($itemSummary) ? !empty($itemSummary['mixed_vat_rates']) : false;

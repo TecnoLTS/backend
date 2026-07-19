@@ -4,21 +4,16 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Services;
 
+use App\Infrastructure\Storage\Billing\BillingArtifactStorage;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 
 class RidePdfGenerator
 {
-    private const OUTPUT_DIRECTORY = '/var/www/html/storage/billing/pdf/rides';
-
     public function __construct(private readonly string $logoPath = '/var/www/html/public/LogoVerde150.png') {}
 
     public function generate(string $accessKey, array $invoiceData, ?string $authorizationNumber, ?string $authorizationDate): string
     {
-        @mkdir(self::OUTPUT_DIRECTORY, 0777, true);
-
-        $pdfPath = sprintf('%s/%s.pdf', self::OUTPUT_DIRECTORY, $accessKey);
-
         $options = new Options();
         $options->set('isRemoteEnabled', false);
         $options->set('defaultFont', 'DejaVu Sans');
@@ -28,12 +23,7 @@ class RidePdfGenerator
         $dompdf->setPaper('A4');
         $dompdf->render();
 
-        $written = file_put_contents($pdfPath, $dompdf->output());
-        if ($written === false) {
-            throw new \RuntimeException(sprintf('No se pudo escribir el RIDE PDF en %s', $pdfPath));
-        }
-
-        return $pdfPath;
+        return (new BillingArtifactStorage())->putRide($accessKey, $dompdf->output());
     }
 
     private function buildHtml(array $invoiceData, ?string $authorizationNumber, ?string $authorizationDate): string
@@ -61,10 +51,7 @@ class RidePdfGenerator
         $accessKeyValue = $this->escape($rawAccessKey);
         $barcodeSvg = $this->buildBarcodeSvgDataUri($rawAccessKey);
         $subtotal = $this->escape($invoiceData['subtotal'] ?? '0.00');
-        $subtotal0 = $this->escape($invoiceData['subtotal_0'] ?? '0.00');
-        $subtotal15 = $this->escape($invoiceData['subtotal_15'] ?? '0.00');
         $discountTotal = $this->escape($invoiceData['discount_total'] ?? '0.00');
-        $iva15 = $this->escape($invoiceData['iva_15'] ?? '0.00');
         $service10 = $this->escape($invoiceData['service_10'] ?? '0.00');
         $taxTotal = $this->escape($invoiceData['tax_total'] ?? '0.00');
         $total = $this->escape($invoiceData['total'] ?? '0.00');
@@ -84,6 +71,7 @@ class RidePdfGenerator
             $operationalActor,
             $operationalReason
         );
+        $taxSummaryRows = $this->buildTaxSummaryRows($invoiceData);
         $paymentsRows = '';
 
         foreach ($invoiceData['payments'] ?? [] as $payment) {
@@ -435,14 +423,7 @@ class RidePdfGenerator
                 <td width="42%">
                     <div class="box summary-box">
                         <table class="summary-table">
-                            <tr>
-                                <td class="summary-label">Subtotal 0%</td>
-                                <td class="right">{$subtotal0}</td>
-                            </tr>
-                            <tr>
-                                <td class="summary-label">Subtotal 15%</td>
-                                <td class="right">{$subtotal15}</td>
-                            </tr>
+                            {$taxSummaryRows}
                             <tr>
                                 <td class="summary-label">Subtotal sin impuestos</td>
                                 <td class="right">{$subtotal}</td>
@@ -450,10 +431,6 @@ class RidePdfGenerator
                             <tr>
                                 <td class="summary-label">Descuento</td>
                                 <td class="right">{$discountTotal}</td>
-                            </tr>
-                            <tr>
-                                <td class="summary-label">IVA 15%</td>
-                                <td class="right">{$iva15}</td>
                             </tr>
                             <tr>
                                 <td class="summary-label">Servicio 10%</td>
@@ -476,6 +453,46 @@ class RidePdfGenerator
 </body>
 </html>
 HTML;
+    }
+
+    private function buildTaxSummaryRows(array $invoiceData): string
+    {
+        $groups = $invoiceData['tax_summary'] ?? null;
+        if (!is_array($groups) || $groups === []) {
+            throw new \RuntimeException('El RIDE requiere el desglose tributario SRI de la factura.');
+        }
+
+        $rows = '';
+        foreach ($groups as $group) {
+            if (!is_array($group)) {
+                throw new \RuntimeException('El RIDE recibio un grupo tributario invalido.');
+            }
+
+            $label = trim((string)($group['label'] ?? ''));
+            $treatment = trim((string)($group['treatment'] ?? ''));
+            $baseLabel = match ($treatment) {
+                'zero-rated' => 'Subtotal IVA 0%',
+                'exempt' => 'Subtotal exento de IVA',
+                'taxed' => 'Subtotal ' . $label,
+                default => 'Base ' . ($label !== '' ? $label : 'imponible'),
+            };
+            $rows .= sprintf(
+                '<tr><td class="summary-label">%s</td><td class="right">%s</td></tr>',
+                $this->escape($baseLabel),
+                $this->escape((string)($group['base'] ?? '0.00'))
+            );
+
+            $amount = round((float)($group['amount'] ?? 0), 2);
+            if ($amount > 0.0) {
+                $rows .= sprintf(
+                    '<tr><td class="summary-label">%s</td><td class="right">%s</td></tr>',
+                    $this->escape($label !== '' ? $label : 'Impuesto'),
+                    $this->escape(number_format($amount, 2, '.', ''))
+                );
+            }
+        }
+
+        return $rows;
     }
 
     private function buildOperationalAuditBlock(

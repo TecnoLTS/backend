@@ -29,6 +29,9 @@ foreach (getenv() ?: [] as $key => $value) {
         $_ENV[$key] = $value;
     }
 }
+$_ENV['DB_CONNECTION_ROLE'] = strtolower(trim((string)($_ENV['TENANT_RLS_MODE'] ?? 'off'))) === 'enforce'
+    ? 'worker'
+    : 'app';
 
 $options = getopt('', ['limit::', 'min-age-seconds::', 'tenant::', 'all']);
 $syncAll = array_key_exists('all', $options);

@@ -1,89 +1,24 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Services;
 
+use App\Core\TenantContext;
+use App\Modules\Mailer\Application\MailPayloadSanitizer;
+use App\Modules\Mailer\Application\MailTransportException;
+use App\Modules\Mailer\Application\QueuedMailMessage;
 use App\Modules\Mailer\Infrastructure\Persistence\EmailOutboxRepository;
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\Exception;
+use App\Modules\Mailer\Infrastructure\Transport\SmtpMailTransport;
 
-class MailService {
-    private static function buildMailer(
-        string $to,
-        string $subject,
-        string $message,
-        ?string $replyTo = null,
-        ?string $replyToName = null,
-        bool $isHtml = false
-    ): ?PHPMailer {
-        $fromAddress = $_ENV['MAIL_FROM_ADDRESS'] ?? 'no-reply@paramascotasec.com';
-        $fromName = $_ENV['MAIL_FROM_NAME'] ?? 'Para Mascotas EC';
-        $smtpHost = $_ENV['SMTP_HOST'] ?? null;
-
-        if (!$smtpHost || !class_exists(PHPMailer::class)) {
-            return null;
-        }
-
-        $mail = new PHPMailer(true);
-        $mail->SMTPDebug = 0;
-        $mail->isSMTP();
-        $mail->Host = $smtpHost;
-        $mail->Port = (int)($_ENV['SMTP_PORT'] ?? 587);
-        $mail->SMTPAuth = true;
-        $mail->Username = $_ENV['SMTP_USER'] ?? '';
-        $mail->Password = self::normalizedSmtpPassword($smtpHost, (string)($_ENV['SMTP_PASS'] ?? ''));
-        $mail->SMTPSecure = self::resolveSmtpEncryption($_ENV['SMTP_SECURE'] ?? 'tls', $mail->Port);
-        $mail->Timeout = max(3, (int)($_ENV['SMTP_TIMEOUT'] ?? 10));
-        $mail->setFrom($fromAddress, $fromName);
-        if ($replyTo && filter_var($replyTo, FILTER_VALIDATE_EMAIL)) {
-            $mail->addReplyTo($replyTo, $replyToName ?: $replyTo);
-        }
-        $mail->addAddress($to);
-        $mail->Subject = $subject;
-        $mail->Body = $message;
-        $mail->isHTML($isHtml);
-        $mail->CharSet = 'UTF-8';
-
-        return $mail;
-    }
-
-    private static function resolveSmtpEncryption(?string $secure, int $port): string
-    {
-        $normalized = strtolower(trim((string)$secure));
-
-        if (in_array($normalized, ['ssl', 'smtps'], true)) {
-            return PHPMailer::ENCRYPTION_SMTPS;
-        }
-
-        if (in_array($normalized, ['tls', 'starttls'], true)) {
-            // Compatibilidad con configuraciones comunes donde 465 se marca como "tls"
-            // aunque en realidad requiere SMTP implícito.
-            return $port === 465 ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
-        }
-
-        if (in_array($normalized, ['off', 'none', 'plain'], true)) {
-            return '';
-        }
-
-        return $port === 465 ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
-    }
-
-    private static function normalizedSmtpPassword(?string $host, string $password): string
-    {
-        $password = trim($password);
-        if ($password === '' || !$host) {
-            return $password;
-        }
-
-        $normalizedHost = strtolower(trim($host));
-        $collapsed = preg_replace('/\s+/', '', $password) ?? $password;
-
-        if ($collapsed !== $password && str_contains($normalizedHost, 'gmail')) {
-            return $collapsed;
-        }
-
-        return $password;
-    }
-
+final class MailService
+{
+    /**
+     * Returns true once the complete message is durably accepted. Delivery is
+     * performed by the isolated Mailer worker, never on the request path.
+     *
+     * @param array<string,mixed> $metadata
+     */
     public static function send(
         string $to,
         string $subject,
@@ -92,56 +27,26 @@ class MailService {
         ?string $replyToName = null,
         array $metadata = []
     ): bool {
-        $outboxId = self::recordPending($to, $subject, $message, [
-            ...$metadata,
-            'transport' => 'plain',
-            'reply_to' => $replyTo,
-            'reply_to_name' => $replyToName,
-        ]);
-
-        $smtpHost = $_ENV['SMTP_HOST'] ?? null;
-
-        if ($smtpHost && class_exists(PHPMailer::class)) {
-            try {
-                $mail = self::buildMailer($to, $subject, $message, $replyTo, $replyToName, false);
-                if (!$mail) {
-                    self::recordFailed($outboxId, 'No se pudo construir el mensaje SMTP.', ['transport' => 'smtp']);
-                    return false;
-                }
-                $mail->send();
-                self::recordDelivered($outboxId, $mail->getLastMessageID(), ['transport' => 'smtp']);
-                return true;
-            } catch (Exception $e) {
-                error_log('SMTP send failed: ' . $e->getMessage());
-                self::recordFailed($outboxId, $e->getMessage(), ['transport' => 'smtp']);
-                return false;
-            }
-        }
-
-        $fromAddress = $_ENV['MAIL_FROM_ADDRESS'] ?? 'no-reply@paramascotasec.com';
-        $fromName = $_ENV['MAIL_FROM_NAME'] ?? 'Para Mascotas EC';
-
-        $replyToHeader = $fromAddress;
-        if ($replyTo && filter_var($replyTo, FILTER_VALIDATE_EMAIL)) {
-            $replyToHeader = $replyTo;
-        }
-
-        $headers = [
-            'From: ' . $fromName . ' <' . $fromAddress . '>',
-            'Reply-To: ' . $replyToHeader,
-            'Content-Type: text/plain; charset=UTF-8'
-        ];
-
-        $result = mail($to, $subject, $message, implode("\r\n", $headers));
-        if (!$result) {
-            error_log('Mail() failed for: ' . $to);
-            self::recordFailed($outboxId, 'mail() returned false.', ['transport' => 'mail']);
-        } else {
-            self::recordDelivered($outboxId, null, ['transport' => 'mail']);
-        }
-        return $result;
+        return self::enqueue(
+            $to,
+            $subject,
+            'plain',
+            $message,
+            null,
+            $replyTo,
+            $replyToName,
+            $metadata,
+            null
+        );
     }
 
+    /**
+     * Returns true once the complete HTML/plain alternative payload is durable.
+     * `$storedBody` is retained only as an audit preview; it is not substituted
+     * for the deliverable body because that would make recovery impossible.
+     *
+     * @param array<string,mixed> $metadata
+     */
     public static function sendHtml(
         string $to,
         string $subject,
@@ -152,57 +57,27 @@ class MailService {
         array $metadata = [],
         ?string $storedBody = null
     ): bool {
-        $outboxId = self::recordPending($to, $subject, $storedBody ?? $plainMessage ?? strip_tags($htmlMessage), [
-            ...$metadata,
-            'transport' => 'html',
-            'reply_to' => $replyTo,
-            'reply_to_name' => $replyToName,
-        ]);
-
-        $smtpHost = $_ENV['SMTP_HOST'] ?? null;
-
-        if ($smtpHost && class_exists(PHPMailer::class)) {
-            try {
-                $mail = self::buildMailer($to, $subject, $htmlMessage, $replyTo, $replyToName, true);
-                if (!$mail) {
-                    self::recordFailed($outboxId, 'No se pudo construir el mensaje SMTP.', ['transport' => 'smtp-html']);
-                    return false;
-                }
-                if ($plainMessage !== null && trim($plainMessage) !== '') {
-                    $mail->AltBody = $plainMessage;
-                }
-                $mail->send();
-                self::recordDelivered($outboxId, $mail->getLastMessageID(), ['transport' => 'smtp-html']);
-                return true;
-            } catch (Exception $e) {
-                error_log('SMTP HTML send failed: ' . $e->getMessage());
-                self::recordFailed($outboxId, $e->getMessage(), ['transport' => 'smtp-html']);
-                return false;
-            }
-        }
-
-        $fromAddress = $_ENV['MAIL_FROM_ADDRESS'] ?? 'no-reply@paramascotasec.com';
-        $fromName = $_ENV['MAIL_FROM_NAME'] ?? 'Para Mascotas EC';
-        $replyToHeader = ($replyTo && filter_var($replyTo, FILTER_VALIDATE_EMAIL)) ? $replyTo : $fromAddress;
-
-        $headers = [
-            'From: ' . $fromName . ' <' . $fromAddress . '>',
-            'Reply-To: ' . $replyToHeader,
-            'MIME-Version: 1.0',
-            'Content-Type: text/html; charset=UTF-8'
-        ];
-
-        $result = mail($to, $subject, $htmlMessage, implode("\r\n", $headers));
-        if (!$result) {
-            error_log('HTML mail() failed for: ' . $to);
-            self::recordFailed($outboxId, 'mail() returned false.', ['transport' => 'mail-html']);
-        } else {
-            self::recordDelivered($outboxId, null, ['transport' => 'mail-html']);
-        }
-
-        return $result;
+        return self::enqueue(
+            $to,
+            $subject,
+            'html',
+            $plainMessage ?? trim(strip_tags($htmlMessage)),
+            $htmlMessage,
+            $replyTo,
+            $replyToName,
+            $metadata,
+            $storedBody
+        );
     }
 
+    /**
+     * Attachments remain synchronous by design: persisting arbitrary binary
+     * documents in the general outbox would duplicate potentially sensitive
+     * fiscal/customer artifacts. The attempt and outcome are still durable,
+     * while the binary and body are never written to the audit row.
+     *
+     * @param array<string,mixed> $metadata
+     */
     public static function sendWithAttachment(
         string $to,
         string $subject,
@@ -214,88 +89,193 @@ class MailService {
         ?string $replyToName = null,
         array $metadata = []
     ): bool {
-        $outboxId = self::recordPending($to, $subject, $message, [
-            ...$metadata,
-            'transport' => 'attachment',
-            'reply_to' => $replyTo,
-            'reply_to_name' => $replyToName,
-            'attachment' => [
-                'name' => $attachmentName,
-                'mime_type' => $mimeType,
-                'bytes' => strlen($attachmentContent),
-            ],
-        ]);
-
-        $smtpHost = $_ENV['SMTP_HOST'] ?? null;
-        if (!$smtpHost || !class_exists(PHPMailer::class)) {
-            error_log('Attachment email requires configured SMTP/PHPMailer.');
-            self::recordFailed($outboxId, 'El envío con adjuntos requiere SMTP/PHPMailer configurado.', ['transport' => 'smtp']);
+        $tenantId = self::tenantId();
+        if ($tenantId === null) {
+            self::safeLog('mailer_attachment_rejected', 'TENANT_REQUIRED');
+            return false;
+        }
+        $maxAttachmentBytes = self::boundedInteger('MAILER_SYNC_ATTACHMENT_MAX_BYTES', 10485760, 1024, 26214400);
+        if (strlen($attachmentContent) > $maxAttachmentBytes || trim($attachmentContent) === '') {
+            self::safeLog('mailer_attachment_rejected', 'ATTACHMENT_SIZE_INVALID');
             return false;
         }
 
-        try {
-            $mail = self::buildMailer($to, $subject, $message, $replyTo, $replyToName, false);
-            if (!$mail) {
-                self::recordFailed($outboxId, 'No se pudo construir el mensaje SMTP.', ['transport' => 'smtp']);
-                return false;
-            }
-            $mail->addStringAttachment($attachmentContent, $attachmentName, PHPMailer::ENCODING_BASE64, $mimeType);
-            $mail->send();
-            self::recordDelivered($outboxId, $mail->getLastMessageID(), ['transport' => 'smtp']);
-            return true;
-        } catch (Exception $e) {
-            error_log('SMTP attachment send failed: ' . $e->getMessage());
-            self::recordFailed($outboxId, $e->getMessage(), ['transport' => 'smtp']);
-            return false;
-        }
-    }
-
-    private static function recordPending(string $to, string $subject, string $message, array $metadata): ?string
-    {
         try {
             $repository = new EmailOutboxRepository();
-            $record = $repository->createPending([
-                'to' => $to,
-                'subject' => $subject,
-                'body' => $message,
-                'metadata' => self::cleanMetadata($metadata),
-            ]);
-
-            return is_string($record['id'] ?? null) ? $record['id'] : null;
+            $audit = $repository->createAttachmentAudit(
+                $tenantId,
+                $to,
+                $subject,
+                'Synchronous attachment delivery; message body and binary omitted.',
+                [
+                    ...self::extractMetadata($metadata),
+                    'attachment' => [
+                        'name' => mb_substr(basename(str_replace('\\', '/', $attachmentName)), 0, 255),
+                        'mime_type' => mb_substr(trim($mimeType), 0, 127),
+                        'bytes' => strlen($attachmentContent),
+                        'binary_persisted' => false,
+                    ],
+                ]
+            );
         } catch (\Throwable $exception) {
-            error_log('Mailer outbox record failed: ' . $exception->getMessage());
+            self::safeLog('mailer_attachment_audit_failed', $exception::class);
+            return false;
+        }
+
+        try {
+            $result = (new SmtpMailTransport())->deliverAttachment(
+                $to,
+                $subject,
+                $message,
+                $attachmentName,
+                $attachmentContent,
+                $mimeType,
+                $replyTo,
+                $replyToName
+            );
+            $repository->completeAttachmentAudit($audit, true, $result->providerMessageId);
+            return true;
+        } catch (MailTransportException $exception) {
+            try {
+                $repository->completeAttachmentAudit(
+                    $audit,
+                    false,
+                    null,
+                    $exception->errorCode,
+                    MailPayloadSanitizer::error($exception->getMessage())
+                );
+            } catch (\Throwable $auditException) {
+                self::safeLog('mailer_attachment_outcome_audit_failed', $auditException::class);
+            }
+            self::safeLog('mailer_attachment_delivery_failed', $exception->errorCode);
+            return false;
+        } catch (\Throwable $exception) {
+            try {
+                $repository->completeAttachmentAudit($audit, false, null, 'SMTP_ATTACHMENT_UNEXPECTED');
+            } catch (\Throwable) {
+                // The stale audit lease is intentionally visible to health.
+            }
+            self::safeLog('mailer_attachment_delivery_failed', $exception::class);
+            return false;
+        }
+    }
+
+    /** @param array<string,mixed> $metadata */
+    private static function enqueue(
+        string $to,
+        string $subject,
+        string $format,
+        string $plainBody,
+        ?string $htmlBody,
+        ?string $replyTo,
+        ?string $replyToName,
+        array $metadata,
+        ?string $auditPreview
+    ): bool {
+        $tenantId = self::tenantId();
+        if ($tenantId === null) {
+            self::safeLog('mailer_enqueue_rejected', 'TENANT_REQUIRED');
+            return false;
+        }
+
+        try {
+            $idempotencyKey = self::extractStringOption($metadata, 'idempotency_key');
+            $ttlSeconds = self::extractIntegerOption(
+                $metadata,
+                'ttl_seconds',
+                self::boundedInteger('MAILER_OUTBOX_MESSAGE_TTL_SECONDS', 3600, 60, 604800),
+                60,
+                604800
+            );
+            $maxAttempts = self::extractIntegerOption(
+                $metadata,
+                'max_attempts',
+                self::boundedInteger('MAILER_OUTBOX_MAX_ATTEMPTS', 8, 1, 25),
+                1,
+                25
+            );
+            $message = QueuedMailMessage::create(
+                $tenantId,
+                $to,
+                $subject,
+                $format,
+                $plainBody,
+                $htmlBody,
+                $replyTo,
+                $replyToName,
+                self::extractMetadata($metadata),
+                $auditPreview,
+                $idempotencyKey,
+                $maxAttempts,
+                $ttlSeconds,
+                self::boundedInteger('MAILER_OUTBOX_MAX_BODY_BYTES', 262144, 1024, 1048576)
+            );
+            $accepted = (new EmailOutboxRepository())->enqueue($message);
+
+            return ($accepted['accepted'] ?? false) === true;
+        } catch (\Throwable $exception) {
+            // No address, subject, body, token, SMTP credential or raw database
+            // error reaches container logs.
+            self::safeLog('mailer_enqueue_failed', $exception::class);
+            return false;
+        }
+    }
+
+    /** @param array<string,mixed> $metadata @return array<string,mixed> */
+    private static function extractMetadata(array $metadata): array
+    {
+        unset($metadata['idempotency_key'], $metadata['ttl_seconds'], $metadata['max_attempts']);
+        return MailPayloadSanitizer::metadata($metadata);
+    }
+
+    /** @param array<string,mixed> $metadata */
+    private static function extractStringOption(array $metadata, string $key): ?string
+    {
+        if (!isset($metadata[$key]) || !is_scalar($metadata[$key])) {
             return null;
         }
+        $value = trim((string)$metadata[$key]);
+        return $value !== '' ? $value : null;
     }
 
-    private static function recordDelivered(?string $outboxId, ?string $providerMessageId = null, array $metadata = []): void
+    /** @param array<string,mixed> $metadata */
+    private static function extractIntegerOption(array $metadata, string $key, int $default, int $min, int $max): int
     {
-        if ($outboxId === null || $outboxId === '') {
-            return;
+        if (!array_key_exists($key, $metadata)) {
+            return $default;
         }
-
-        try {
-            (new EmailOutboxRepository())->markDelivered($outboxId, $providerMessageId, self::cleanMetadata($metadata));
-        } catch (\Throwable $exception) {
-            error_log('Mailer delivery log failed: ' . $exception->getMessage());
+        $value = filter_var($metadata[$key], FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => $min, 'max_range' => $max],
+        ]);
+        if ($value === false) {
+            throw new \InvalidArgumentException("Mailer {$key} is outside its safe range.");
         }
+        return (int)$value;
     }
 
-    private static function recordFailed(?string $outboxId, string $errorMessage, array $metadata = []): void
+    private static function boundedInteger(string $key, int $default, int $min, int $max): int
     {
-        if ($outboxId === null || $outboxId === '') {
-            return;
+        $raw = $_ENV[$key] ?? getenv($key);
+        $value = filter_var($raw === false || $raw === null || trim((string)$raw) === '' ? $default : $raw, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => $min, 'max_range' => $max],
+        ]);
+        if ($value === false) {
+            throw new \RuntimeException("{$key} is outside its safe range.");
         }
-
-        try {
-            (new EmailOutboxRepository())->markFailed($outboxId, $errorMessage, self::cleanMetadata($metadata));
-        } catch (\Throwable $exception) {
-            error_log('Mailer failure log failed: ' . $exception->getMessage());
-        }
+        return (int)$value;
     }
 
-    private static function cleanMetadata(array $metadata): array
+    private static function tenantId(): ?string
     {
-        return array_filter($metadata, static fn($value): bool => $value !== null && $value !== '');
+        $tenantId = trim((string)(TenantContext::id() ?? ''));
+        return preg_match('/^[a-z0-9][a-z0-9-]{0,62}$/', $tenantId) ? $tenantId : null;
+    }
+
+    private static function safeLog(string $event, string $code): void
+    {
+        error_log(json_encode([
+            'event' => $event,
+            'code' => mb_substr(preg_replace('/[^A-Za-z0-9_.:\\-]/', '_', $code) ?: 'UNKNOWN', 0, 160),
+        ], JSON_UNESCAPED_SLASHES));
     }
 }

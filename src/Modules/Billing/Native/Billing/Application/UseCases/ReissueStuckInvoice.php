@@ -77,6 +77,24 @@ class ReissueStuckInvoice
                 throw new \RuntimeException('La orden de la factura original no coincide con el payload guardado.');
             }
 
+            if ($this->containsSriErrorCode($oldInvoice['sri_messages'] ?? null, '45')) {
+                $branchId = (int) ($oldInvoice['branch_id'] ?? $this->clientContext['resolved_branch_id'] ?? 0);
+                $environment = trim((string) ($oldInvoice['ambiente'] ?? ''));
+                $sequential = trim((string) ($oldInvoice['sequential'] ?? ''));
+                if ($branchId <= 0 || !in_array($environment, ['pruebas', 'produccion'], true) || $sequential === '') {
+                    throw new \RuntimeException('No se pudo determinar el alcance del secuencial rechazado por el SRI.');
+                }
+                $this->invoiceRepository->advanceSequentialAfterSriCollision(
+                    $this->clientContext,
+                    $branchId,
+                    $environment,
+                    $sequential
+                );
+            }
+
+            // A reissue must bypass the ordinary source-reference idempotency
+            // lookup. Otherwise EmitInvoice returns the same rejected invoice
+            // and the replacement would be linked to itself.
             $response = $this->emitInvoice->execute(EmitInvoiceRequest::fromArray($rawRequest), false);
             $newInvoiceData = $response->toArray();
             $newAccessKey = AccessKey::fromValue((string) ($newInvoiceData['access_key'] ?? ''))->value();
@@ -122,6 +140,29 @@ class ReissueStuckInvoice
         }
 
         throw new \RuntimeException('La factura original no tiene payload raw_request reutilizable.');
+    }
+
+    private function containsSriErrorCode(mixed $messages, string $expectedCode): bool
+    {
+        if (!is_array($messages)) {
+            if (is_string($messages) && trim($messages) !== '') {
+                $decoded = json_decode($messages, true);
+                return is_array($decoded) && $this->containsSriErrorCode($decoded, $expectedCode);
+            }
+            return false;
+        }
+
+        $identifier = trim((string) ($messages['identificador'] ?? $messages['identifier'] ?? ''));
+        if ($identifier === $expectedCode) {
+            return true;
+        }
+        foreach ($messages as $value) {
+            if ($this->containsSriErrorCode($value, $expectedCode)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function publicInvoiceData(array $invoice): array

@@ -11,24 +11,6 @@ use Firebase\JWT\Key;
 class Auth {
     private static ?array $payload = null;
 
-    private static function trustedInternalProxyToken(): bool {
-        return (bool)($GLOBALS['trusted_internal_proxy_service_auth'] ?? false);
-    }
-
-    private static function internalProxyPayload(): array {
-        return [
-            'iat' => time(),
-            'sub' => 'service',
-            'email' => 'dashboard-internal@' . (TenantContext::slug() ?: 'tenant') . '.local',
-            'name' => 'dashboard internal proxy',
-            'role' => 'admin',
-            'tenant_id' => TenantContext::id(),
-            'aud' => AuthSurface::DASHBOARD,
-            'auth_surface' => AuthSurface::DASHBOARD,
-            'service_auth' => true,
-        ];
-    }
-
     private static function authCookieNames(): array {
         $baseName = trim((string)($_ENV['AUTH_COOKIE_NAME'] ?? 'pm_auth')) ?: 'pm_auth';
         return AuthSurface::authCookieCandidates($baseName);
@@ -76,10 +58,6 @@ class Auth {
 
     public static function requireAdmin(): array {
         $payload = self::requireUser();
-        if (!empty($payload['service_auth'])) {
-            self::$payload = $payload;
-            return $payload;
-        }
         $sub = $payload['sub'] ?? null;
         if (!$sub || !is_string($sub)) {
             Response::error('No autorizado', 403, 'AUTH_FORBIDDEN');
@@ -112,10 +90,6 @@ class Auth {
 
     public static function decodeFromRequest(bool $required): ?array {
         if (self::$payload !== null) {
-            return self::$payload;
-        }
-        if (self::trustedInternalProxyToken()) {
-            self::$payload = self::internalProxyPayload();
             return self::$payload;
         }
         $candidates = self::extractTokenCandidates();
@@ -204,13 +178,9 @@ class Auth {
     }
 
     private static function validateSurfaceOrThrow(array $payload): void {
-        if (!empty($payload['service_auth'])) {
-            return;
-        }
-
         $payloadSurface = strtolower(trim((string)($payload['auth_surface'] ?? $payload['aud'] ?? '')));
         if ($payloadSurface === '') {
-            return;
+            throw new \RuntimeException('AUTH_SURFACE_REQUIRED');
         }
 
         if (!in_array($payloadSurface, [AuthSurface::DASHBOARD, AuthSurface::ECOMMERCE], true)) {

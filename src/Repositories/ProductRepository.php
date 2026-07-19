@@ -2,8 +2,13 @@
 
 namespace App\Repositories;
 
+use App\Modules\Commerce\Application\TenantDefaultTaxRate;
+use App\Modules\Commerce\Domain\ProductTaxPolicy;
+
 use App\Core\Database;
 use App\Core\TenantContext;
+use App\Infrastructure\Storage\PublicUploadUrlResolver;
+use App\Modules\CatalogInventory\Application\PublicCatalogFilters;
 use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
 use App\Support\ProductAudience;
 use App\Support\ProductSeoMetadata;
@@ -13,13 +18,63 @@ class ProductRepository {
     private $taxRateCache = null;
     private $pricingSettingsCache = null;
 
+    /**
+     * Bounded SQL projection for reporting. It deliberately returns only
+     * scalar aggregates and never hydrates the catalog into PHP memory.
+     *
+     * @return array<string, int|float>
+     */
+    public function getProductAnalyticsAggregate(): array {
+        $statement = $this->db->prepare('
+            WITH metrics AS (
+                SELECT
+                    COALESCE(price, 0)::numeric AS price,
+                    COALESCE(cost, 0)::numeric AS cost,
+                    GREATEST(COALESCE(quantity, 0), 0)::numeric AS quantity
+                FROM "Product"
+                WHERE tenant_id = :tenant_id
+            )
+            SELECT
+                COUNT(*)::int AS total_monitored,
+                COUNT(*) FILTER (WHERE cost <= 0)::int AS missing_cost_count,
+                COUNT(*) FILTER (WHERE price > 0 AND cost > 0)::int AS priced_costed_products,
+                COUNT(*) FILTER (
+                    WHERE price > 0 AND cost > 0
+                      AND ((price - cost) / price) * 100 < 25
+                )::int AS low_margin_opportunities,
+                COALESCE(AVG(((price - cost) / NULLIF(price, 0)) * 100)
+                    FILTER (WHERE price > 0 AND cost > 0), 0) AS average_margin,
+                COALESCE(
+                    SUM((price - cost) * quantity) FILTER (WHERE price > 0 AND cost > 0)
+                    / NULLIF(SUM(price * quantity) FILTER (WHERE price > 0 AND cost > 0), 0)
+                    * 100,
+                    0
+                ) AS weighted_margin,
+                COALESCE(SUM(cost * quantity), 0) AS stock_value_at_cost
+            FROM metrics
+        ');
+        $statement->execute(['tenant_id' => TenantContext::id()]);
+        $row = $statement->fetch() ?: [];
+
+        return [
+            'averageMargin' => round((float)($row['average_margin'] ?? 0), 1),
+            'weightedMargin' => round((float)($row['weighted_margin'] ?? 0), 1),
+            'lowMarginOpportunities' => (int)($row['low_margin_opportunities'] ?? 0),
+            'missingCostCount' => (int)($row['missing_cost_count'] ?? 0),
+            'stockValueAtCost' => round((float)($row['stock_value_at_cost'] ?? 0), 2),
+            'totalMonitored' => (int)($row['total_monitored'] ?? 0),
+            'pricedCostedProducts' => (int)($row['priced_costed_products'] ?? 0),
+        ];
+    }
+
     public function __construct() {
         $this->db = Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
-    private function getBaseQuery(bool $includeProcurement = false) {
+    private function getBaseQuery(bool $includeProcurement = false, bool $includePrivate = true) {
         $procurementSelect = '';
         $procurementJoin = '';
+        $costSelect = $includePrivate ? 'p.cost' : 'NULL::numeric';
 
         if ($includeProcurement) {
             $procurementSelect = '
@@ -117,6 +172,7 @@ class ProductRepository {
             ON o.id = oi.order_id
            AND o.tenant_id = p.tenant_id
           WHERE oi.product_id = p.id
+            AND oi.tenant_id = p.tenant_id
             AND LOWER(COALESCE(o.status, \'pending\')) IN (\'delivered\', \'completed\')
         ) sales_stats ON true
         ';
@@ -135,7 +191,7 @@ class ProductRepository {
           p.is_published AS "published",
           p.price AS "price",
           p.original_price AS "originPrice",
-          p.cost AS "cost", 
+          ' . $costSelect . ' AS "cost",
           p.brand AS "brand",
           p.sold AS "sold",
           p.quantity AS "quantity",
@@ -164,6 +220,7 @@ class ProductRepository {
             ) ORDER BY i.display_order, i.id) AS image_meta
           FROM "Image" i
           WHERE i.product_id = p.id
+            AND i.tenant_id = p.tenant_id
         ) img ON true
         LEFT JOIN LATERAL (
           SELECT json_agg(jsonb_build_object(
@@ -174,6 +231,7 @@ class ProductRepository {
           ) ORDER BY v.id) AS variations
           FROM "Variation" v
           WHERE v.product_id = p.id
+            AND v.tenant_id = p.tenant_id
         ) var ON true
         ' . $procurementJoin;
     }
@@ -189,6 +247,7 @@ class ProductRepository {
     public function getAll(array $options = []) {
         $includeUnpublished = (bool)($options['includeUnpublished'] ?? false);
         $includeProcurement = (bool)($options['includeProcurement'] ?? false);
+        $includePrivate = (bool)($options['includePrivate'] ?? ($includeUnpublished || $includeProcurement));
         $includeArchived = (bool)($options['includeArchived'] ?? false);
         $includeOutOfStock = array_key_exists('includeOutOfStock', $options)
             ? (bool)$options['includeOutOfStock']
@@ -196,11 +255,215 @@ class ProductRepository {
         $visibilityFilter = $includeUnpublished ? '' : ' AND p.is_published = true';
         $stockFilter = $includeOutOfStock ? '' : ' AND p.quantity > 0';
         $archivedFilter = $this->getArchivedFilter($includeArchived);
-        $sql = $this->getBaseQuery($includeProcurement) . ' WHERE p.tenant_id = :tenant_id' . $visibilityFilter . $stockFilter . $archivedFilter . ' ORDER BY p.created_at DESC';
+        $sql = $this->getBaseQuery($includeProcurement, $includePrivate) . ' WHERE p.tenant_id = :tenant_id' . $visibilityFilter . $stockFilter . $archivedFilter . ' ORDER BY p.created_at DESC';
         $stmt = $this->db->prepare($sql);
         $stmt->execute(['tenant_id' => $this->getTenantId()]);
         $rows = $stmt->fetchAll();
-        return array_map([$this, 'formatRow'], $rows);
+        return array_map(fn ($row) => $this->formatRow($row, $includePrivate), $rows);
+    }
+
+    private function publicSlugSql(string $expression): string {
+        return "TRIM(BOTH '-' FROM REGEXP_REPLACE(TRANSLATE(LOWER(COALESCE({$expression}, '')), 'áéíóúüñ', 'aeiouun'), '[^a-z0-9]+', '-', 'g'))";
+    }
+
+    /**
+     * @param array<string, mixed> $filters
+     * @param array<string, mixed> $params
+     */
+    private function publicCatalogFilterSql(array $filters, array &$params): string {
+        $sql = '';
+
+        $category = trim((string)($filters['category'] ?? ''));
+        if ($category !== '') {
+            $params['catalog_category_value'] = $category;
+            $params['catalog_category_type'] = $category;
+            $params['catalog_category_additional'] = $category;
+            $categorySql = $this->publicSlugSql('p.category');
+            $productTypeSql = $this->publicSlugSql('p.product_type');
+            $additionalCategoriesSql = $this->publicSlugSql("p.attributes->>'catalogCategories'");
+            $sql .= " AND ({$categorySql} = :catalog_category_value"
+                . " OR {$productTypeSql} = :catalog_category_type"
+                . " OR ('-' || {$additionalCategoriesSql} || '-') LIKE ('%-' || :catalog_category_additional || '-%'))";
+        }
+
+        $productType = trim((string)($filters['productType'] ?? ''));
+        if ($productType !== '') {
+            $params['catalog_product_type'] = $productType;
+            $sql .= ' AND ' . $this->publicSlugSql('p.product_type') . ' = :catalog_product_type';
+        }
+
+        $gender = trim((string)($filters['gender'] ?? ''));
+        if ($gender !== '') {
+            $params['catalog_gender'] = $gender;
+            $normalizedGenderSql = $this->publicSlugSql('p.gender');
+            $sql .= " AND CASE"
+                . " WHEN {$normalizedGenderSql} IN ('dog', 'perro', 'perros', 'canino', 'caninos') THEN 'dog'"
+                . " WHEN {$normalizedGenderSql} IN ('cat', 'gato', 'gatos', 'felino', 'felinos') THEN 'cat'"
+                . " ELSE {$normalizedGenderSql} END = :catalog_gender";
+        }
+
+        $brandSlug = trim((string)($filters['brandSlug'] ?? ''));
+        if ($brandSlug !== '') {
+            $params['catalog_brand_exact'] = $brandSlug;
+            $params['catalog_brand_name'] = $brandSlug;
+            $brandSql = $this->publicSlugSql('p.brand');
+            $nameSql = $this->publicSlugSql('p.name');
+            $sql .= " AND ({$brandSql} = :catalog_brand_exact"
+                . " OR ('-' || {$nameSql} || '-') LIKE ('%-' || :catalog_brand_name || '-%'))";
+        }
+
+        $variantGroup = trim((string)($filters['variantGroup'] ?? ''));
+        if ($variantGroup !== '') {
+            $params['catalog_variant_group'] = $variantGroup;
+            $sql .= " AND COALESCE(p.attributes->>'variantGroupKey', '') = :catalog_variant_group";
+        }
+
+        if (($filters['saleOnly'] ?? false) === true) {
+            $sql .= ' AND (p.is_sale = true OR (p.original_price > 0 AND p.original_price > p.price))';
+        }
+
+        $ids = is_array($filters['ids'] ?? null) ? $filters['ids'] : [];
+        if ($ids !== []) {
+            $idClauses = [];
+            foreach (array_values($ids) as $index => $id) {
+                $idKey = 'catalog_id_' . $index;
+                $legacyKey = 'catalog_legacy_id_' . $index;
+                $slugKey = 'catalog_slug_' . $index;
+                $params[$idKey] = (string)$id;
+                $params[$legacyKey] = (string)$id;
+                $params[$slugKey] = (string)$id;
+                $idClauses[] = "(p.id = :{$idKey} OR p.legacy_id = :{$legacyKey} OR p.slug = :{$slugKey})";
+            }
+            $sql .= ' AND (' . implode(' OR ', $idClauses) . ')';
+        }
+
+        $search = trim((string)($filters['search'] ?? ''));
+        if ($search !== '') {
+            $tokens = array_slice(array_values(array_filter(
+                explode('-', PublicCatalogFilters::slug($search)),
+                static fn(string $token): bool => $token !== ''
+            )), 0, 6);
+            if ($tokens !== []) {
+                $params['catalog_search_query'] = implode(':* & ', $tokens) . ':*';
+                $searchDocument = "TRANSLATE(LOWER("
+                    . "COALESCE(p.name, '') || ' ' || COALESCE(p.brand, '') || ' '"
+                    . "|| COALESCE(p.category, '') || ' ' || COALESCE(p.product_type, '') || ' '"
+                    . "|| COALESCE(p.gender, '') || ' ' || COALESCE(p.description, '') || ' '"
+                    . "|| COALESCE(p.attributes->>'sku', '') || ' '"
+                    . "|| COALESCE(p.attributes->>'presentation', '') || ' '"
+                    . "|| COALESCE(p.attributes->>'variantLabel', '') || ' '"
+                    . "|| COALESCE(p.attributes->>'catalogCategories', '')"
+                    . "), 'áéíóúüñ', 'aeiouun')";
+                $sql .= " AND TO_TSVECTOR('simple', {$searchDocument})"
+                    . " @@ TO_TSQUERY('simple', :catalog_search_query)";
+            }
+        }
+
+        return $sql;
+    }
+
+    /**
+     * Cursor pagination is mandatory for the public catalog. The admin-only
+     * getAll() contract remains available for operational screens, while this
+     * query bounds database work and response size for Internet traffic.
+     *
+     * @param array{createdAt: string, id: string}|null $cursor
+     * @param array<string, mixed> $filters
+     * @return array{items: array<int, array>, nextPosition: array{createdAt: string, id: string}|null}
+     */
+    public function getPublicPage(int $pageSize, ?array $cursor = null, array $filters = []): array {
+        $pageSize = max(1, min(100, $pageSize));
+        $params = ['tenant_id' => $this->getTenantId()];
+        $cursorFilter = '';
+
+        if ($cursor !== null) {
+            $cursorFilter = ' AND (p.created_at, p.id) < (:cursor_created_at, :cursor_id)';
+            $params['cursor_created_at'] = (string)$cursor['createdAt'];
+            $params['cursor_id'] = (string)$cursor['id'];
+        }
+
+        $sql = $this->getBaseQuery(false, false)
+            . ' WHERE p.tenant_id = :tenant_id'
+            . ' AND p.is_published = true'
+            . ' AND p.quantity > 0'
+            . $this->getArchivedFilter(false)
+            . $this->publicCatalogFilterSql($filters, $params)
+            . $cursorFilter
+            . ' ORDER BY p.created_at DESC, p.id DESC'
+            . ' LIMIT ' . ($pageSize + 1);
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
+        $hasMore = count($rows) > $pageSize;
+        if ($hasMore) {
+            $rows = array_slice($rows, 0, $pageSize);
+        }
+
+        $nextPosition = null;
+        if ($hasMore && $rows !== []) {
+            $last = $rows[array_key_last($rows)];
+            $nextPosition = [
+                'createdAt' => (string)$last['createdAt'],
+                'id' => (string)$last['id'],
+            ];
+        }
+
+        return [
+            'items' => array_map(fn ($row) => $this->formatRow($row, false), $rows),
+            'nextPosition' => $nextPosition,
+        ];
+    }
+
+    /**
+     * Pagina el catalogo operativo sin cargar todas las filas ni sus relaciones
+     * laterales en una sola consulta. El cursor es estable por created_at + id.
+     *
+     * @param array{createdAt:string,id:string}|null $cursor
+     * @param array{includeProcurement?:bool,includeArchived?:bool} $options
+     * @return array{items:array<int,array<string,mixed>>,nextPosition:array{createdAt:string,id:string}|null}
+     */
+    public function getAdminPage(int $pageSize, ?array $cursor = null, array $options = []): array {
+        $pageSize = max(1, min(100, $pageSize));
+        $includeProcurement = (bool)($options['includeProcurement'] ?? false);
+        $includeArchived = (bool)($options['includeArchived'] ?? false);
+        $params = ['tenant_id' => $this->getTenantId()];
+        $cursorFilter = '';
+
+        if ($cursor !== null) {
+            $cursorFilter = ' AND (p.created_at, p.id) < (:cursor_created_at, :cursor_id)';
+            $params['cursor_created_at'] = (string)$cursor['createdAt'];
+            $params['cursor_id'] = (string)$cursor['id'];
+        }
+
+        $sql = $this->getBaseQuery($includeProcurement, true)
+            . ' WHERE p.tenant_id = :tenant_id'
+            . $this->getArchivedFilter($includeArchived)
+            . $cursorFilter
+            . ' ORDER BY p.created_at DESC, p.id DESC'
+            . ' LIMIT ' . ($pageSize + 1);
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
+        $hasMore = count($rows) > $pageSize;
+        if ($hasMore) {
+            $rows = array_slice($rows, 0, $pageSize);
+        }
+
+        $nextPosition = null;
+        if ($hasMore && $rows !== []) {
+            $last = $rows[array_key_last($rows)];
+            $nextPosition = [
+                'createdAt' => (string)$last['createdAt'],
+                'id' => (string)$last['id'],
+            ];
+        }
+
+        return [
+            'items' => array_map(fn ($row) => $this->formatRow($row, true), $rows),
+            'nextPosition' => $nextPosition,
+        ];
     }
 
     public function searchForBilling(string $search = '', int $limit = 12, array $options = []): array {
@@ -220,6 +483,7 @@ class ProductRepository {
         $orderBy = ' ORDER BY (p.quantity > 0) DESC, p.updated_at DESC, p.created_at DESC, p.id DESC';
 
         if ($search !== '') {
+            $params['tax_default_rate'] = $this->getTaxRate();
             $tokens = array_slice(preg_split('/\s+/', $search) ?: [], 0, 6);
             foreach ($tokens as $index => $token) {
                 $token = trim($token);
@@ -242,9 +506,21 @@ class ProductRepository {
                         p.price * (
                           1 + (
                             CASE
-                              WHEN COALESCE(p.attributes->>'taxRate', '') ~ '^[0-9]+(\\.[0-9]+)?$'
-                                THEN (p.attributes->>'taxRate')::numeric
-                              ELSE 15
+                              WHEN LOWER(COALESCE(
+                                p.attributes->>'taxExempt',
+                                p.attributes->>'tax_exempt',
+                                'false'
+                              )) IN ('1', 'true', 't', 'yes', 'y', 'on', 'si', 'sí') THEN 0
+                              WHEN REPLACE(COALESCE(
+                                p.attributes->>'taxRate',
+                                p.attributes->>'tax_rate',
+                                ''
+                              ), ',', '.') ~ '^[+-]?[0-9]+(\\.[0-9]+)?$'
+                                THEN LEAST(100, GREATEST(0, REPLACE(COALESCE(
+                                  p.attributes->>'taxRate',
+                                  p.attributes->>'tax_rate'
+                                ), ',', '.')::numeric))
+                              ELSE :tax_default_rate
                             END
                           ) / 100
                         )
@@ -269,7 +545,7 @@ class ProductRepository {
             ";
         }
 
-        $sql = $this->getBaseQuery($includeProcurement)
+        $sql = $this->getBaseQuery($includeProcurement, true)
             . ' WHERE p.tenant_id = :tenant_id'
             . $visibilityFilter
             . $stockFilter
@@ -281,12 +557,13 @@ class ProductRepository {
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
 
-        return array_map([$this, 'formatRow'], $rows);
+        return array_map(fn ($row) => $this->formatRow($row, true), $rows);
     }
 
     public function getById($idOrLegacyOrSlug, array $options = []) {
         $includeUnpublished = (bool)($options['includeUnpublished'] ?? false);
         $includeProcurement = (bool)($options['includeProcurement'] ?? false);
+        $includePrivate = (bool)($options['includePrivate'] ?? ($includeUnpublished || $includeProcurement));
         $includeProcurementDetail = (bool)($options['includeProcurementDetail'] ?? false);
         $includeArchived = (bool)($options['includeArchived'] ?? false);
         $includeOutOfStock = array_key_exists('includeOutOfStock', $options)
@@ -295,10 +572,20 @@ class ProductRepository {
         $visibilityFilter = $includeUnpublished ? '' : ' AND p.is_published = true';
         $stockFilter = $includeOutOfStock ? '' : ' AND p.quantity > 0';
         $archivedFilter = $this->getArchivedFilter($includeArchived);
-        $sql = $this->getBaseQuery($includeProcurement) . ' WHERE p.tenant_id = :tenant_id AND (p.id = :id OR p.legacy_id = :id OR p.slug = :id)' . $visibilityFilter . $stockFilter . $archivedFilter . ' LIMIT 1';
+        $sql = $this->getBaseQuery($includeProcurement, $includePrivate)
+            . " WHERE p.tenant_id = :tenant_id AND ("
+            . "p.id = :id_exact OR p.legacy_id = :legacy_exact OR p.slug = :slug_exact"
+            . " OR LOWER(:id_suffix) LIKE '%-' || LOWER(p.id)"
+            . " OR (p.legacy_id IS NOT NULL AND LOWER(:legacy_suffix) LIKE '%-' || LOWER(p.legacy_id))"
+            . ')'
+            . $visibilityFilter . $stockFilter . $archivedFilter . ' LIMIT 1';
         $stmt = $this->db->prepare($sql);
         $stmt->execute([
-            'id' => $idOrLegacyOrSlug,
+            'id_exact' => $idOrLegacyOrSlug,
+            'legacy_exact' => $idOrLegacyOrSlug,
+            'slug_exact' => $idOrLegacyOrSlug,
+            'id_suffix' => $idOrLegacyOrSlug,
+            'legacy_suffix' => $idOrLegacyOrSlug,
             'tenant_id' => $this->getTenantId()
         ]);
         $row = $stmt->fetch();
@@ -306,7 +593,7 @@ class ProductRepository {
             return null;
         }
 
-        $formatted = $this->formatRow($row);
+        $formatted = $this->formatRow($row, $includePrivate);
         if ($includeProcurementDetail) {
             $formatted['inventory']['procurementDetail'] = $this->buildProcurementDetail($formatted);
         }
@@ -389,6 +676,7 @@ class ProductRepository {
               ON o.id = oi.order_id
              AND o.tenant_id = :tenant_id
             WHERE oi.product_id = :product_id
+              AND oi.tenant_id = :tenant_id
               AND LOWER(COALESCE(o.status, 'pending')) IN ('completed', 'delivered')
               {$dateFilter}
         ");
@@ -422,6 +710,7 @@ class ProductRepository {
               ON u.id = o.user_id
              AND u.tenant_id = o.tenant_id
             WHERE oi.product_id = :product_id
+              AND oi.tenant_id = :tenant_id
               AND LOWER(COALESCE(o.status, 'pending')) IN ('completed', 'delivered')
               {$dateFilter}
             ORDER BY o.created_at DESC, o.id DESC
@@ -607,7 +896,7 @@ class ProductRepository {
         return (bool)$stmt->fetchColumn();
     }
 
-    private function formatRow($row) {
+    private function formatRow($row, bool $includePrivate = true) {
         $row['images'] = json_decode($row['images'] ?? '[]', true);
         $row['thumbImage'] = json_decode($row['thumbs'] ?? '[]', true);
         $row['imageMeta'] = json_decode($row['imageMeta'] ?? '[]', true);
@@ -650,23 +939,33 @@ class ProductRepository {
 
         ProductSeoMetadata::applyDefaults($row);
 
-        $taxRate = $this->getProductTaxRateForAttributes($row['attributes']);
-        $taxMultiplier = $this->getProductTaxMultiplierForAttributes($row['attributes']);
+        $taxRate = $this->getProductTaxRateForAttributes($row['attributes'], !$includePrivate);
+        $taxMultiplier = 1 + ($taxRate / 100);
+        $taxExempt = ProductTaxPolicy::isExempt($row['attributes']);
+        $taxTreatment = $taxExempt
+            ? ProductTaxPolicy::TREATMENT_EXEMPT
+            : ($taxRate === 0.0
+                ? ProductTaxPolicy::TREATMENT_ZERO_RATED
+                : ProductTaxPolicy::TREATMENT_TAXED);
         $row['price'] = round(floatval($row['price'] ?? 0) * $taxMultiplier, 2);
         $row['originPrice'] = round(floatval($row['originPrice'] ?? 0) * $taxMultiplier, 2);
         $row['tax'] = [
             'rate' => round($taxRate, 2),
             'multiplier' => round($taxMultiplier, 4),
-            'exempt' => $taxRate <= 0,
+            'exempt' => $taxExempt,
+            'zeroRated' => $taxTreatment === ProductTaxPolicy::TREATMENT_ZERO_RATED,
+            'treatment' => $taxTreatment,
         ];
         
         // Smart Business Logic
         $cost = floatval($row['cost'] ?? 0);
         $price = floatval($row['price'] ?? 0);
         $priceNet = $taxMultiplier > 0 ? ($price / $taxMultiplier) : $price;
-        $pricing = $this->getPricingSettings();
+        if ($includePrivate) {
+            $pricing = $this->getPricingSettings();
+        }
 
-        if ($cost > 0) {
+        if ($includePrivate && $cost > 0) {
             $minMargin = $pricing['minMargin'];
             $baseMargin = $pricing['baseMargin'];
             $targetMargin = $pricing['targetMargin'];
@@ -716,7 +1015,7 @@ class ProductRepository {
                     'max_price_pvp' => round($maxPriceNet * $taxMultiplier, 2)
                 ]
             ];
-        } else {
+        } elseif ($includePrivate) {
             // Default if no cost set yet
             $roundedNet = $this->applyPricingAdjustments($priceNet, $taxMultiplier, $pricing['rounding'], $pricing['includeVatInPvp'], $pricing['shippingBuffer']);
             $row['business'] = [
@@ -732,6 +1031,8 @@ class ProductRepository {
                     'max_price_pvp' => round(($roundedNet * 1.2) * $taxMultiplier, 2)
                 ]
             ];
+        } else {
+            unset($row['cost'], $row['business']);
         }
 
         $row['expirationDate'] = $expirationDate;
@@ -800,39 +1101,47 @@ class ProductRepository {
         $saleTotalGross = round($price * $stockQty, 2);
 
         $row['inventoryStatus'] = $stockStatus;
-        $row['inventory'] = [
-            'onHand' => $stockQty,
-            'reserved' => 0,
-            'available' => $stockQty,
-            'soldHistorical' => $soldHistorical,
-            'reorderPoint' => $reorderPoint,
-            'criticalPoint' => $criticalPoint,
-            'overstockThreshold' => $overstockThreshold,
-            'stockMax' => $stockMax,
-            'status' => $stockStatus,
-            'coverage' => [
-                'days' => $coverageDays,
-                'avgMonthlySales' => round($avgMonthlySales, 2),
-                'windowMonths' => $velocityWindowMonths,
-                'confidence' => $avgMonthlySales >= 1 ? 'medium' : 'low'
-            ],
-            'valuation' => [
-                'costTotal' => $costTotal,
-                'saleTotalNet' => $saleTotalNet,
-                'saleTotalGross' => $saleTotalGross
-            ],
-            'lot' => [
-                'code' => $row['attributes']['lotCode'] ?? null,
-                'location' => $row['attributes']['storageLocation'] ?? ($row['attributes']['warehouseLocation'] ?? null),
-                'supplier' => $row['attributes']['supplier'] ?? null
-            ],
-            'expiration' => [
-                'date' => $expirationDate,
-                'alertDays' => $expirationAlertDays,
-                'daysToExpire' => $row['daysToExpire'],
-                'status' => $row['expirationStatus']
-            ]
-        ];
+        if ($includePrivate) {
+            $row['inventory'] = [
+                'onHand' => $stockQty,
+                'reserved' => 0,
+                'available' => $stockQty,
+                'soldHistorical' => $soldHistorical,
+                'reorderPoint' => $reorderPoint,
+                'criticalPoint' => $criticalPoint,
+                'overstockThreshold' => $overstockThreshold,
+                'stockMax' => $stockMax,
+                'status' => $stockStatus,
+                'coverage' => [
+                    'days' => $coverageDays,
+                    'avgMonthlySales' => round($avgMonthlySales, 2),
+                    'windowMonths' => $velocityWindowMonths,
+                    'confidence' => $avgMonthlySales >= 1 ? 'medium' : 'low'
+                ],
+                'valuation' => [
+                    'costTotal' => $costTotal,
+                    'saleTotalNet' => $saleTotalNet,
+                    'saleTotalGross' => $saleTotalGross
+                ],
+                'lot' => [
+                    'code' => $row['attributes']['lotCode'] ?? null,
+                    'location' => $row['attributes']['storageLocation'] ?? ($row['attributes']['warehouseLocation'] ?? null),
+                    'supplier' => $row['attributes']['supplier'] ?? null
+                ],
+                'expiration' => [
+                    'date' => $expirationDate,
+                    'alertDays' => $expirationAlertDays,
+                    'daysToExpire' => $row['daysToExpire'],
+                    'status' => $row['expirationStatus']
+                ]
+            ];
+        } else {
+            $row['inventory'] = [
+                'onHand' => $stockQty,
+                'available' => $stockQty,
+                'status' => $stockStatus,
+            ];
+        }
 
         if (array_key_exists('lastPurchaseInvoiceId', $row) || array_key_exists('purchaseEntriesCount', $row)) {
             $lastPurchaseInvoiceId = trim((string)($row['lastPurchaseInvoiceId'] ?? ''));
@@ -913,6 +1222,8 @@ class ProductRepository {
         $priceGross = round((float)($product['price'] ?? 0), 2);
         $productAttributes = $this->normalizeProductAttributes($product['attributes'] ?? []);
         $taxRate = $this->getProductTaxRateForAttributes($productAttributes);
+        $taxExempt = ProductTaxPolicy::isExempt($productAttributes);
+        $taxTreatment = ProductTaxPolicy::treatment($productAttributes, $this->getTaxRate());
         $taxMultiplier = $this->getProductTaxMultiplierForAttributes($productAttributes);
         $priceNet = $taxMultiplier > 0 ? round($priceGross / $taxMultiplier, 4) : round($priceGross, 4);
 
@@ -925,7 +1236,8 @@ class ProductRepository {
                 'price_gross' => $priceGross,
                 'price_net' => $priceNet,
                 'tax_rate' => round($taxRate, 2),
-                'tax_exempt' => $taxRate <= 0,
+                'tax_exempt' => $taxExempt,
+                'tax_treatment' => $taxTreatment,
                 'entries_count' => 0,
                 'open_lots_count' => 0,
                 'purchased_units_total' => 0,
@@ -1055,7 +1367,8 @@ class ProductRepository {
             'price_gross' => $priceGross,
             'price_net' => $priceNet,
             'tax_rate' => round($taxRate, 2),
-            'tax_exempt' => $taxRate <= 0,
+            'tax_exempt' => $taxExempt,
+            'tax_treatment' => $taxTreatment,
             'entries_count' => count($lots),
             'open_lots_count' => $openLotsCount,
             'purchased_units_total' => $purchasedUnitsTotal,
@@ -1132,7 +1445,7 @@ class ProductRepository {
             return $url;
         }
         if (strpos($url, '/uploads/') === 0) {
-            return $url;
+            return PublicUploadUrlResolver::runtime()->resolve($url);
         }
         if (strpos($url, 'http://') === 0 || strpos($url, 'https://') === 0) {
             return $url;
@@ -1189,23 +1502,25 @@ class ProductRepository {
         if (!is_array($entries)) {
             return;
         }
+        $tenantId = $this->getTenantId();
         if ($kind === 'gallery') {
-            $stmt = $this->db->prepare('DELETE FROM "Image" WHERE product_id = :id AND (kind = :kind OR kind IS NULL)');
-            $stmt->execute(['id' => $productId, 'kind' => $kind]);
+            $stmt = $this->db->prepare('DELETE FROM "Image" WHERE tenant_id = :tenant_id AND product_id = :id AND (kind = :kind OR kind IS NULL)');
+            $stmt->execute(['tenant_id' => $tenantId, 'id' => $productId, 'kind' => $kind]);
         } else {
-            $stmt = $this->db->prepare('DELETE FROM "Image" WHERE product_id = :id AND kind = :kind');
-            $stmt->execute(['id' => $productId, 'kind' => $kind]);
+            $stmt = $this->db->prepare('DELETE FROM "Image" WHERE tenant_id = :tenant_id AND product_id = :id AND kind = :kind');
+            $stmt->execute(['tenant_id' => $tenantId, 'id' => $productId, 'kind' => $kind]);
         }
         if (count($entries) === 0) {
             return;
         }
         $stmt = $this->db->prepare('
-            INSERT INTO "Image" (id, url, product_id, kind, width, height, alt_text, display_order)
-            VALUES (:id, :url, :product_id, :kind, :width, :height, :alt_text, :display_order)
+            INSERT INTO "Image" (id, tenant_id, url, product_id, kind, width, height, alt_text, display_order)
+            VALUES (:id, :tenant_id, :url, :product_id, :kind, :width, :height, :alt_text, :display_order)
         ');
         foreach ($entries as $index => $entry) {
             $stmt->execute([
                 'id' => uniqid('img_'),
+                'tenant_id' => $tenantId,
                 'url' => $entry['url'],
                 'product_id' => $productId,
                 'kind' => $entry['kind'] ?? $kind,
@@ -1221,11 +1536,8 @@ class ProductRepository {
         if ($this->taxRateCache !== null) {
             return $this->taxRateCache;
         }
-        $settings = new \App\Repositories\SettingsRepository();
-        $value = $settings->get('vat_rate');
-        $rate = is_numeric($value) ? floatval($value) : 0;
-        $this->taxRateCache = $rate;
-        return $rate;
+        $this->taxRateCache = TenantDefaultTaxRate::current();
+        return $this->taxRateCache;
     }
 
     private function normalizeBooleanAttribute($value, bool $default = false): bool {
@@ -1259,26 +1571,25 @@ class ProductRepository {
     }
 
     private function isProductTaxExempt($attributes): bool {
-        if (!is_array($attributes)) {
-            return false;
-        }
-        return $this->normalizeBooleanAttribute(
-            $attributes['taxExempt'] ?? ($attributes['tax_exempt'] ?? false),
-            false
-        );
+        return is_array($attributes) && ProductTaxPolicy::isExempt($attributes);
     }
 
-    private function getProductTaxRateForAttributes($attributes): float {
-        if ($this->isProductTaxExempt($attributes)) {
-            return 0.0;
-        }
+    private function getProductTaxRateForAttributes($attributes, bool $useRuntimeDefault = false): float {
+        $normalizedAttributes = is_array($attributes) ? $attributes : [];
+        $defaultRate = $useRuntimeDefault
+            ? $this->getRuntimeDefaultTaxRate()
+            : $this->getTaxRate();
+        return ProductTaxPolicy::rate($normalizedAttributes, $defaultRate);
+    }
 
-        $rawRate = is_array($attributes) ? ($attributes['taxRate'] ?? null) : null;
-        if ($rawRate !== null && $rawRate !== '' && is_numeric($rawRate)) {
-            return max(0, round((float)$rawRate, 2));
-        }
-
-        return $this->getTaxRate();
+    /**
+     * Public catalog reads must remain inside the ecommerce data boundary.
+     * The tenant registry snapshot carries the bounded canonical default for
+     * both public and authenticated pricing paths; no legacy Setting read is
+     * permitted here.
+     */
+    private function getRuntimeDefaultTaxRate(): float {
+        return TenantDefaultTaxRate::current();
     }
 
     private function parseTaxRateValue($value): ?float {

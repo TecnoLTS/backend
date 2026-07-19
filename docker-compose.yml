@@ -4,6 +4,45 @@ x-default-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+x-storage-environment: &storage-environment
+  STORAGE_DRIVER: ${STORAGE_DRIVER:-}
+  REQUIRE_HA: ${REQUIRE_HA:-false}
+  STORAGE_LOCAL_ARTIFACT_ROOT: /var/www/html/storage
+  STORAGE_LOCAL_UPLOAD_ROOT: /var/www/html/public/uploads
+  STORAGE_TEMP_ROOT: ${STORAGE_TEMP_ROOT:-/tmp/backend-object-storage}
+  OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-}
+  OBJECT_STORAGE_PUBLIC_BASE_URL: ${OBJECT_STORAGE_PUBLIC_BASE_URL:-}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-}
+  OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+  OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-}
+  OBJECT_STORAGE_ACCESS_KEY_FILE: ${OBJECT_STORAGE_ACCESS_KEY_FILE:-}
+  OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-}
+  OBJECT_STORAGE_SECRET_KEY_FILE: ${OBJECT_STORAGE_SECRET_KEY_FILE:-}
+  OBJECT_STORAGE_SESSION_TOKEN: ${OBJECT_STORAGE_SESSION_TOKEN:-}
+  OBJECT_STORAGE_SESSION_TOKEN_FILE: ${OBJECT_STORAGE_SESSION_TOKEN_FILE:-}
+  OBJECT_STORAGE_PREFIX: ${OBJECT_STORAGE_PREFIX:-paramascotasec}
+  OBJECT_STORAGE_PATH_STYLE: ${OBJECT_STORAGE_PATH_STYLE:-true}
+  OBJECT_STORAGE_TLS_VERIFY: ${OBJECT_STORAGE_TLS_VERIFY:-true}
+  OBJECT_STORAGE_TIMEOUT_SECONDS: ${OBJECT_STORAGE_TIMEOUT_SECONDS:-15}
+  OBJECT_STORAGE_CANARY_ENABLED: ${OBJECT_STORAGE_CANARY_ENABLED:-false}
+
+secrets:
+  billing-secret-keyring:
+    file: ${BILLING_SECRET_KEYRING_HOST_PATH:-./entorno/.secrets/billing-secret-keyring.json}
+  commerce-billing-credentials:
+    file: ${BILLING_OUTBOX_CREDENTIALS_HOST_PATH:-./entorno/.secrets/commerce-billing-credentials.json}
+
+# Socket efimero compartido exclusivamente entre PHP-FPM y su Nginx interno.
+# El volumen tmpfs evita inodes obsoletos en disco y fija ownership antes de
+# que arranquen contenedores sin privilegios.
+volumes:
+  fpm-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=82,gid=82,mode=0770
+
 services:
   api:
     image: backend-api
@@ -12,6 +51,12 @@ services:
       dockerfile: docker/Dockerfile
     container_name: backend-api
     restart: unless-stopped
+    init: true
+    stop_grace_period: ${BACKEND_API_STOP_GRACE_PERIOD:-30s}
+    cpus: "${BACKEND_API_CPUS:-2.0}"
+    mem_limit: "${BACKEND_API_MEMORY_LIMIT:-3g}"
+    mem_reservation: "${BACKEND_API_MEMORY_RESERVATION:-768m}"
+    pids_limit: ${BACKEND_API_PIDS_LIMIT:-256}
     logging: *default-logging
     user: "82:82"
     read_only: true
@@ -20,44 +65,81 @@ services:
     security_opt:
       - no-new-privileges:true
     working_dir: /var/www/html
-    env_file:
-      - ./entorno/.env
     command: >
       sh -c "umask 022
       && mkdir -p /var/www/html/public/uploads/products /var/www/html/public/uploads/loyalty/rewards
       && chmod 755 /var/www/html/public/uploads /var/www/html/public/uploads/products /var/www/html/public/uploads/loyalty /var/www/html/public/uploads/loyalty/rewards
-      && if [ \"${RUN_DB_BOOTSTRAP:-0}\" = \"1\" ]; then php /var/www/html/scripts/bootstrap_schema.php && php /var/www/html/scripts/bootstrap_module_databases.php; fi
-      && exec php-fpm"
+      && exec /bin/sh /var/www/html/docker/start-php-fpm.sh"
     volumes:
-      - ./storage:/var/www/html/storage:rw
-      - ./public/uploads:/var/www/html/public/uploads:rw
+      - ${BACKEND_STORAGE_PATH:-./storage}:/var/www/html/storage:rw
+      - ${BACKEND_UPLOADS_PATH:-./public/uploads}:/var/www/html/public/uploads:rw
+      - fpm-socket:/run/php-fpm:rw
+    secrets:
+      - source: billing-secret-keyring
+        target: /run/secrets/backend/billing-secret-keyring.json
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:
+      <<: *storage-environment
       TZ: America/Guayaquil
+      DB_CONNECTION_ROLE: app
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      PUBLIC_API_SERVICE_SEGMENT: ${PUBLIC_API_SERVICE_SEGMENT:-api}
       PUBLIC_LOYALTY_SERVICE_SEGMENT: ${PUBLIC_LOYALTY_SERVICE_SEGMENT:-fidelizacion}
       PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
       PRIMARY_SITE_DOMAIN: ${PRIMARY_SITE_DOMAIN:-paramascotasec.com}
       PRIMARY_SITE_ALIASES: ${PRIMARY_SITE_ALIASES:-www.paramascotasec.com}
+      DASHBOARD_ADMIN_HOST: ${DASHBOARD_ADMIN_HOST:-admin.paramascotasec.com}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://paramascotasec.com}
       TENANT_DISPLAY_NAME: ${TENANT_DISPLAY_NAME:-Para Mascotas EC}
+      DASHBOARD_ENABLED_MODULES: ${DASHBOARD_ENABLED_MODULES:-dashboard,users,ecommerce}
+      DASHBOARD_PLATFORM_ADMIN_EMAILS: ${DASHBOARD_PLATFORM_ADMIN_EMAILS:-}
+      DASHBOARD_PLATFORM_ADMIN_DOMAINS: ${DASHBOARD_PLATFORM_ADMIN_DOMAINS:-tecnolts.com}
+      FIDEPUNTOS_DEMO_ENABLED: ${FIDEPUNTOS_DEMO_ENABLED:-1}
+      FIDEPUNTOS_DEMO_DOMAIN: ${FIDEPUNTOS_DEMO_DOMAIN:-fidepuntos.tecnolts.com}
+      FIDEPUNTOS_DEMO_SCHEME: ${FIDEPUNTOS_DEMO_SCHEME:-https}
+      FIDEPUNTOS_DEMO_MODULES: ${FIDEPUNTOS_DEMO_MODULES:-dashboard,users,loyalty-points}
+      FIDEPUNTOS_DEMO_NAME: ${FIDEPUNTOS_DEMO_NAME:-Fidepuntos Demo}
+      FIDEPUNTOS_DEMO_CONTACT_EMAIL: ${FIDEPUNTOS_DEMO_CONTACT_EMAIL:-fidepuntos@tecnolts.com}
+      FIDEPUNTOS_DEMO_LOGO_URL: ${FIDEPUNTOS_DEMO_LOGO_URL:-assets/images/logo.png}
+      FIDEPUNTOS_DEMO_LOGO_LIGHT_URL: ${FIDEPUNTOS_DEMO_LOGO_LIGHT_URL:-assets/images/logo-light.png}
+      FIDEPUNTOS_DEMO_LOGO_ICON_URL: ${FIDEPUNTOS_DEMO_LOGO_ICON_URL:-assets/images/logo-icon.png}
+      FIDEPUNTOS_DEMO_PRIMARY_COLOR: ${FIDEPUNTOS_DEMO_PRIMARY_COLOR:-#2b648f}
+      DASHBOARD_BRANDING_LOGO_URL: ${DASHBOARD_BRANDING_LOGO_URL:-assets/images/tenants/paramascotasec-logo.svg}
+      DASHBOARD_BRANDING_LOGO_LIGHT_URL: ${DASHBOARD_BRANDING_LOGO_LIGHT_URL:-assets/images/tenants/paramascotasec-logo.svg}
+      DASHBOARD_BRANDING_LOGO_ICON_URL: ${DASHBOARD_BRANDING_LOGO_ICON_URL:-assets/images/tenants/paramascotasec-logo.png}
+      DASHBOARD_BRANDING_PRIMARY_COLOR: ${DASHBOARD_BRANDING_PRIMARY_COLOR:-#0a7b8f}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
       DB_DATABASE: ${DB_DATABASE:-ecommerce}
       DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
       DB_PASSWORD: ${DB_PASSWORD:-}
-      DB_ADMIN_USERNAME: ${DB_ADMIN_USERNAME:-}
-      DB_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:-}
-      RUN_DB_BOOTSTRAP: ${RUN_DB_BOOTSTRAP:-0}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      DB_DATABASE_IDENTITY_PLATFORM: ${DB_DATABASE_IDENTITY_PLATFORM:-dashboard}
+      DB_DATABASE_CATALOG_INVENTORY: ${DB_DATABASE_CATALOG_INVENTORY:-ecommerce}
+      DB_DATABASE_COMMERCE: ${DB_DATABASE_COMMERCE:-ecommerce}
+      DB_DATABASE_REPORTING_FINANCE: ${DB_DATABASE_REPORTING_FINANCE:-ecommerce}
+      DB_DATABASE_MAILER_SERVICE: ${DB_DATABASE_MAILER_SERVICE:-dashboard}
+      DB_DATABASE_LOYALTY_REWARDS: ${DB_DATABASE_LOYALTY_REWARDS:-loyalty}
       JWT_SECRET: ${JWT_SECRET}
       JWT_SECRET_PREVIOUS: ${JWT_SECRET_PREVIOUS:-}
-      INTERNAL_PROXY_TOKEN: ${INTERNAL_PROXY_TOKEN:-}
-      INTERNAL_PROXY_TOKEN_PREVIOUS: ${INTERNAL_PROXY_TOKEN_PREVIOUS:-}
+      EDGE_BACKEND_PROXY_TOKEN: ${EDGE_BACKEND_PROXY_TOKEN:-}
+      EDGE_BACKEND_PROXY_TOKEN_PREVIOUS: ${EDGE_BACKEND_PROXY_TOKEN_PREVIOUS:-}
+      STOREFRONT_BACKEND_PROXY_TOKEN: ${STOREFRONT_BACKEND_PROXY_TOKEN:-}
+      STOREFRONT_BACKEND_PROXY_TOKEN_PREVIOUS: ${STOREFRONT_BACKEND_PROXY_TOKEN_PREVIOUS:-}
+      TENANT_RUNTIME_REGISTRY_SNAPSHOT_SECRET: ${TENANT_RUNTIME_REGISTRY_SNAPSHOT_SECRET:-}
+      TENANT_RUNTIME_REGISTRY_SNAPSHOT_PATH: ${TENANT_RUNTIME_REGISTRY_SNAPSHOT_PATH:-/var/www/html/storage/runtime/tenant-registry.snapshot.json}
+      TENANT_RUNTIME_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS: ${TENANT_RUNTIME_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS:-86400}
       AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-pm_auth}
       AUTH_CSRF_COOKIE_NAME: ${AUTH_CSRF_COOKIE_NAME:-pm_csrf}
+      AUTH_LEGACY_COOKIE_FALLBACK_ENABLED: ${AUTH_LEGACY_COOKIE_FALLBACK_ENABLED:-false}
+      AUTH_LEGACY_SURFACE_QUERY_ENABLED: ${AUTH_LEGACY_SURFACE_QUERY_ENABLED:-false}
       AUTH_COOKIE_TTL_SECONDS: ${AUTH_COOKIE_TTL_SECONDS:-10800}
+      AUTH_ADMIN_COOKIE_TTL_SECONDS: ${AUTH_ADMIN_COOKIE_TTL_SECONDS:-10800}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-auto}
       AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-5}
       AUTH_LOGIN_LOCK_MINUTES: ${AUTH_LOGIN_LOCK_MINUTES:-15}
@@ -65,7 +147,12 @@ services:
       ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
       APP_ENV: ${APP_ENV:-production}
+      ENTORNO_MODE: ${ENTORNO_MODE:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
       APP_URL: ${APP_URL}
+      FRONTEND_URL: ${FRONTEND_URL:-}
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-}
+      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-}
       APP_TIMEZONE: ${APP_TIMEZONE:-America/Guayaquil}
       MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
       MAIL_FROM_NAME: ${MAIL_FROM_NAME}
@@ -74,12 +161,23 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
+      MAILER_OUTBOX_MAX_ATTEMPTS: ${MAILER_OUTBOX_MAX_ATTEMPTS:-8}
+      MAILER_OUTBOX_MESSAGE_TTL_SECONDS: ${MAILER_OUTBOX_MESSAGE_TTL_SECONDS:-3600}
+      MAILER_OUTBOX_MAX_BODY_BYTES: ${MAILER_OUTBOX_MAX_BODY_BYTES:-262144}
+      MAILER_SYNC_ATTACHMENT_MAX_BYTES: ${MAILER_SYNC_ATTACHMENT_MAX_BYTES:-10485760}
       CONTACT_FORM_TO: ${CONTACT_FORM_TO:-}
+      CONTACT_FORM_EMAIL_HOURLY_LIMIT: ${CONTACT_FORM_EMAIL_HOURLY_LIMIT:-5}
+      CONTACT_FORM_IP_HOURLY_LIMIT: ${CONTACT_FORM_IP_HOURLY_LIMIT:-20}
       ADMIN_MFA_FALLBACK_EMAIL: ${ADMIN_MFA_FALLBACK_EMAIL:-}
+      ADMIN_MFA_RECOVERY_CODE: ${ADMIN_MFA_RECOVERY_CODE:-}
+      ADMIN_MFA_RECOVERY_CODE_PREVIOUS: ${ADMIN_MFA_RECOVERY_CODE_PREVIOUS:-}
+      AUTH_PASSWORD_RESET_TTL_MINUTES: ${AUTH_PASSWORD_RESET_TTL_MINUTES:-30}
+      PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
+      AUTH_PRICING_TAMPER_LOCK_MINUTES: ${AUTH_PRICING_TAMPER_LOCK_MINUTES:-15}
       SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:-produccion}
       SRI_RUC: ${SRI_RUC:-}
       SRI_CERT_PATH: ${SRI_CERT_PATH:-}
-      SRI_CERT_PASSWORD: ${SRI_CERT_PASSWORD:-}
       SRI_WS_RECEPCION_PRUEBAS: ${SRI_WS_RECEPCION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
       SRI_WS_AUTORIZACION_PRUEBAS: ${SRI_WS_AUTORIZACION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
       SRI_WS_RECEPCION_PRODUCCION: ${SRI_WS_RECEPCION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
@@ -90,12 +188,41 @@ services:
       DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
       DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
       BILLING_GATEWAY_DRIVER: ${BILLING_GATEWAY_DRIVER:-native}
+      BILLING_SECRET_KEYRING_FILE: /run/secrets/backend/billing-secret-keyring.json
+      BILLING_SECRET_LEGACY_READ_ENABLED: ${BILLING_SECRET_LEGACY_READ_ENABLED:-false}
+      BILLING_SECRET_WRITE_MODE: ${BILLING_SECRET_WRITE_MODE:-encrypted}
       BILLING_STORAGE_PATH: ${BILLING_STORAGE_PATH:-/var/www/html/storage/billing}
       BILLING_RECOVERY_SWEEP_BATCH_SIZE: ${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50}
       BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS: ${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600}
       BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS: ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}
+      BILLING_OUTBOX_MAX_ATTEMPTS: ${BILLING_OUTBOX_MAX_ATTEMPTS:-12}
       BILLING_API_KEY: ${BILLING_API_KEY:-}
+      MAX_RETRY_ATTEMPTS: ${MAX_RETRY_ATTEMPTS:-3}
+      RETRY_DELAY_SECONDS: ${RETRY_DELAY_SECONDS:-3600}
+      SRI_CONNECTION_RETRY_DELAY_SECONDS: ${SRI_CONNECTION_RETRY_DELAY_SECONDS:-5}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
+      LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PATH: ${LOG_PATH:-}
+      GOOGLE_WALLET_ISSUER_ID: ${GOOGLE_WALLET_ISSUER_ID:-}
+      GOOGLE_WALLET_SA_PATH: ${GOOGLE_WALLET_SA_PATH:-/var/www/html/storage/wallet/service-account.json}
+      LOYALTY_WALLET_QR_SECRET: ${LOYALTY_WALLET_QR_SECRET:-}
+      LOYALTY_PORTAL_SECRET: ${LOYALTY_PORTAL_SECRET:-}
+      LOYALTY_WALLET_PUBLIC_BASE_URL: ${LOYALTY_WALLET_PUBLIC_BASE_URL:-}
+      LOYALTY_CATALOG_URL: ${LOYALTY_CATALOG_URL:-}
+      LOYALTY_REWARD_IMAGE_MAX_BYTES: ${LOYALTY_REWARD_IMAGE_MAX_BYTES:-5242880}
+      LOYALTY_WALLET_VISIBLE_MESSAGE_LIMIT: ${LOYALTY_WALLET_VISIBLE_MESSAGE_LIMIT:-1}
+      LOYALTY_WALLET_MESSAGE_TTL_HOURS: ${LOYALTY_WALLET_MESSAGE_TTL_HOURS:-24}
+      PERIODIC_WORKER_FAILURE_RETRY_SECONDS: ${BILLING_WORKER_FAILURE_RETRY_SECONDS:-60}
       DOMPDF_REMOTE_ENABLED: ${DOMPDF_REMOTE_ENABLED:-false}
+      PHP_FPM_MAX_CHILDREN: ${PHP_FPM_MAX_CHILDREN:-16}
+      PHP_FPM_START_SERVERS: ${PHP_FPM_START_SERVERS:-12}
+      PHP_FPM_MIN_SPARE_SERVERS: ${PHP_FPM_MIN_SPARE_SERVERS:-12}
+      PHP_FPM_MAX_SPARE_SERVERS: ${PHP_FPM_MAX_SPARE_SERVERS:-14}
+      PHP_FPM_MAX_REQUESTS: ${PHP_FPM_MAX_REQUESTS:-500}
+      PHP_FPM_REQUEST_TERMINATE_TIMEOUT: ${PHP_FPM_REQUEST_TERMINATE_TIMEOUT:-120s}
+      PHP_FPM_SLOW_REQUEST_TIMEOUT: ${PHP_FPM_SLOW_REQUEST_TIMEOUT:-5s}
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-128M}
     networks:
       backend_internal:
         aliases:
@@ -107,6 +234,12 @@ services:
     image: backend-api
     container_name: backend-sri-worker
     restart: unless-stopped
+    init: true
+    stop_grace_period: ${BILLING_WORKER_STOP_GRACE_PERIOD:-30s}
+    cpus: "${BILLING_WORKER_CPUS:-0.75}"
+    mem_limit: "${BILLING_WORKER_MEMORY_LIMIT:-512m}"
+    mem_reservation: "${BILLING_WORKER_MEMORY_RESERVATION:-128m}"
+    pids_limit: ${BILLING_WORKER_PIDS_LIMIT:-96}
     logging: *default-logging
     user: "82:82"
     read_only: true
@@ -115,37 +248,41 @@ services:
     security_opt:
       - no-new-privileges:true
     working_dir: /var/www/html
-    env_file:
-      - ./entorno/.env
     command:
       - /bin/sh
-      - -lc
-      - |
-        while true; do
-          php /var/www/html/scripts/process_billing_recovery.php \
-            --limit=${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50} \
-            --min-age-seconds=${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600} || true;
-          sleep ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600};
-        done
+      - /var/www/html/docker/periodic-worker.sh
+      - billing-recovery
+      - "${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}"
+      - php
+      - /var/www/html/scripts/process_billing_recovery.php
+      - "--limit=${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50}"
+      - "--min-age-seconds=${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600}"
     volumes:
-      - ./storage:/var/www/html/storage:rw
-      - ./public/uploads:/var/www/html/public/uploads:rw
+      - ${BACKEND_STORAGE_PATH:-./storage}:/var/www/html/storage:rw
+      - ${BACKEND_UPLOADS_PATH:-./public/uploads}:/var/www/html/public/uploads:rw
+    secrets:
+      - source: billing-secret-keyring
+        target: /run/secrets/backend/billing-secret-keyring.json
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:
+      <<: *storage-environment
       TZ: America/Guayaquil
+      DB_CONNECTION_ROLE: worker
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
       DB_DATABASE: ${DB_DATABASE:-ecommerce}
-      DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
-      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_WORKER_USERNAME_BILLING: ${DB_WORKER_USERNAME_BILLING:-}
+      DB_WORKER_PASSWORD_BILLING: ${DB_WORKER_PASSWORD_BILLING:-}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
       DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
       DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
       DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-facturacion}
-      DB_USERNAME_BILLING: ${DB_USERNAME_BILLING:-paramascotasec_backend_app}
-      DB_PASSWORD_BILLING: ${DB_PASSWORD_BILLING:-}
       APP_ENV: ${APP_ENV:-production}
       APP_URL: ${APP_URL}
       APP_TIMEZONE: ${APP_TIMEZONE:-America/Guayaquil}
@@ -162,11 +299,20 @@ services:
       SRI_WS_RECEPCION_PRODUCCION: ${SRI_WS_RECEPCION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
       SRI_WS_AUTORIZACION_PRODUCCION: ${SRI_WS_AUTORIZACION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
       BILLING_GATEWAY_DRIVER: ${BILLING_GATEWAY_DRIVER:-native}
+      BILLING_SECRET_KEYRING_FILE: /run/secrets/backend/billing-secret-keyring.json
+      BILLING_SECRET_LEGACY_READ_ENABLED: ${BILLING_SECRET_LEGACY_READ_ENABLED:-false}
+      BILLING_SECRET_WRITE_MODE: ${BILLING_SECRET_WRITE_MODE:-encrypted}
       BILLING_STORAGE_PATH: ${BILLING_STORAGE_PATH:-/var/www/html/storage/billing}
       BILLING_RECOVERY_SWEEP_BATCH_SIZE: ${BILLING_RECOVERY_SWEEP_BATCH_SIZE:-50}
       BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS: ${BILLING_RECOVERY_SWEEP_MIN_AGE_SECONDS:-3600}
       BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS: ${BILLING_RECOVERY_SWEEP_INTERVAL_SECONDS:-3600}
       BILLING_API_KEY: ${BILLING_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/var/www/html/docker/check-periodic-worker-health.sh", "billing-recovery", "${BILLING_WORKER_HEALTH_GRACE_SECONDS:-900}"]
+      interval: ${BILLING_WORKER_HEALTH_INTERVAL:-30s}
+      timeout: ${BILLING_WORKER_HEALTH_TIMEOUT:-5s}
+      retries: ${BILLING_WORKER_HEALTH_RETRIES:-3}
+      start_period: ${BILLING_WORKER_HEALTH_START_PERIOD:-5m}
     depends_on:
       - api
     networks:
@@ -177,6 +323,12 @@ services:
     image: backend-api
     container_name: backend-wallet-notify-worker
     restart: unless-stopped
+    init: true
+    stop_grace_period: ${WALLET_WORKER_STOP_GRACE_PERIOD:-30s}
+    cpus: "${WALLET_WORKER_CPUS:-0.75}"
+    mem_limit: "${WALLET_WORKER_MEMORY_LIMIT:-512m}"
+    mem_reservation: "${WALLET_WORKER_MEMORY_RESERVATION:-128m}"
+    pids_limit: ${WALLET_WORKER_PIDS_LIMIT:-96}
     logging: *default-logging
     user: "82:82"
     read_only: true
@@ -185,43 +337,316 @@ services:
     security_opt:
       - no-new-privileges:true
     working_dir: /var/www/html
-    env_file:
-      - ./entorno/.env
     command:
       - /bin/sh
-      - -lc
-      - |
-        while true; do
-          php /var/www/html/scripts/process_wallet_notifications.php \
-            --limit=${WALLET_NOTIFY_BATCH_SIZE} || true;
-          sleep ${WALLET_NOTIFY_INTERVAL_SECONDS};
-        done
+      - /var/www/html/docker/periodic-worker.sh
+      - wallet-notifications
+      - "${WALLET_NOTIFY_INTERVAL_SECONDS:-900}"
+      - php
+      - /var/www/html/scripts/process_wallet_notifications.php
+      - "--limit=${WALLET_NOTIFY_BATCH_SIZE:-100}"
+      - "--max-seconds=${WALLET_NOTIFY_MAX_SECONDS:-240}"
     volumes:
-      - ./storage:/var/www/html/storage:rw
-      - ./public/uploads:/var/www/html/public/uploads:rw
+      - ${BACKEND_STORAGE_PATH:-./storage}:/var/www/html/storage:rw
+      - ${BACKEND_UPLOADS_PATH:-./public/uploads}:/var/www/html/public/uploads:rw
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:
       TZ: America/Guayaquil
+      APP_ENV: ${APP_ENV:-production}
+      STORAGE_PREFLIGHT_REQUIRED: "false"
+      DB_CONNECTION_ROLE: worker
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
       DB_DATABASE: ${DB_DATABASE:-ecommerce}
-      DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
-      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_DATABASE_LOYALTY_REWARDS: ${DB_DATABASE_LOYALTY_REWARDS:-loyalty}
+      DB_WORKER_USERNAME_LOYALTY_REWARDS: ${DB_WORKER_USERNAME_LOYALTY_REWARDS:-}
+      DB_WORKER_PASSWORD_LOYALTY_REWARDS: ${DB_WORKER_PASSWORD_LOYALTY_REWARDS:-}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      GOOGLE_WALLET_ISSUER_ID: ${GOOGLE_WALLET_ISSUER_ID:-}
+      GOOGLE_WALLET_SA_PATH: ${GOOGLE_WALLET_SA_PATH:-/var/www/html/storage/wallet/service-account.json}
+      WALLET_NOTIFY_BATCH_SIZE: ${WALLET_NOTIFY_BATCH_SIZE:-100}
+      WALLET_NOTIFY_INTERVAL_SECONDS: ${WALLET_NOTIFY_INTERVAL_SECONDS:-900}
+      LOYALTY_WALLET_NOTIFY_THROTTLE_MS: ${LOYALTY_WALLET_NOTIFY_THROTTLE_MS:-250}
+      LOYALTY_WALLET_NOTIFY_MAX_SECONDS: ${WALLET_NOTIFY_MAX_SECONDS:-240}
+      PERIODIC_WORKER_FAILURE_RETRY_SECONDS: ${WALLET_WORKER_FAILURE_RETRY_SECONDS:-60}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/var/www/html/docker/check-periodic-worker-health.sh", "wallet-notifications", "${WALLET_WORKER_HEALTH_GRACE_SECONDS:-300}"]
+      interval: ${WALLET_WORKER_HEALTH_INTERVAL:-30s}
+      timeout: ${WALLET_WORKER_HEALTH_TIMEOUT:-5s}
+      retries: ${WALLET_WORKER_HEALTH_RETRIES:-3}
+      start_period: ${WALLET_WORKER_HEALTH_START_PERIOD:-2m}
     depends_on:
       - api
     networks:
       db_internal:
       backend_egress:
 
+  commerce-billing-worker:
+    image: backend-api
+    container_name: backend-commerce-billing-worker
+    restart: unless-stopped
+    init: true
+    stop_grace_period: ${BILLING_OUTBOX_WORKER_STOP_GRACE_PERIOD:-30s}
+    cpus: "${BILLING_OUTBOX_WORKER_CPUS:-0.50}"
+    mem_limit: "${BILLING_OUTBOX_WORKER_MEMORY_LIMIT:-384m}"
+    mem_reservation: "${BILLING_OUTBOX_WORKER_MEMORY_RESERVATION:-96m}"
+    pids_limit: ${BILLING_OUTBOX_WORKER_PIDS_LIMIT:-64}
+    logging: *default-logging
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    command:
+      - /bin/sh
+      - /var/www/html/docker/periodic-worker.sh
+      - commerce-billing-outbox
+      - "${BILLING_OUTBOX_INTERVAL_SECONDS:-10}"
+      - php
+      - /var/www/html/scripts/process_commerce_billing_outbox.php
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    secrets:
+      - source: commerce-billing-credentials
+        target: /run/secrets/backend/commerce-billing-credentials.json
+    environment:
+      TZ: America/Guayaquil
+      APP_ENV: ${APP_ENV:-production}
+      STORAGE_PREFLIGHT_REQUIRED: "false"
+      DB_CONNECTION_ROLE: worker
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE:-ecommerce}
+      DB_DATABASE_COMMERCE: ${DB_DATABASE_COMMERCE:-ecommerce}
+      DB_WORKER_USERNAME_COMMERCE: ${DB_WORKER_USERNAME_COMMERCE:-}
+      DB_WORKER_PASSWORD_COMMERCE: ${DB_WORKER_PASSWORD_COMMERCE:-}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      BILLING_OUTBOX_INTERNAL_BASE_URL: ${BILLING_OUTBOX_INTERNAL_BASE_URL:-http://backend-http:8080}
+      BILLING_OUTBOX_CREDENTIALS_FILE: /run/secrets/backend/commerce-billing-credentials.json
+      BILLING_OUTBOX_BATCH_SIZE: ${BILLING_OUTBOX_BATCH_SIZE:-50}
+      BILLING_OUTBOX_PER_TENANT: ${BILLING_OUTBOX_PER_TENANT:-5}
+      BILLING_OUTBOX_INTERVAL_SECONDS: ${BILLING_OUTBOX_INTERVAL_SECONDS:-10}
+      BILLING_OUTBOX_LEASE_SECONDS: ${BILLING_OUTBOX_LEASE_SECONDS:-300}
+      BILLING_OUTBOX_MAX_SECONDS: ${BILLING_OUTBOX_MAX_SECONDS:-240}
+      BILLING_OUTBOX_HTTP_TIMEOUT_SECONDS: ${BILLING_OUTBOX_HTTP_TIMEOUT_SECONDS:-45}
+      BILLING_OUTBOX_RETRY_BASE_SECONDS: ${BILLING_OUTBOX_RETRY_BASE_SECONDS:-15}
+      BILLING_OUTBOX_RETRY_MAX_SECONDS: ${BILLING_OUTBOX_RETRY_MAX_SECONDS:-3600}
+      BILLING_OUTBOX_HEALTH_MAX_DUE_AGE_SECONDS: ${BILLING_OUTBOX_HEALTH_MAX_DUE_AGE_SECONDS:-7200}
+      PERIODIC_WORKER_FAILURE_RETRY_SECONDS: ${BILLING_OUTBOX_WORKER_FAILURE_RETRY_SECONDS:-15}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /bin/sh /var/www/html/docker/check-periodic-worker-health.sh commerce-billing-outbox "$${BILLING_OUTBOX_HEALTH_GRACE_SECONDS:-60}"
+          && php /var/www/html/scripts/process_commerce_billing_outbox.php --health-only
+      interval: ${BILLING_OUTBOX_WORKER_HEALTH_INTERVAL:-30s}
+      timeout: ${BILLING_OUTBOX_WORKER_HEALTH_TIMEOUT:-10s}
+      retries: ${BILLING_OUTBOX_WORKER_HEALTH_RETRIES:-3}
+      start_period: ${BILLING_OUTBOX_WORKER_HEALTH_START_PERIOD:-60s}
+    depends_on:
+      - api
+      - http
+    networks:
+      backend_internal:
+      db_internal:
+
+  mailer-worker:
+    image: backend-api
+    container_name: backend-mailer-worker
+    restart: unless-stopped
+    init: true
+    stop_grace_period: ${MAILER_WORKER_STOP_GRACE_PERIOD:-30s}
+    cpus: "${MAILER_WORKER_CPUS:-0.50}"
+    mem_limit: "${MAILER_WORKER_MEMORY_LIMIT:-384m}"
+    mem_reservation: "${MAILER_WORKER_MEMORY_RESERVATION:-96m}"
+    pids_limit: ${MAILER_WORKER_PIDS_LIMIT:-64}
+    logging: *default-logging
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    command:
+      - /bin/sh
+      - /var/www/html/docker/periodic-worker.sh
+      - mailer-outbox
+      - "${MAILER_OUTBOX_INTERVAL_SECONDS:-10}"
+      - php
+      - /var/www/html/scripts/process_mailer_outbox.php
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    environment:
+      TZ: America/Guayaquil
+      APP_ENV: ${APP_ENV:-production}
+      STORAGE_PREFLIGHT_REQUIRED: "false"
+      DB_CONNECTION_ROLE: worker
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE_MAILER_SERVICE:-dashboard}
+      DB_DATABASE_MAILER_SERVICE: ${DB_DATABASE_MAILER_SERVICE:-dashboard}
+      DB_WORKER_USERNAME_MAILER_SERVICE: ${DB_WORKER_USERNAME_MAILER_SERVICE:-}
+      DB_WORKER_PASSWORD_MAILER_SERVICE: ${DB_WORKER_PASSWORD_MAILER_SERVICE:-}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Para Mascotas EC}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_SECURE: ${SMTP_SECURE:-tls}
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
+      MAILER_OUTBOX_BATCH_SIZE: ${MAILER_OUTBOX_BATCH_SIZE:-100}
+      MAILER_OUTBOX_PER_TENANT: ${MAILER_OUTBOX_PER_TENANT:-10}
+      MAILER_OUTBOX_INTERVAL_SECONDS: ${MAILER_OUTBOX_INTERVAL_SECONDS:-10}
+      MAILER_OUTBOX_LEASE_SECONDS: ${MAILER_OUTBOX_LEASE_SECONDS:-120}
+      MAILER_OUTBOX_MAX_SECONDS: ${MAILER_OUTBOX_MAX_SECONDS:-50}
+      MAILER_OUTBOX_RETRY_BASE_SECONDS: ${MAILER_OUTBOX_RETRY_BASE_SECONDS:-15}
+      MAILER_OUTBOX_RETRY_MAX_SECONDS: ${MAILER_OUTBOX_RETRY_MAX_SECONDS:-1800}
+      MAILER_OUTBOX_RETRY_JITTER_PERCENT: ${MAILER_OUTBOX_RETRY_JITTER_PERCENT:-20}
+      MAILER_OUTBOX_HEALTH_MAX_DUE_AGE_SECONDS: ${MAILER_OUTBOX_HEALTH_MAX_DUE_AGE_SECONDS:-300}
+      MAILER_OUTBOX_HEALTH_MAX_DEAD_LETTER: ${MAILER_OUTBOX_HEALTH_MAX_DEAD_LETTER:-0}
+      PERIODIC_WORKER_FAILURE_RETRY_SECONDS: ${MAILER_WORKER_FAILURE_RETRY_SECONDS:-15}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /bin/sh /var/www/html/docker/check-periodic-worker-health.sh mailer-outbox "$${MAILER_WORKER_HEALTH_GRACE_SECONDS:-60}"
+          && php /var/www/html/scripts/process_mailer_outbox.php --health-only
+      interval: ${MAILER_WORKER_HEALTH_INTERVAL:-30s}
+      timeout: ${MAILER_WORKER_HEALTH_TIMEOUT:-10s}
+      retries: ${MAILER_WORKER_HEALTH_RETRIES:-3}
+      start_period: ${MAILER_WORKER_HEALTH_START_PERIOD:-60s}
+    depends_on:
+      - api
+    networks:
+      db_internal:
+      backend_egress:
+
+  module-db-audit:
+    profiles: ["ops"]
+    image: backend-api
+    init: true
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    command:
+      - /bin/sh
+      - /var/www/html/docker/run-with-stdin-secret.sh
+      - DB_WORKER_PASSWORD
+      - php
+      - /var/www/html/scripts/check_module_databases.php
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    environment:
+      TZ: America/Guayaquil
+      APP_ENV: ${APP_ENV:-production}
+      DB_CONNECTION_ROLE: worker
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE:-ecommerce}
+      DB_DATABASE_IDENTITY_PLATFORM: ${DB_DATABASE_IDENTITY_PLATFORM:-dashboard}
+      DB_DATABASE_CATALOG_INVENTORY: ${DB_DATABASE_CATALOG_INVENTORY:-ecommerce}
+      DB_DATABASE_COMMERCE: ${DB_DATABASE_COMMERCE:-ecommerce}
+      DB_DATABASE_REPORTING_FINANCE: ${DB_DATABASE_REPORTING_FINANCE:-ecommerce}
+      DB_DATABASE_MAILER_SERVICE: ${DB_DATABASE_MAILER_SERVICE:-dashboard}
+      DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-facturacion}
+      DB_DATABASE_LOYALTY_REWARDS: ${DB_DATABASE_LOYALTY_REWARDS:-loyalty}
+      DB_WORKER_USERNAME: ${DB_WORKER_USERNAME:-}
+      DB_USERNAME: ${DB_USERNAME:-paramascotasec_backend_app}
+      DB_FDW_USERNAME: ${DB_FDW_USERNAME:-paramascotasec_backend_fdw}
+      DB_OWNER_ROLE: ${DB_OWNER_ROLE:-paramascotasec_backend_owner}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+    networks:
+      db_internal:
+
+  tenant-reconcile-worker:
+    profiles: ["ops"]
+    image: backend-api
+    init: true
+    user: "82:82"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /var/www/html
+    command:
+      - /bin/sh
+      - /var/www/html/docker/run-with-stdin-secret.sh
+      - DB_WORKER_PASSWORD_IDENTITY_PLATFORM
+      - php
+      - /var/www/html/scripts/mark_tenant_runtime_provisioned.php
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    environment:
+      TZ: America/Guayaquil
+      APP_ENV: ${APP_ENV:-production}
+      DB_CONNECTION_ROLE: worker
+      DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
+      PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+      PRIMARY_SITE_DOMAIN: ${PRIMARY_SITE_DOMAIN:-paramascotasec.com}
+      PRIMARY_SITE_ALIASES: ${PRIMARY_SITE_ALIASES:-www.paramascotasec.com}
+      DASHBOARD_ADMIN_HOST: ${DASHBOARD_ADMIN_HOST:-admin.paramascotasec.com}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://paramascotasec.com}
+      TENANT_DISPLAY_NAME: ${TENANT_DISPLAY_NAME:-Para Mascotas EC}
+      DASHBOARD_ENABLED_MODULES: ${DASHBOARD_ENABLED_MODULES:-dashboard,users,ecommerce}
+      DASHBOARD_PLATFORM_ADMIN_EMAILS: ${DASHBOARD_PLATFORM_ADMIN_EMAILS:-}
+      DASHBOARD_PLATFORM_ADMIN_DOMAINS: ${DASHBOARD_PLATFORM_ADMIN_DOMAINS:-tecnolts.com}
+      FIDEPUNTOS_DEMO_ENABLED: ${FIDEPUNTOS_DEMO_ENABLED:-1}
+      FIDEPUNTOS_DEMO_DOMAIN: ${FIDEPUNTOS_DEMO_DOMAIN:-fidepuntos.tecnolts.com}
+      FIDEPUNTOS_DEMO_SCHEME: ${FIDEPUNTOS_DEMO_SCHEME:-https}
+      FIDEPUNTOS_DEMO_MODULES: ${FIDEPUNTOS_DEMO_MODULES:-dashboard,users,loyalty-points}
+      FIDEPUNTOS_DEMO_NAME: ${FIDEPUNTOS_DEMO_NAME:-Fidepuntos Demo}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_DATABASE: ${DB_DATABASE_IDENTITY_PLATFORM:-dashboard}
+      DB_DATABASE_IDENTITY_PLATFORM: ${DB_DATABASE_IDENTITY_PLATFORM:-dashboard}
+      DB_WORKER_USERNAME_IDENTITY_PLATFORM: ${DB_WORKER_USERNAME_IDENTITY_PLATFORM:-}
+      TENANT_RLS_MODE: ${TENANT_RLS_MODE:-off}
+      DB_POOL_MODE: ${DB_POOL_MODE:-direct}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+    networks:
+      db_internal:
+
   http:
     image: nginxinc/nginx-unprivileged:1.31-alpine
     container_name: backend-http
     restart: unless-stopped
+    init: true
+    stop_grace_period: ${BACKEND_HTTP_STOP_GRACE_PERIOD:-20s}
+    cpus: "${BACKEND_HTTP_CPUS:-0.75}"
+    mem_limit: "${BACKEND_HTTP_MEMORY_LIMIT:-256m}"
+    mem_reservation: "${BACKEND_HTTP_MEMORY_RESERVATION:-64m}"
+    pids_limit: ${BACKEND_HTTP_PIDS_LIMIT:-128}
     logging: *default-logging
     user: "101:101"
+    group_add:
+      - "82"
     read_only: true
     cap_drop:
       - ALL
@@ -234,16 +659,22 @@ services:
     volumes:
       - ./public:/var/www/html/public:ro
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - fpm-socket:/run/php-fpm:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /var/cache/nginx:size=32m,mode=755,uid=101,gid=101
       - /var/run:size=8m,mode=755,uid=101,gid=101
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
+      # Docker supervisa proceso/ruteo con liveness liviano. La atestacion
+      # profunda de DBs, registry, storage y secretos vive en /api/readyz y se
+      # ejecuta de forma explicita por los controles operativos/scorecard.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/internal/fpm-ping && wget -q -O /dev/null http://127.0.0.1:8080/api/livez || exit 1"]
+      interval: ${BACKEND_HTTP_HEALTH_INTERVAL:-15s}
+      timeout: ${BACKEND_HTTP_HEALTH_TIMEOUT:-5s}
+      retries: ${BACKEND_HTTP_HEALTH_RETRIES:-12}
+      start_period: ${BACKEND_HTTP_HEALTH_START_PERIOD:-30s}
+    depends_on:
+      - api
     networks:
       web_internal:
         aliases:

@@ -5,7 +5,8 @@ namespace App\Services;
 use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\CatalogInventory\Domain\CatalogInventoryDomain;
-use App\Repositories\SettingsRepository;
+use App\Modules\Commerce\Application\TenantDefaultTaxRate;
+use App\Modules\Commerce\Domain\ProductTaxPolicy;
 use PDO;
 
 class InventoryIntelligenceService {
@@ -14,9 +15,7 @@ class InventoryIntelligenceService {
 
     public function __construct(?PDO $db = null) {
         $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
-        $settings = new SettingsRepository();
-        $vatRate = $settings->get('vat_rate');
-        $this->defaultVatRate = is_numeric($vatRate) ? max(0.0, (float)$vatRate) : 0.0;
+        $this->defaultVatRate = TenantDefaultTaxRate::current();
     }
 
     public function getIntelligence(?int $windowDays = null, ?int $targetDays = null): array {
@@ -752,15 +751,7 @@ class InventoryIntelligenceService {
     }
 
     private function taxRateForAttributes(array $attributes): float {
-        $taxExempt = $this->boolLike($attributes['taxExempt'] ?? ($attributes['tax_exempt'] ?? false));
-        if ($taxExempt) {
-            return 0.0;
-        }
-        $rawRate = $attributes['taxRate'] ?? ($attributes['tax_rate'] ?? null);
-        if (is_numeric($rawRate)) {
-            return max(0.0, min(100.0, (float)$rawRate));
-        }
-        return $this->defaultVatRate;
+        return ProductTaxPolicy::rate($attributes, $this->defaultVatRate);
     }
 
     private function attributeInt(array $attributes, array $keys, int $default, int $min, int $max): int {

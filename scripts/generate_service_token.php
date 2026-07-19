@@ -1,3 +1,3 @@
 <?php
-fwrite(STDERR, "Service tokens are deprecated and disabled. Use INTERNAL_PROXY_TOKEN for trusted server-to-server proxying.\n");
+fwrite(STDERR, "Service tokens are deprecated and disabled. Use the scoped edge/storefront backend proxy credentials.\n");
 exit(1);

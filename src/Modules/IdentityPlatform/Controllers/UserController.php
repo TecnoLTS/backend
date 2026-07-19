@@ -2,4 +2,6 @@
 
 namespace App\Modules\IdentityPlatform\Controllers;
 
-class UserController extends \App\Controllers\UserController {}
+use App\Http\Shared\ManagedUserControllerBase;
+
+class UserController extends ManagedUserControllerBase {}

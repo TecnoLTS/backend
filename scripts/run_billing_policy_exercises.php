@@ -24,6 +24,7 @@ if (!is_string($autoloadPath)) {
 require_once $autoloadPath;
 
 use App\Core\Database;
+use App\Core\TenantContext;
 use App\Modules\Billing\Domain\BillingDomain;
 use BillingService\Billing\Application\Dto\Request\EmitInvoiceRequest;
 use BillingService\Billing\Application\Ports\DocumentSignerInterface;
@@ -133,12 +134,12 @@ final class ExerciseInvoiceRepository extends InvoiceRepository
     {
     }
 
-    public function nextSequentialForBranchAndEnvironment(int $branchId, string $environment): string
+    public function nextSequentialForBranchAndEnvironment(array $clientContext, int $branchId, string $environment): string
     {
         return '000000123';
     }
 
-    public function markSequentialConsumed(int $branchId, string $environment, string $sequential): void
+    public function markSequentialConsumed(array $clientContext, int $branchId, string $environment, string $sequential): void
     {
         $this->lastSequential = $sequential;
     }
@@ -170,6 +171,13 @@ $envDir = __DIR__ . '/../entorno';
 if (is_readable($envDir . '/.env')) {
     Dotenv::createImmutable($envDir)->safeLoad();
 }
+
+$tenantId = trim((string)($_ENV['PUBLIC_TENANT_SLUG'] ?? getenv('PUBLIC_TENANT_SLUG') ?: 'paramascotasec'));
+TenantContext::set([
+    'id' => $tenantId,
+    'slug' => $tenantId,
+    'name' => $tenantId,
+]);
 
 $logger = new NullLogger();
 $connection = Database::getModuleInstance(BillingDomain::KEY);

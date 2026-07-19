@@ -6,6 +6,7 @@ use App\Core\Database;
 use App\Core\TenantContext;
 use App\Modules\IdentityPlatform\Application\TenantAccessService;
 use App\Modules\IdentityPlatform\Domain\IdentityPlatformDomain;
+use App\Modules\Commerce\Domain\CommerceDomain;
 use PDOStatement;
 
 class UserRepository {
@@ -42,10 +43,51 @@ class UserRepository {
             $sql = str_replace('"AuthSecurityEvent"', $this->securityTable, $sql);
         }
 
+        // Customer identities live entirely in ecommerce. Membership state is
+        // owned by IdentityPlatform/dashboard and must never be queried from a
+        // customer connection (the ecommerce role deliberately has no access
+        // to that foreign table). Customer activation is represented by the
+        // local Customer row and email_verified flag.
+        if (!$this->syncMemberships) {
+            $sql = preg_replace(
+                '/\(SELECT\s+membership\.status\s+FROM\s+tenant_memberships\s+membership\s+WHERE\s+membership\.tenant_id\s*=\s*[^\n]+\s+AND\s+membership\.user_id\s*=\s*[^\n]+\s+LIMIT\s+1\)\s+AS\s+account_status/mi',
+                "'active' AS account_status",
+                $sql
+            ) ?? $sql;
+        }
+
         return $sql;
     }
 
-    public function getAll() {
+    public function getPage(array $options = []) {
+        $limit = filter_var($options['limit'] ?? 100, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1, 'max_range' => 101],
+        ]);
+        $offset = filter_var($options['offset'] ?? 0, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 0, 'max_range' => 4900],
+        ]);
+        $safeLimit = $limit === false ? 100 : (int)$limit;
+        $safeOffset = $offset === false ? 0 : (int)$offset;
+        $cursor = is_array($options['cursor'] ?? null) ? $options['cursor'] : null;
+        $search = trim((string)($options['search'] ?? ''));
+        if (mb_strlen($search) > 190) {
+            $search = mb_substr($search, 0, 190);
+        }
+        $role = strtolower(trim((string)($options['role'] ?? 'all')));
+        $roleIdentitySql = "COALESCE("
+            . "NULLIF(LOWER(COALESCE(u.profile->>'identityType', u.profile->>'identity_type', '')), ''), "
+            . "CASE WHEN LOWER(COALESCE(u.role, 'customer')) IN ('admin', 'service') THEN 'admin' ELSE 'customer' END"
+            . ")";
+        $roleFilterSql = match ($role) {
+            'customer' => " AND {$roleIdentitySql} = 'customer'",
+            'admin' => " AND {$roleIdentitySql} <> 'customer'",
+            default => '',
+        };
+        $cursorFilterSql = $cursor !== null
+            ? ' AND (u.created_at, u.id) < (:cursor_created_at, :cursor_id)'
+            : '';
+        $legacyOffsetSql = $cursor === null && $safeOffset > 0 ? ' OFFSET :offset' : '';
+
         $stmt = $this->prepare('
             SELECT
                 u.id,
@@ -66,42 +108,8 @@ class UserRepository {
                 security_block.event_type AS security_block_event_type,
                 security_block.status AS security_block_status,
                 security_block.created_at AS security_blocked_at,
-                security_block.metadata AS security_block_metadata,
-                COALESCE(stats.orders_total, 0)::int AS orders_total,
-                COALESCE(stats.orders_active, 0)::int AS orders_active,
-                COALESCE(stats.orders_completed, 0)::int AS orders_completed,
-                COALESCE(stats.total_spent, 0)::numeric(12,2) AS total_spent,
-                stats.last_order_at,
-                stats.last_order_id,
-                o_last.shipping_address AS last_shipping_address,
-                o_last.billing_address AS last_billing_address
+                security_block.metadata AS security_block_metadata
             FROM "User" u
-            LEFT JOIN (
-                SELECT
-                    o.user_id,
-                    COUNT(*) AS orders_total,
-                    COUNT(*) FILTER (
-                        WHERE LOWER(COALESCE(o.status, \'pending\')) NOT IN (\'canceled\', \'cancelled\')
-                    ) AS orders_active,
-                    COUNT(*) FILTER (
-                        WHERE LOWER(COALESCE(o.status, \'pending\')) IN (\'completed\', \'delivered\')
-                    ) AS orders_completed,
-                    SUM(
-                        CASE
-                            WHEN LOWER(COALESCE(o.status, \'pending\')) NOT IN (\'canceled\', \'cancelled\')
-                            THEN COALESCE(o.total, 0)
-                            ELSE 0
-                        END
-                    ) AS total_spent,
-                    MAX(o.created_at) AS last_order_at,
-                    (ARRAY_AGG(o.id ORDER BY o.created_at DESC))[1] AS last_order_id
-                FROM "Order" o
-                WHERE o.tenant_id = :tenant_id_orders
-                GROUP BY o.user_id
-            ) stats ON stats.user_id = u.id
-            LEFT JOIN "Order" o_last
-                ON o_last.id = stats.last_order_id
-                AND o_last.tenant_id = :tenant_id_orders_latest
             LEFT JOIN LATERAL (
                 SELECT
                     ase.event_type,
@@ -116,16 +124,123 @@ class UserRepository {
                 LIMIT 1
             ) security_block ON TRUE
             WHERE u.tenant_id = :tenant_id_users
-            ORDER BY u.created_at DESC, u.name ASC
+              AND (
+                :search_empty = TRUE
+                OR LOWER(CONCAT_WS(\' \',
+                    COALESCE(u.name, \'\'),
+                    COALESCE(u.email, \'\'),
+                    COALESCE(u.document_number, \'\'),
+                    COALESCE(u.business_name, \'\'),
+                    COALESCE(u.profile::text, \'\'),
+                    COALESCE(u.addresses::text, \'\')
+                )) LIKE :search_like
+              )' . $roleFilterSql . $cursorFilterSql . '
+            ORDER BY u.created_at DESC, u.id DESC
+            LIMIT :limit
+            ' . $legacyOffsetSql . '
         ');
         $tenantId = $this->getTenantId();
-        $stmt->execute([
-            'tenant_id_orders' => $tenantId,
-            'tenant_id_orders_latest' => $tenantId,
-            'tenant_id_security' => $tenantId,
-            'tenant_id_users' => $tenantId
-        ]);
-        return $stmt->fetchAll();
+        $stmt->bindValue(':tenant_id_security', $tenantId, \PDO::PARAM_STR);
+        $stmt->bindValue(':tenant_id_users', $tenantId, \PDO::PARAM_STR);
+        $stmt->bindValue(':search_empty', $search === '', \PDO::PARAM_BOOL);
+        $stmt->bindValue(':search_like', '%' . strtolower($search) . '%', \PDO::PARAM_STR);
+        if ($cursor !== null) {
+            $stmt->bindValue(':cursor_created_at', (string)$cursor['createdAt'], \PDO::PARAM_STR);
+            $stmt->bindValue(':cursor_id', (string)$cursor['id'], \PDO::PARAM_STR);
+        }
+        $stmt->bindValue(':limit', $safeLimit, \PDO::PARAM_INT);
+        if ($legacyOffsetSql !== '') {
+            $stmt->bindValue(':offset', $safeOffset, \PDO::PARAM_INT);
+        }
+        $stmt->execute();
+        $users = $stmt->fetchAll();
+        if (!is_array($users) || $users === []) {
+            return [];
+        }
+
+        $userIds = array_values(array_filter(array_map(
+            static fn(array $row): string => trim((string)($row['id'] ?? '')),
+            $users
+        )));
+        $orderStats = [];
+        if ($userIds !== []) {
+            $commerce = Database::getModuleInstance(CommerceDomain::KEY);
+            $placeholders = [];
+            $params = [
+                'tenant_id_orders' => $tenantId,
+                'tenant_id_latest' => $tenantId,
+            ];
+            foreach ($userIds as $index => $userId) {
+                $key = 'user_id_' . $index;
+                $placeholders[] = ':' . $key;
+                $params[$key] = $userId;
+            }
+            $orders = $commerce->prepare('
+                SELECT
+                    stats.user_id,
+                    stats.orders_total::int AS orders_total,
+                    stats.orders_active::int AS orders_active,
+                    stats.orders_completed::int AS orders_completed,
+                    stats.total_spent::numeric(12,2) AS total_spent,
+                    stats.last_order_at,
+                    stats.last_order_id,
+                    latest.shipping_address AS last_shipping_address,
+                    latest.billing_address AS last_billing_address
+                FROM (
+                    SELECT
+                        o.user_id,
+                        COUNT(*) AS orders_total,
+                        COUNT(*) FILTER (
+                            WHERE LOWER(COALESCE(o.status, \'pending\')) NOT IN (\'canceled\', \'cancelled\')
+                        ) AS orders_active,
+                        COUNT(*) FILTER (
+                            WHERE LOWER(COALESCE(o.status, \'pending\')) IN (\'completed\', \'delivered\')
+                        ) AS orders_completed,
+                        SUM(
+                            CASE
+                                WHEN LOWER(COALESCE(o.status, \'pending\')) NOT IN (\'canceled\', \'cancelled\')
+                                THEN COALESCE(o.total, 0)
+                                ELSE 0
+                            END
+                        ) AS total_spent,
+                        MAX(o.created_at) AS last_order_at,
+                        (ARRAY_AGG(o.id ORDER BY o.created_at DESC))[1] AS last_order_id
+                    FROM "Order" o
+                    WHERE o.tenant_id = :tenant_id_orders
+                      AND o.user_id IN (' . implode(', ', $placeholders) . ')
+                    GROUP BY o.user_id
+                ) stats
+                LEFT JOIN "Order" latest
+                  ON latest.id = stats.last_order_id
+                 AND latest.tenant_id = :tenant_id_latest
+            ');
+            $orders->execute($params);
+            foreach ($orders->fetchAll() ?: [] as $row) {
+                $orderStats[(string)$row['user_id']] = $row;
+            }
+        }
+
+        foreach ($users as &$user) {
+            $stats = $orderStats[(string)($user['id'] ?? '')] ?? [];
+            $user['orders_total'] = (int)($stats['orders_total'] ?? 0);
+            $user['orders_active'] = (int)($stats['orders_active'] ?? 0);
+            $user['orders_completed'] = (int)($stats['orders_completed'] ?? 0);
+            $user['total_spent'] = $stats['total_spent'] ?? 0;
+            $user['last_order_at'] = $stats['last_order_at'] ?? null;
+            $user['last_order_id'] = $stats['last_order_id'] ?? null;
+            $user['last_shipping_address'] = $stats['last_shipping_address'] ?? null;
+            $user['last_billing_address'] = $stats['last_billing_address'] ?? null;
+        }
+        unset($user);
+
+        return $users;
+    }
+
+    /**
+     * @deprecated HTTP list handlers must call getPage() explicitly.
+     */
+    public function getAll(array $options = []) {
+        return $this->getPage($options);
     }
 
     public function getByEmail($email) {
@@ -148,16 +263,15 @@ class UserRepository {
                     AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
                 )
             )
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'email' => $email,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
-        return $stmt->fetch();
+        $tenantUser = $stmt->fetch();
+        return $tenantUser ?: $this->readPlatformAuthentication('lookup_login', ['email' => $email]);
     }
 
     public function getByEmailWithOtp($email) {
@@ -181,16 +295,15 @@ class UserRepository {
                     AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
                 )
             )
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'email' => $email,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
-        return $stmt->fetch();
+        $tenantUser = $stmt->fetch();
+        return $tenantUser ?: $this->readPlatformAuthentication('lookup_login_otp', ['email' => $email]);
     }
 
     public function getById($id) {
@@ -211,16 +324,15 @@ class UserRepository {
                 login_locked_until
             FROM "User"
             WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
-        return $stmt->fetch();
+        $tenantUser = $stmt->fetch();
+        return $tenantUser ?: $this->readPlatformAuthentication('get_identity', ['id' => $id]);
     }
 
     public function getAdminUserById($id) {
@@ -333,16 +445,15 @@ class UserRepository {
                     LIMIT 1) AS account_status
             FROM "User"
             WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'id' => $id,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
-        return $stmt->fetch();
+        $tenantState = $stmt->fetch();
+        return $tenantState ?: $this->readPlatformAuthentication('get_auth_state', ['id' => $id]);
     }
 
     public function getAddresses($userId) {
@@ -401,33 +512,36 @@ class UserRepository {
             SELECT password
             FROM "User"
             WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         $row = $stmt->fetch();
-        return $row ? $row['password'] : null;
+        return $row ? $row['password'] : $this->readPlatformAuthentication('get_password_hash', ['id' => $userId]);
     }
 
     public function updatePassword($userId, $newPasswordHash, $newTokenId) {
         $stmt = $this->prepare('
             UPDATE "User"
             SET password = :password, active_token_id = :token_id, updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('update_password', [
+                'id' => (string)$userId,
+                'password' => (string)$newPasswordHash,
+                'token_id' => (string)$newTokenId,
+            ]);
+        }
         $this->revokeRelationalSessions((string)$userId);
     }
 
@@ -442,16 +556,21 @@ class UserRepository {
                 otp_expires_at = NULL,
                 otp_attempts = 0,
                 updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'password' => $newPasswordHash,
             'token_id' => $newTokenId
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('reset_password', [
+                'id' => $userId,
+                'password' => $newPasswordHash,
+                'token_id' => $newTokenId,
+            ]);
+        }
         $this->revokeRelationalSessions($userId);
     }
 
@@ -459,30 +578,36 @@ class UserRepository {
         $stmt = $this->prepare('
             UPDATE "User"
             SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW()
-            WHERE email = :email
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE LOWER(email) = LOWER(:email) AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'email' => $email,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'code' => $code,
             'expires_at' => $expiresAt
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('set_otp', [
+                'email' => strtolower(trim((string)$email)),
+                'code' => (string)$code,
+                'expires_at' => (string)$expiresAt,
+            ]);
+        }
     }
 
     public function markEmailVerifiedByOtp($userId) {
         $stmt = $this->prepare('
             UPDATE "User"
             SET email_verified = TRUE, verification_token = NULL, otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0, updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('verify_otp', ['id' => (string)$userId]);
+        }
         return $this->getById($userId);
     }
 
@@ -490,14 +615,15 @@ class UserRepository {
         $stmt = $this->prepare('
             UPDATE "User"
             SET otp_attempts = COALESCE(otp_attempts, 0) + 1
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('increment_otp_attempts', ['id' => (string)$userId]);
+        }
     }
 
     public function setLoginFailureState(string $userId, int $attempts, ?string $lockedUntil): void {
@@ -506,16 +632,21 @@ class UserRepository {
             SET failed_login_attempts = :attempts,
                 login_locked_until = :locked_until,
                 updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'attempts' => max(0, $attempts),
             'locked_until' => $lockedUntil
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('set_login_failure', [
+                'id' => $userId,
+                'attempts' => max(0, $attempts),
+                'locked_until' => $lockedUntil,
+            ]);
+        }
     }
 
     public function clearLoginFailures(string $userId): void {
@@ -524,14 +655,15 @@ class UserRepository {
             SET failed_login_attempts = 0,
                 login_locked_until = NULL,
                 updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('clear_login_failures', ['id' => $userId]);
+        }
     }
 
     public function unlockManagedUser(string $userId) {
@@ -546,29 +678,34 @@ class UserRepository {
                 login_locked_until = NULL,
                 last_login_at = NOW(),
                 updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('mark_successful_login', ['id' => $userId]);
+        }
     }
 
     public function setActiveTokenId($userId, $tokenId) {
         $stmt = $this->prepare('
             UPDATE "User"
             SET active_token_id = :tokenId, updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'tokenId' => $tokenId
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('set_active_token', [
+                'id' => (string)$userId,
+                'token_id' => (string)$tokenId,
+            ]);
+        }
     }
 
     public function registerSession(
@@ -771,14 +908,18 @@ class UserRepository {
         $stmt = $this->prepare('
             UPDATE "User"
             SET active_token_id = NULL, updated_at = NOW()
-            WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+            WHERE id = :id AND tenant_id = :tenant_id
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('clear_active_token', [
+                'id' => (string)$userId,
+                'expected_token_id' => null,
+            ]);
+        }
     }
 
     public function revokeSessions(string $userId): void {
@@ -803,17 +944,19 @@ class UserRepository {
             SELECT active_token_id
             FROM "User"
             WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
-            ORDER BY CASE WHEN tenant_id = :tenant_id THEN 0 ELSE 1 END
+              AND tenant_id = :tenant_id
             LIMIT 1
         ');
         $stmt->execute([
             'id' => $userId,
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
         ]);
         $row = $stmt->fetch();
-        return $row ? $row['active_token_id'] : null;
+        if ($row) {
+            return $row['active_token_id'];
+        }
+        $platformState = $this->readPlatformAuthentication('get_auth_state', ['id' => $userId]);
+        return is_array($platformState) ? ($platformState['active_token_id'] ?? null) : null;
     }
 
     public function create($data, $options = []) {
@@ -1216,7 +1359,7 @@ class UserRepository {
         $stmtLast = $this->prepare('SELECT COUNT(*) FROM "User" WHERE tenant_id = :tenant_id AND created_at >= DATE_TRUNC(\'week\', NOW() - INTERVAL \'1 week\') AND created_at < DATE_TRUNC(\'week\', NOW())');
         $stmtLast->execute(['tenant_id' => $this->getTenantId()]);
         $lastWeek = $stmtLast->fetchColumn() ?: 0;
-        
+
         $percentage = $lastWeek > 0
             ? (($thisWeek - $lastWeek) / $lastWeek) * 100
             : ($thisWeek > 0 ? 100 : 0);
@@ -1225,6 +1368,228 @@ class UserRepository {
             'previous' => $lastWeek,
             'percentage' => round($percentage, 1)
         ];
+    }
+
+    /**
+     * Read a global platform identity only after the tenant-scoped SELECT
+     * returned no row. FORCE RLS callers use narrowly typed SECURITY DEFINER
+     * functions; non-RLS development keeps an explicit platform-only query.
+     *
+     * @return array<string, mixed>|string|null
+     */
+    private function readPlatformAuthentication(string $operation, array $params) {
+        if ($this->userTable !== '"User"') {
+            return null;
+        }
+
+        $rlsMode = strtolower(trim((string)($_ENV['TENANT_RLS_MODE'] ?? getenv('TENANT_RLS_MODE') ?: 'off')));
+        $capabilitySql = [
+            'lookup_login' => 'SELECT platform_auth.lookup_login_candidate(:email, FALSE)',
+            'lookup_login_otp' => 'SELECT platform_auth.lookup_login_candidate(:email, TRUE)',
+            'get_identity' => 'SELECT platform_auth.get_identity(:id)',
+            'get_auth_state' => 'SELECT platform_auth.get_auth_state(:id)',
+            'get_password_hash' => 'SELECT platform_auth.get_password_hash(:id)',
+        ];
+        $legacySql = [
+            'lookup_login' => '
+                SELECT id, tenant_id, name, email, password, email_verified, role,
+                       document_type, document_number, business_name, profile, addresses,
+                       failed_login_attempts, login_locked_until, NULL AS otp_code,
+                       NULL AS otp_expires_at, NULL AS otp_attempts, \'active\' AS account_status
+                FROM "User"
+                WHERE tenant_id = :platform_tenant_id
+                  AND (
+                      lower(email) = :email
+                      OR (
+                          jsonb_typeof(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\') = \'array\'
+                          AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
+                      )
+                  )
+                ORDER BY id
+                LIMIT 1
+            ',
+            'lookup_login_otp' => '
+                SELECT id, tenant_id, name, email, password, email_verified, role,
+                       document_type, document_number, business_name, profile, addresses,
+                       failed_login_attempts, login_locked_until, otp_code, otp_expires_at,
+                       otp_attempts, \'active\' AS account_status
+                FROM "User"
+                WHERE tenant_id = :platform_tenant_id
+                  AND (
+                      lower(email) = :email
+                      OR (
+                          jsonb_typeof(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\') = \'array\'
+                          AND jsonb_exists(COALESCE(profile, \'{}\'::jsonb)->\'loginAliases\', :email)
+                      )
+                  )
+                ORDER BY id
+                LIMIT 1
+            ',
+            'get_identity' => '
+                SELECT id, tenant_id, name, email, role, email_verified, document_type,
+                       document_number, business_name, profile, addresses,
+                       failed_login_attempts, login_locked_until
+                FROM "User"
+                WHERE tenant_id = :platform_tenant_id AND id = :id
+                LIMIT 1
+            ',
+            'get_auth_state' => '
+                SELECT id, tenant_id, name, email, role, profile, active_token_id,
+                       \'active\' AS account_status
+                FROM "User"
+                WHERE tenant_id = :platform_tenant_id AND id = :id
+                LIMIT 1
+            ',
+            'get_password_hash' => '
+                SELECT password
+                FROM "User"
+                WHERE tenant_id = :platform_tenant_id AND id = :id
+                LIMIT 1
+            ',
+        ];
+
+        if (!isset($capabilitySql[$operation], $legacySql[$operation])) {
+            throw new \LogicException('Unsupported platform authentication read.');
+        }
+
+        if ($rlsMode !== 'enforce') {
+            $legacyParams = $params + ['platform_tenant_id' => self::PLATFORM_TENANT_ID];
+            $stmt = $this->db->prepare($legacySql[$operation]);
+            $stmt->execute($legacyParams);
+            if ($operation === 'get_password_hash') {
+                $value = $stmt->fetchColumn();
+                return $value === false ? null : (string)$value;
+            }
+            $row = $stmt->fetch();
+            return is_array($row) ? $row : null;
+        }
+
+        $stmt = $this->db->prepare($capabilitySql[$operation]);
+        $stmt->execute($params);
+        $value = $stmt->fetchColumn();
+        if ($operation === 'get_password_hash') {
+            return $value === false || $value === null ? null : (string)$value;
+        }
+        if ($value === false || $value === null || $value === '') {
+            return null;
+        }
+        if (is_array($value)) {
+            return $value;
+        }
+        try {
+            $decoded = json_decode((string)$value, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $exception) {
+            throw new \RuntimeException('Invalid platform authentication capability payload.', 0, $exception);
+        }
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Mutate a global platform identity only after the tenant-scoped UPDATE
+     * affected zero rows. Under FORCE RLS this invokes the narrow SQL
+     * capability owned by a dedicated NOLOGIN/BYPASSRLS role. In non-RLS
+     * development mode the same operation remains explicit and platform-only;
+     * the broad `(tenant OR platform)` UPDATE contract is never used.
+     */
+    private function mutatePlatformAuthentication(string $operation, array $params): bool {
+        if ($this->userTable !== '"User"') {
+            return false;
+        }
+
+        $rlsMode = strtolower(trim((string)($_ENV['TENANT_RLS_MODE'] ?? getenv('TENANT_RLS_MODE') ?: 'off')));
+        $capabilitySql = [
+            'update_password' => 'SELECT platform_auth.update_password(:id, :password, :token_id)',
+            'reset_password' => 'SELECT platform_auth.reset_password(:id, :password, :token_id)',
+            'set_otp' => 'SELECT platform_auth.set_otp(:email, :code, CAST(:expires_at AS timestamp without time zone))',
+            'verify_otp' => 'SELECT platform_auth.verify_otp(:id)',
+            'increment_otp_attempts' => 'SELECT platform_auth.increment_otp_attempts(:id)',
+            'set_login_failure' => 'SELECT platform_auth.set_login_failure(:id, CAST(:attempts AS integer), CAST(:locked_until AS timestamp without time zone))',
+            'clear_login_failures' => 'SELECT platform_auth.clear_login_failures(:id)',
+            'mark_successful_login' => 'SELECT platform_auth.mark_successful_login(:id)',
+            'set_active_token' => 'SELECT platform_auth.set_active_token(:id, :token_id)',
+            'clear_active_token' => 'SELECT platform_auth.clear_active_token(:id, CAST(:expected_token_id AS text))',
+        ];
+        $legacySql = [
+            'update_password' => '
+                UPDATE "User"
+                SET password = :password, active_token_id = :token_id, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'reset_password' => '
+                UPDATE "User"
+                SET password = :password,
+                    active_token_id = :token_id,
+                    failed_login_attempts = 0,
+                    login_locked_until = NULL,
+                    otp_code = NULL,
+                    otp_expires_at = NULL,
+                    otp_attempts = 0,
+                    updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'set_otp' => '
+                UPDATE "User"
+                SET otp_code = :code, otp_expires_at = :expires_at, otp_attempts = 0, updated_at = NOW()
+                WHERE tenant_id = \'platform\'
+                  AND id = (
+                      SELECT id FROM "User"
+                      WHERE tenant_id = \'platform\' AND LOWER(email) = LOWER(:email)
+                      ORDER BY id LIMIT 1
+                  )
+            ',
+            'verify_otp' => '
+                UPDATE "User"
+                SET email_verified = TRUE, verification_token = NULL,
+                    otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'increment_otp_attempts' => '
+                UPDATE "User"
+                SET otp_attempts = COALESCE(otp_attempts, 0) + 1, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'set_login_failure' => '
+                UPDATE "User"
+                SET failed_login_attempts = :attempts, login_locked_until = :locked_until, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'clear_login_failures' => '
+                UPDATE "User"
+                SET failed_login_attempts = 0, login_locked_until = NULL, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'mark_successful_login' => '
+                UPDATE "User"
+                SET failed_login_attempts = 0, login_locked_until = NULL,
+                    last_login_at = NOW(), updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'set_active_token' => '
+                UPDATE "User"
+                SET active_token_id = :token_id, updated_at = NOW()
+                WHERE id = :id AND tenant_id = \'platform\'
+            ',
+            'clear_active_token' => '
+                WITH expected AS (SELECT CAST(:expected_token_id AS text) AS token_id)
+                UPDATE "User"
+                SET active_token_id = NULL, updated_at = NOW()
+                FROM expected
+                WHERE id = :id AND tenant_id = \'platform\'
+                  AND (expected.token_id IS NULL OR active_token_id = expected.token_id)
+            ',
+        ];
+
+        if (!isset($capabilitySql[$operation], $legacySql[$operation])) {
+            throw new \LogicException('Unsupported platform authentication mutation.');
+        }
+
+        $stmt = $this->db->prepare($rlsMode === 'enforce' ? $capabilitySql[$operation] : $legacySql[$operation]);
+        $stmt->execute($params);
+        if ($rlsMode !== 'enforce') {
+            return $stmt->rowCount() === 1;
+        }
+
+        return in_array($stmt->fetchColumn(), [true, 1, '1', 't', 'true'], true);
     }
 
     private function getTenantId() {
@@ -1265,15 +1630,20 @@ class UserRepository {
             UPDATE "User"
             SET active_token_id = NULL, updated_at = NOW()
             WHERE id = :id
-              AND (tenant_id = :tenant_id OR tenant_id = :platform_tenant_id)
+              AND tenant_id = :tenant_id
               AND active_token_id = :session_id
         ');
         $stmt->execute([
             'id' => trim($userId),
             'tenant_id' => $this->getTenantId(),
-            'platform_tenant_id' => self::PLATFORM_TENANT_ID,
             'session_id' => trim($sessionId),
         ]);
+        if ($stmt->rowCount() === 0) {
+            $this->mutatePlatformAuthentication('clear_active_token', [
+                'id' => trim($userId),
+                'expected_token_id' => trim($sessionId),
+            ]);
+        }
     }
 
     private function syncIdentityMembership(array $user, string $status = 'active'): void {

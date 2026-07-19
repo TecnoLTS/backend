@@ -4,12 +4,21 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Support;
 
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipher;
+use RuntimeException;
+
 class ClientConfigurationResolver
 {
     public function __construct(private readonly array $baseConfig) {}
 
     public function resolve(array $clientContext, ?string $environment = null): array
     {
+        foreach (['certificate_password', 'mail_password'] as $secretField) {
+            $secretValue = $clientContext[$secretField] ?? null;
+            if (is_string($secretValue) && str_starts_with($secretValue, BillingSecretCipher::PREFIX)) {
+                throw new RuntimeException('Billing encrypted secret reached its plaintext use boundary.');
+            }
+        }
         $config = $this->baseConfig;
 
         if ($environment !== null) {

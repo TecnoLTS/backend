@@ -4,19 +4,31 @@ declare(strict_types=1);
 
 namespace BillingService\Billing\Infrastructure\Persistence;
 
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipher;
+use BillingService\Billing\Infrastructure\Security\BillingSecretCipherFactory;
 use PDO;
 
 class ApiKeyRepository
 {
-    public function __construct(private readonly PDO $connection) {}
+    private readonly BillingSecretCipher $secretCipher;
 
-    public function findClientContextByRawKey(string $rawKey, ?string $requiredApiMode = null): ?array
+    public function __construct(private readonly PDO $connection, ?BillingSecretCipher $secretCipher = null)
     {
+        $this->secretCipher = $secretCipher ?? BillingSecretCipherFactory::fromEnvironment();
+    }
+
+    public function findClientContextByRawKey(string $rawKey, ?string $requiredApiMode = null, ?string $tenantId = null): ?array
+    {
+        $tenantId = trim((string)$tenantId);
+        if ($tenantId === '') {
+            throw new \InvalidArgumentException('No se pudo resolver el tenant para autenticar la API key fiscal.');
+        }
         $keyHash = hash('sha256', $rawKey);
 
         $statement = $this->connection->prepare(
             'SELECT
                 ak.id AS api_key_id,
+                ak.tenant_id,
                 ak.client_id,
                 ak.branch_id AS api_key_branch_id,
                 NULL::BIGINT AS branch_id,
@@ -58,25 +70,29 @@ class ApiKeyRepository
                 production_retry.delay_seconds AS retry_production_delay_seconds,
                 production_retry.is_active AS retry_production_is_active
             FROM api_keys ak
-            INNER JOIN clients c ON c.id = ak.client_id AND c.is_active = TRUE
+            INNER JOIN clients c ON c.id = ak.client_id AND c.tenant_id = ak.tenant_id AND c.is_active = TRUE
             LEFT JOIN client_branches b ON b.id = COALESCE(
                 ak.branch_id,
                 (
                     SELECT b2.id
                     FROM client_branches b2
-                    WHERE b2.client_id = c.id AND b2.is_default = TRUE AND b2.is_active = TRUE
+                    WHERE b2.tenant_id = ak.tenant_id AND b2.client_id = c.id AND b2.is_default = TRUE AND b2.is_active = TRUE
                     ORDER BY b2.id ASC
                     LIMIT 1
                 )
             )
-            LEFT JOIN invoice_retry_settings test_retry ON test_retry.ambiente = \'pruebas\'
-            LEFT JOIN invoice_retry_settings production_retry ON production_retry.ambiente = \'produccion\'
+            AND b.tenant_id = ak.tenant_id
+            LEFT JOIN invoice_retry_settings test_retry
+                ON test_retry.tenant_id = ak.tenant_id AND test_retry.ambiente = \'pruebas\'
+            LEFT JOIN invoice_retry_settings production_retry
+                ON production_retry.tenant_id = ak.tenant_id AND production_retry.ambiente = \'produccion\'
             WHERE ak.key_hash = :key_hash
+              AND ak.tenant_id = :tenant_id
               AND ak.revoked_at IS NULL
             LIMIT 1'
         );
 
-        $statement->execute(['key_hash' => $keyHash]);
+        $statement->execute(['key_hash' => $keyHash, 'tenant_id' => $tenantId]);
         $context = $statement->fetch();
 
         if (!is_array($context)) {
@@ -91,13 +107,13 @@ class ApiKeyRepository
             return null;
         }
 
-        return $context;
+        return $this->decryptBranchSecrets($context);
     }
 
-    public function touchUsage(int $apiKeyId): void
+    public function touchUsage(int $apiKeyId, string $tenantId): void
     {
-        $statement = $this->connection->prepare('UPDATE api_keys SET last_used_at = NOW() WHERE id = :id');
-        $statement->execute(['id' => $apiKeyId]);
+        $statement = $this->connection->prepare('UPDATE api_keys SET last_used_at = NOW() WHERE tenant_id = :tenant_id AND id = :id');
+        $statement->execute(['tenant_id' => $tenantId, 'id' => $apiKeyId]);
     }
 
     public function withResolvedBranch(
@@ -121,12 +137,13 @@ class ApiKeyRepository
         }
 
         $clientId = (int) ($context['client_id'] ?? 0);
-        if ($clientId <= 0) {
+        $tenantId = trim((string)($context['tenant_id'] ?? ''));
+        if ($clientId <= 0 || $tenantId === '') {
             throw new \InvalidArgumentException('No se pudo resolver el cliente fiscal autenticado.');
         }
 
-        $parameters = ['client_id' => $clientId];
-        $where = 'b.client_id = :client_id AND b.is_active = TRUE';
+        $parameters = ['tenant_id' => $tenantId, 'client_id' => $clientId];
+        $where = 'b.tenant_id = :tenant_id AND b.client_id = :client_id AND b.is_active = TRUE';
         if ($branchId !== null && $branchId > 0) {
             $where .= ' AND b.id = :branch_id';
             $parameters['branch_id'] = $branchId;
@@ -187,7 +204,7 @@ class ApiKeyRepository
             throw new \InvalidArgumentException($message);
         }
 
-        return $resolved;
+        return $this->decryptBranchSecrets($resolved);
     }
 
     private function isApiModeEnabled(array $context, string $requiredApiMode): bool
@@ -197,5 +214,39 @@ class ApiKeyRepository
             'production' => filter_var($context['api_produccion'] ?? false, FILTER_VALIDATE_BOOLEAN),
             default => false,
         };
+    }
+
+    private function decryptBranchSecrets(array $context): array
+    {
+        $tenantId = trim((string)($context['tenant_id'] ?? ''));
+        $branchId = (int)($context['resolved_branch_id'] ?? 0);
+        if ($tenantId === '' || $branchId <= 0) {
+            throw new \RuntimeException('Billing branch secret context is incomplete.');
+        }
+
+        $certificate = $context['certificate_password'] ?? null;
+        if (!is_string($certificate)) {
+            throw new \RuntimeException('Billing certificate secret is missing.');
+        }
+        $context['certificate_password'] = $this->secretCipher->decryptStored(
+            $certificate,
+            $tenantId,
+            $branchId,
+            'certificate_password'
+        );
+
+        if ($context['mail_password'] !== null) {
+            if (!is_string($context['mail_password'])) {
+                throw new \RuntimeException('Billing mail secret is malformed.');
+            }
+            $context['mail_password'] = $this->secretCipher->decryptStored(
+                $context['mail_password'],
+                $tenantId,
+                $branchId,
+                'mail_password'
+            );
+        }
+
+        return $context;
     }
 }

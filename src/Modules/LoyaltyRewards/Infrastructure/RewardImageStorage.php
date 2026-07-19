@@ -2,12 +2,21 @@
 
 namespace App\Modules\LoyaltyRewards\Infrastructure;
 
+use App\Infrastructure\Storage\ObjectStorage;
+use App\Infrastructure\Storage\StorageManager;
+
 final class RewardImageStorage {
     private const PUBLIC_ROUTE_PREFIX = '/api/l/reward-images';
-    private const UPLOAD_ROOT = '/var/www/html/public/uploads/loyalty/rewards';
+    private const STORAGE_PREFIX = 'loyalty/rewards';
     private const MAX_DIMENSION = 1200;
     private const MAX_PIXELS = 25000000;
     private const WEBP_QUALITY = 84;
+
+    private readonly ObjectStorage $storage;
+
+    public function __construct(?ObjectStorage $storage = null) {
+        $this->storage = $storage ?? StorageManager::instance()->uploads();
+    }
 
     /**
      * @param array<string, mixed> $upload
@@ -83,33 +92,22 @@ final class RewardImageStorage {
         imagedestroy($source);
 
         $tenantSegment = $this->safeSegment($tenantId);
-        $targetDir = rtrim(self::UPLOAD_ROOT, '/') . '/' . $tenantSegment;
-        $this->ensureDirectory($targetDir);
-
         $fileName = 'reward-' . gmdate('YmdHis') . '-' . bin2hex(random_bytes(8)) . '.webp';
-        $targetPath = $targetDir . '/' . $fileName;
-        $tempPath = $targetPath . '.tmp';
-        if (!imagewebp($target, $tempPath, self::WEBP_QUALITY)) {
+        ob_start();
+        $encoded = imagewebp($target, null, self::WEBP_QUALITY);
+        $webp = ob_get_clean();
+        if (!$encoded || !is_string($webp) || $webp === '') {
             imagedestroy($target);
-            @unlink($tempPath);
             throw new \RuntimeException('No se pudo convertir la imagen a WebP.');
         }
         imagedestroy($target);
-
-        @chmod($tempPath, 0644);
-        if (!rename($tempPath, $targetPath)) {
-            @unlink($tempPath);
-            throw new \RuntimeException('No se pudo guardar la imagen procesada.');
-        }
-        @chmod($targetPath, 0644);
-
-        clearstatcache(true, $targetPath);
+        $this->storage->put($this->storageKey($tenantSegment, $fileName), $webp, 'image/webp');
 
         return [
             'imageUrl' => self::PUBLIC_ROUTE_PREFIX . '/' . $tenantSegment . '/' . $fileName,
             'fileName' => $fileName,
             'mimeType' => 'image/webp',
-            'size' => (int)(filesize($targetPath) ?: 0),
+            'size' => strlen($webp),
             'width' => $targetWidth,
             'height' => $targetHeight,
         ];
@@ -121,14 +119,15 @@ final class RewardImageStorage {
             throw new \RuntimeException('Imagen no encontrada.');
         }
 
-        $path = rtrim(self::UPLOAD_ROOT, '/') . '/' . $tenantSegment . '/' . $fileName;
-        if (!is_file($path) || !is_readable($path)) {
+        $key = $this->storageKey($tenantSegment, $fileName);
+        $metadata = $this->storage->metadata($key);
+        if ($metadata === null) {
             throw new \RuntimeException('Imagen no encontrada.');
         }
 
         http_response_code(200);
         header('Content-Type: image/webp');
-        header('Content-Length: ' . (string)(filesize($path) ?: 0));
+        header('Content-Length: ' . (string)$metadata['size']);
         header('Cache-Control: public, max-age=2592000, immutable');
         header('X-Content-Type-Options: nosniff');
         header('Cross-Origin-Resource-Policy: same-site');
@@ -137,7 +136,7 @@ final class RewardImageStorage {
             return;
         }
 
-        readfile($path);
+        echo $this->storage->get($key);
     }
 
     private function detectMimeType(string $path): string {
@@ -164,15 +163,6 @@ final class RewardImageStorage {
         ];
     }
 
-    private function ensureDirectory(string $path): void {
-        if (!is_dir($path) && !mkdir($path, 0755, true) && !is_dir($path)) {
-            throw new \RuntimeException('No se pudo preparar el directorio de imagenes.');
-        }
-
-        @chmod(dirname($path), 0755);
-        @chmod($path, 0755);
-    }
-
     private function maxBytes(): int {
         $configured = (int)($_ENV['LOYALTY_REWARD_IMAGE_MAX_BYTES'] ?? 0);
 
@@ -185,6 +175,10 @@ final class RewardImageStorage {
         $segment = trim($segment, '-_');
 
         return $segment !== '' ? $segment : 'default';
+    }
+
+    private function storageKey(string $tenantSegment, string $fileName): string {
+        return self::STORAGE_PREFIX . '/' . $tenantSegment . '/' . $fileName;
     }
 
     private function uploadErrorMessage(int $error): string {

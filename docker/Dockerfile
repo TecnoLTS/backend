@@ -40,6 +40,16 @@ RUN { \
         echo "expose_php = Off"; \
         echo "display_errors = Off"; \
         echo "log_errors = On"; \
+        echo "zend.exception_ignore_args = On"; \
+        echo "zend.exception_string_param_max_len = 0"; \
+        echo "upload_max_filesize = 8M"; \
+        echo "post_max_size = 24M"; \
+        echo "max_file_uploads = 3"; \
+        echo "opcache.enable = On"; \
+        echo "opcache.validate_timestamps = Off"; \
+        echo "opcache.memory_consumption = 192"; \
+        echo "opcache.interned_strings_buffer = 16"; \
+        echo "opcache.max_accelerated_files = 20000"; \
     } > /usr/local/etc/php/conf.d/app.ini \
     && { \
         echo "[www]"; \
@@ -70,14 +80,17 @@ RUN set -eux; \
         /var/www/html/storage/billing/pdf/rides \
         /var/www/html/storage/billing/xml/autorizados \
         /var/www/html/storage/billing/xml/firmados \
-        /var/www/html/storage/billing/xml/generados; \
-    chown -R www-data:www-data /var/www/html/public/uploads /var/www/html/storage; \
+        /var/www/html/storage/billing/xml/generados \
+        /run/php-fpm; \
+    chown -R www-data:www-data /var/www/html/public/uploads /var/www/html/storage /run/php-fpm; \
     find /var/www/html/public/uploads -type d -exec chmod 755 {} +; \
     find /var/www/html/public/uploads -type f -exec chmod 644 {} +; \
     find /var/www/html/storage -type d -exec chmod 750 {} +; \
     find /var/www/html/storage -type f -exec chmod 640 {} +
 
-EXPOSE 9000
+# El data plane FastCGI usa /run/php-fpm/app.sock. Solo el listener de estado
+# aislado conserva TCP para el exporter/observador.
+EXPOSE 9001
 
 USER www-data
 

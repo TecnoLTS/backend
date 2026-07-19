@@ -205,21 +205,23 @@ $updateProduct = $db->prepare('
     WHERE id = :id AND tenant_id = :tenant_id
 ');
 
-$deleteImages = $db->prepare('DELETE FROM "Image" WHERE product_id = :product_id');
+$deleteImages = $db->prepare('DELETE FROM "Image" WHERE tenant_id = :tenant_id AND product_id = :product_id');
 $insertImage = $db->prepare('
-    INSERT INTO "Image" (id, url, product_id, kind, width, height, alt_text, display_order)
-    VALUES (:id, :url, :product_id, :kind, :width, :height, :alt_text, :display_order)
+    INSERT INTO "Image" (id, tenant_id, url, product_id, kind, width, height, alt_text, display_order)
+    VALUES (:id, :tenant_id, :url, :product_id, :kind, :width, :height, :alt_text, :display_order)
 ');
 
 $deleteTenantImages = $db->prepare('
     DELETE FROM "Image"
-    WHERE product_id IN (
+    WHERE tenant_id = :tenant_id
+      AND product_id IN (
         SELECT id FROM "Product" WHERE tenant_id = :tenant_id
     )
 ');
 $deleteTenantVariations = $db->prepare('
     DELETE FROM "Variation"
-    WHERE product_id IN (
+    WHERE tenant_id = :tenant_id
+      AND product_id IN (
         SELECT id FROM "Product" WHERE tenant_id = :tenant_id
     )
 ');
@@ -345,10 +347,11 @@ try {
             $inserted++;
         }
 
-        $deleteImages->execute(['product_id' => $productId]);
+        $deleteImages->execute(['tenant_id' => $tenantId, 'product_id' => $productId]);
         foreach ($galleryImages as $index => $image) {
             $insertImage->execute([
                 'id' => uniqid('img_', true),
+                'tenant_id' => $tenantId,
                 'url' => $image['url'],
                 'product_id' => $productId,
                 'kind' => 'gallery',
@@ -361,6 +364,7 @@ try {
         foreach ($thumbImages as $index => $image) {
             $insertImage->execute([
                 'id' => uniqid('img_', true),
+                'tenant_id' => $tenantId,
                 'url' => $image['url'],
                 'product_id' => $productId,
                 'kind' => 'thumb',

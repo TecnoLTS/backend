@@ -107,7 +107,11 @@ class ContactMessageRepository
 
     private function getTenantId(): string
     {
-        $tenant = TenantContext::get();
-        return (string)($tenant['id'] ?? 'default');
+        $tenantId = trim((string)(TenantContext::id() ?? ''));
+        if ($tenantId === '') {
+            throw new \LogicException('Contact persistence requires an explicit tenant context.');
+        }
+
+        return $tenantId;
     }
 }

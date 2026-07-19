@@ -14,21 +14,58 @@ class ProductReviewRepository {
         $this->db = $db ?: Database::getModuleInstance(CatalogInventoryDomain::KEY);
     }
 
-    public function listApprovedForProduct(string $productId): array {
+    /**
+     * @param array{limit?:int,cursor?:array{createdAt:string,id:string}|null} $options
+     * @return array{items:array<int,array<string,mixed>>,nextPosition:array{createdAt:string,id:string}|null}
+     */
+    public function approvedPageForProduct(string $productId, array $options = []): array {
+        $limit = max(1, min(100, (int)($options['limit'] ?? 20)));
+        $cursor = is_array($options['cursor'] ?? null) ? $options['cursor'] : null;
+        $cursorFilter = $cursor !== null
+            ? ' AND (created_at, id) < (:cursor_created_at, :cursor_id)'
+            : '';
         $stmt = $this->db->prepare('
             SELECT *
             FROM "ProductReview"
             WHERE tenant_id = :tenant_id
               AND product_id = :product_id
               AND status = \'approved\'
-            ORDER BY created_at DESC
+              ' . $cursorFilter . '
+            ORDER BY created_at DESC, id DESC
+            LIMIT :limit
         ');
-        $stmt->execute([
-            'tenant_id' => $this->getTenantId(),
-            'product_id' => $productId,
-        ]);
+        $stmt->bindValue(':tenant_id', $this->getTenantId(), PDO::PARAM_STR);
+        $stmt->bindValue(':product_id', $productId, PDO::PARAM_STR);
+        if ($cursor !== null) {
+            $stmt->bindValue(':cursor_created_at', (string)$cursor['createdAt'], PDO::PARAM_STR);
+            $stmt->bindValue(':cursor_id', (string)$cursor['id'], PDO::PARAM_STR);
+        }
+        $stmt->bindValue(':limit', $limit + 1, PDO::PARAM_INT);
+        $stmt->execute();
 
-        return array_map([$this, 'normalizeRow'], $stmt->fetchAll() ?: []);
+        $rows = $stmt->fetchAll() ?: [];
+        $hasMore = count($rows) > $limit;
+        if ($hasMore) {
+            $rows = array_slice($rows, 0, $limit);
+        }
+        $nextPosition = null;
+        if ($hasMore && $rows !== []) {
+            $last = $rows[array_key_last($rows)];
+            $nextPosition = [
+                'createdAt' => (string)$last['created_at'],
+                'id' => (string)$last['id'],
+            ];
+        }
+
+        return [
+            'items' => array_map([$this, 'normalizeRow'], $rows),
+            'nextPosition' => $nextPosition,
+        ];
+    }
+
+    /** @deprecated HTTP handlers must call approvedPageForProduct(). */
+    public function listApprovedForProduct(string $productId): array {
+        return $this->approvedPageForProduct($productId)['items'];
     }
 
     public function getApprovedSummary(string $productId): array {
@@ -54,7 +91,7 @@ class ProductReviewRepository {
     public function listAdmin(array $filters = []): array {
         $status = strtolower(trim((string)($filters['status'] ?? '')));
         $productId = trim((string)($filters['productId'] ?? $filters['product_id'] ?? ''));
-        $safeLimit = max(1, min(500, (int)($filters['limit'] ?? 100)));
+        $safeLimit = max(1, min(100, (int)($filters['limit'] ?? 100)));
 
         $where = ['r.tenant_id = :tenant_id'];
         $params = ['tenant_id' => $this->getTenantId()];
@@ -231,7 +268,8 @@ class ProductReviewRepository {
             LEFT JOIN "ProductReview" r
               ON r.tenant_id = o.tenant_id
              AND r.order_item_id = oi.id
-            WHERE ' . implode(' AND ', $where) . '
+            WHERE oi.tenant_id = o.tenant_id
+              AND ' . implode(' AND ', $where) . '
             ORDER BY o.created_at DESC, oi.id DESC
             LIMIT 1
         ');

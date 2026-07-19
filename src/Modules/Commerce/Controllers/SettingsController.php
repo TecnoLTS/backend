@@ -2,4 +2,6 @@
 
 namespace App\Modules\Commerce\Controllers;
 
-class SettingsController extends \App\Controllers\SettingsController {}
+use App\Http\Shared\SettingsControllerBase;
+
+class SettingsController extends SettingsControllerBase {}

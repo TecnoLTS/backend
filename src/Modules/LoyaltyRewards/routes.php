@@ -53,7 +53,7 @@ return [
     ['method' => 'GET', 'path' => '/api/admin/loyalty/wallet/context', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@walletContext', 'capability' => 'loyalty.admin'],
     ['method' => 'POST', 'path' => '/api/admin/loyalty/wallet/google-link', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@googleWalletLink', 'capability' => 'loyalty.admin'],
     ['method' => 'POST', 'path' => '/api/admin/loyalty/wallet/notify', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@googleWalletNotify', 'capability' => 'loyalty.admin'],
-    ['method' => 'GET', 'path' => '/api/loyalty/v1/health', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@externalHealth', 'capability' => 'loyalty.public'],
+    ['method' => 'GET', 'path' => '/api/loyalty/v1/health', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyHealthController@health', 'capability' => 'loyalty.public'],
     ['method' => 'GET', 'path' => '/api/l/w/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicGoogleWalletLanding', 'capability' => 'loyalty.public'],
     ['method' => 'HEAD', 'path' => '/api/l/w/{token}', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicGoogleWalletLanding', 'capability' => 'loyalty.public'],
     ['method' => 'GET', 'path' => '/api/l/access', 'handler' => 'App\\Modules\\LoyaltyRewards\\Controllers\\LoyaltyController@publicRewardsAccess', 'capability' => 'loyalty.public'],
