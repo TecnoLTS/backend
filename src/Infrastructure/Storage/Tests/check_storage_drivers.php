@@ -42,11 +42,23 @@ $removeTree = static function (string $path) use (&$removeTree): void {
 };
 
 try {
+    $previousUmask = umask(0077);
     $local = new LocalObjectStorage($temporaryRoot . '/local');
     $local->put('billing/xml/test.xml', '<ok/>', 'application/xml');
     $assert($local->get('billing/xml/test.xml') === '<ok/>', 'El round-trip local no conservó el contenido.');
     $assert(($local->metadata('billing/xml/test.xml')['size'] ?? -1) === 5, 'Metadata local incorrecta.');
     $assert(is_file($local->materialize('billing/xml/test.xml')), 'Materialización local inexistente.');
+    $assert((fileperms($temporaryRoot . '/local/billing/xml') & 0777) === 0750, 'El umask alteró permisos de directorios privados.');
+    $assert((fileperms($temporaryRoot . '/local/billing/xml/test.xml') & 0777) === 0640, 'El umask alteró permisos de artefactos privados.');
+
+    $publicUploads = new LocalObjectStorage($temporaryRoot . '/uploads', 0755, 0644);
+    $publicUploads->put('tenants/paramascotasec/products/test.webp', 'RIFFxxxxWEBP', 'image/webp');
+    foreach (['uploads', 'uploads/tenants', 'uploads/tenants/paramascotasec', 'uploads/tenants/paramascotasec/products'] as $directory) {
+        $assert((fileperms($temporaryRoot . '/' . $directory) & 0777) === 0755, sprintf('El umask dejó %s sin permisos de lectura pública.', $directory));
+    }
+    $assert((fileperms($temporaryRoot . '/uploads/tenants/paramascotasec/products/test.webp') & 0777) === 0644, 'El umask alteró permisos de uploads públicos.');
+    umask($previousUmask);
+
     $local->delete('billing/xml/test.xml');
     $assert(!$local->exists('billing/xml/test.xml'), 'Delete local no eliminó el objeto.');
 

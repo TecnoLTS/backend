@@ -26,9 +26,7 @@ final class LocalObjectStorage implements ObjectStorage
         $key = StorageKey::normalize($key);
         $path = $this->path($key);
         $directory = dirname($path);
-        if (!is_dir($directory) && !mkdir($directory, $this->directoryMode, true) && !is_dir($directory)) {
-            throw new StorageException('No se pudo crear el directorio de almacenamiento local.');
-        }
+        $this->ensureDirectory($directory);
 
         $temporary = tempnam($directory, '.storage-');
         if ($temporary === false) {
@@ -131,6 +129,32 @@ final class LocalObjectStorage implements ObjectStorage
     private function path(string $key): string
     {
         return rtrim($this->root, '/') . '/' . $key;
+    }
+
+    private function ensureDirectory(string $directory): void
+    {
+        $root = rtrim($this->root, '/');
+        if (!is_dir($directory) && !mkdir($directory, $this->directoryMode, true) && !is_dir($directory)) {
+            throw new StorageException('No se pudo crear el directorio de almacenamiento local.');
+        }
+
+        // PHP-FPM usa umask 0077 para proteger artefactos fiscales. mkdir()
+        // aplica ese umask incluso cuando uploads solicita 0755, por lo que
+        // Nginx no puede atravesar directorios nuevos. chmod() explicito sobre
+        // cada nivel conserva 0750 para artefactos y 0755 para uploads.
+        $relative = ltrim(substr($directory, strlen($root)), '/');
+        $paths = [$root];
+        $current = $root;
+        foreach (array_filter(explode('/', $relative), static fn(string $part): bool => $part !== '') as $part) {
+            $current .= '/' . $part;
+            $paths[] = $current;
+        }
+
+        foreach ($paths as $path) {
+            if (is_link($path) || !is_dir($path) || !chmod($path, $this->directoryMode)) {
+                throw new StorageException('No se pudieron aplicar permisos seguros al directorio de almacenamiento local.');
+            }
+        }
     }
 
     private function detectContentType(string $path): ?string

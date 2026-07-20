@@ -377,40 +377,94 @@ class ProductRepository {
         $cursorFilter = '';
 
         if ($cursor !== null) {
-            $cursorFilter = ' AND (p.created_at, p.id) < (:cursor_created_at, :cursor_id)';
+            $cursorFilter = ' WHERE (catalog_group.created_at, catalog_group.id) < (:cursor_created_at, :cursor_id)';
             $params['cursor_created_at'] = (string)$cursor['createdAt'];
             $params['cursor_id'] = (string)$cursor['id'];
         }
 
-        $sql = $this->getBaseQuery(false, false)
+        $groupKeySql = "COALESCE(NULLIF(BTRIM(p.attributes->>'variantGroupKey'), ''), 'single:' || p.id)";
+        $groupSql = 'SELECT catalog_group.group_key, catalog_group.created_at AS "createdAt", catalog_group.id'
+            . ' FROM ('
+            . ' SELECT DISTINCT ON (' . $groupKeySql . ')'
+            . ' ' . $groupKeySql . ' AS group_key, p.created_at, p.id'
+            . ' FROM "Product" p'
             . ' WHERE p.tenant_id = :tenant_id'
             . ' AND p.is_published = true'
             . ' AND p.quantity > 0'
             . $this->getArchivedFilter(false)
             . $this->publicCatalogFilterSql($filters, $params)
+            . ' ORDER BY ' . $groupKeySql . ', p.created_at DESC, p.id DESC'
+            . ' ) catalog_group'
             . $cursorFilter
-            . ' ORDER BY p.created_at DESC, p.id DESC'
+            . ' ORDER BY catalog_group.created_at DESC, catalog_group.id DESC'
             . ' LIMIT ' . ($pageSize + 1);
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->db->prepare($groupSql);
         $stmt->execute($params);
-        $rows = $stmt->fetchAll();
+        $groups = $stmt->fetchAll();
 
-        $hasMore = count($rows) > $pageSize;
+        $hasMore = count($groups) > $pageSize;
         if ($hasMore) {
-            $rows = array_slice($rows, 0, $pageSize);
+            $groups = array_slice($groups, 0, $pageSize);
         }
 
         $nextPosition = null;
-        if ($hasMore && $rows !== []) {
-            $last = $rows[array_key_last($rows)];
+        if ($hasMore && $groups !== []) {
+            $last = $groups[array_key_last($groups)];
             $nextPosition = [
                 'createdAt' => (string)$last['createdAt'],
                 'id' => (string)$last['id'],
             ];
         }
 
+        if ($groups === []) {
+            return [
+                'items' => [],
+                'nextPosition' => $nextPosition,
+            ];
+        }
+
+        $familyParams = ['tenant_id' => $this->getTenantId()];
+        $familyPlaceholders = [];
+        $groupOrder = [];
+        foreach (array_values($groups) as $index => $group) {
+            $parameter = 'catalog_family_' . $index;
+            $familyPlaceholders[] = ':' . $parameter;
+            $familyParams[$parameter] = (string)$group['group_key'];
+            $groupOrder[(string)$group['group_key']] = $index;
+        }
+
+        // Hydrate every public, in-stock variant for the selected families. The
+        // cursor still advances by family, so a page can never split variants
+        // and make the storefront show a wrong presentation or minimum price.
+        $familySql = $this->getBaseQuery(false, false)
+            . ' WHERE p.tenant_id = :tenant_id'
+            . ' AND p.is_published = true'
+            . ' AND p.quantity > 0'
+            . $this->getArchivedFilter(false)
+            . ' AND ' . $groupKeySql . ' IN (' . implode(', ', $familyPlaceholders) . ')'
+            . ' ORDER BY p.created_at DESC, p.id DESC';
+        $familyStatement = $this->db->prepare($familySql);
+        $familyStatement->execute($familyParams);
+        $familyRows = $familyStatement->fetchAll();
+
+        $itemsByGroup = array_fill(0, count($groups), []);
+        foreach ($familyRows as $row) {
+            $attributes = json_decode($row['attributes'] ?? '{}', true) ?: [];
+            $variantGroupKey = trim((string)($attributes['variantGroupKey'] ?? ''));
+            $groupKey = $variantGroupKey !== '' ? $variantGroupKey : 'single:' . (string)$row['id'];
+            if (!array_key_exists($groupKey, $groupOrder)) {
+                continue;
+            }
+            $itemsByGroup[$groupOrder[$groupKey]][] = $this->formatRow($row, false);
+        }
+
+        $items = [];
+        foreach ($itemsByGroup as $familyItems) {
+            array_push($items, ...$familyItems);
+        }
+
         return [
-            'items' => array_map(fn ($row) => $this->formatRow($row, false), $rows),
+            'items' => $items,
             'nextPosition' => $nextPosition,
         ];
     }
