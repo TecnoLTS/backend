@@ -13,6 +13,10 @@ logs/
 db/backup.sql
 db/backups/
 
+# Runtime-generated tenant registry snapshots
+storage/runtime/*
+!storage/runtime/.gitkeep
+
 # Google Wallet service account (nunca subir)
 storage/wallet/*.json
 
@@ -30,5 +34,6 @@ storage/billing/pdf/**/*.pdf
 
 # Keep directory structure
 !storage/wallet/.gitkeep
+!storage/runtime/.gitkeep
 !storage/sri/**/.gitkeep
 !storage/billing/**/.gitkeep
