@@ -5,8 +5,8 @@ x-default-logging: &default-logging
     max-file: "3"
 
 x-storage-environment: &storage-environment
-  STORAGE_DRIVER: ${STORAGE_DRIVER:-}
-  REQUIRE_HA: ${REQUIRE_HA:-false}
+  STORAGE_DRIVER: ${STORAGE_DRIVER:?Define STORAGE_DRIVER en entorno/.env}
+  REQUIRE_HA: ${REQUIRE_HA:?Define REQUIRE_HA en entorno/.env}
   STORAGE_LOCAL_ARTIFACT_ROOT: /var/www/html/storage
   STORAGE_LOCAL_UPLOAD_ROOT: /var/www/html/public/uploads
   STORAGE_TEMP_ROOT: ${STORAGE_TEMP_ROOT:-/tmp/backend-object-storage}
@@ -146,8 +146,8 @@ services:
       ADMIN_IP_MODE: ${ADMIN_IP_MODE:-off}
       ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
-      APP_ENV: ${APP_ENV:-production}
-      ENTORNO_MODE: ${ENTORNO_MODE:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
+      ENTORNO_MODE: ${ENTORNO_MODE:?Define ENTORNO_MODE en entorno/.env}
       APP_DEBUG: ${APP_DEBUG:-false}
       APP_URL: ${APP_URL}
       FRONTEND_URL: ${FRONTEND_URL:-}
@@ -175,7 +175,7 @@ services:
       AUTH_PASSWORD_RESET_TTL_MINUTES: ${AUTH_PASSWORD_RESET_TTL_MINUTES:-30}
       PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
       AUTH_PRICING_TAMPER_LOCK_MINUTES: ${AUTH_PRICING_TAMPER_LOCK_MINUTES:-15}
-      SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:-produccion}
+      SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:?Define SRI_ENVIRONMENT en entorno/.env}
       SRI_RUC: ${SRI_RUC:-}
       SRI_CERT_PATH: ${SRI_CERT_PATH:-}
       SRI_WS_RECEPCION_PRUEBAS: ${SRI_WS_RECEPCION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
@@ -283,7 +283,7 @@ services:
       DB_HOST_BILLING: ${DB_HOST_BILLING:-db}
       DB_PORT_BILLING: ${DB_PORT_BILLING:-5432}
       DB_DATABASE_BILLING: ${DB_DATABASE_BILLING:-facturacion}
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       APP_URL: ${APP_URL}
       APP_TIMEZONE: ${APP_TIMEZONE:-America/Guayaquil}
       MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS}
@@ -293,7 +293,7 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASS: ${SMTP_PASS}
       SMTP_SECURE: ${SMTP_SECURE}
-      SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:-produccion}
+      SRI_ENVIRONMENT: ${SRI_ENVIRONMENT:?Define SRI_ENVIRONMENT en entorno/.env}
       SRI_WS_RECEPCION_PRUEBAS: ${SRI_WS_RECEPCION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
       SRI_WS_AUTORIZACION_PRUEBAS: ${SRI_WS_AUTORIZACION_PRUEBAS:-https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl}
       SRI_WS_RECEPCION_PRODUCCION: ${SRI_WS_RECEPCION_PRODUCCION:-https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl}
@@ -353,7 +353,7 @@ services:
       - /tmp:size=64m,mode=1777
     environment:
       TZ: America/Guayaquil
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       STORAGE_PREFLIGHT_REQUIRED: "false"
       DB_CONNECTION_ROLE: worker
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
@@ -419,7 +419,7 @@ services:
         target: /run/secrets/backend/commerce-billing-credentials.json
     environment:
       TZ: America/Guayaquil
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       STORAGE_PREFLIGHT_REQUIRED: "false"
       DB_CONNECTION_ROLE: worker
       DB_HOST: ${DB_HOST:-db}
@@ -490,7 +490,7 @@ services:
       - /tmp:size=32m,mode=1777
     environment:
       TZ: America/Guayaquil
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       STORAGE_PREFLIGHT_REQUIRED: "false"
       DB_CONNECTION_ROLE: worker
       DB_HOST: ${DB_HOST:-db}
@@ -559,7 +559,7 @@ services:
       - /tmp:size=32m,mode=1777
     environment:
       TZ: America/Guayaquil
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       DB_CONNECTION_ROLE: worker
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-5432}
@@ -603,7 +603,7 @@ services:
       - /tmp:size=32m,mode=1777
     environment:
       TZ: America/Guayaquil
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${APP_ENV:?Define APP_ENV en entorno/.env}
       DB_CONNECTION_ROLE: worker
       DEFAULT_TENANT: ${DEFAULT_TENANT:-paramascotasec}
       PUBLIC_TENANT_SLUG: ${PUBLIC_TENANT_SLUG:-paramascotasec}

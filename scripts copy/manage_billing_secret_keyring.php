@@ -2,12 +2,7 @@
 
 declare(strict_types=1);
 
-if (is_file(__DIR__ . '/../vendor/autoload.php') && is_dir(__DIR__ . '/../vendor/phpseclib')) {
-    require_once __DIR__ . '/../vendor/autoload.php';
-} else {
-    require_once __DIR__ . '/../src/Modules/Billing/Native/Billing/Infrastructure/Security/DataKeyWrapper.php';
-    require_once __DIR__ . '/../src/Modules/Billing/Native/Billing/Infrastructure/Security/FileKeyringDataKeyWrapper.php';
-}
+require_once __DIR__ . '/../vendor/autoload.php';
 
 use BillingService\Billing\Infrastructure\Security\FileKeyringDataKeyWrapper;
 

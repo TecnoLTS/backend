@@ -2,11 +2,7 @@
 
 declare(strict_types=1);
 
-if (is_file(__DIR__ . '/../vendor/autoload.php') && is_dir(__DIR__ . '/../vendor/phpseclib')) {
-    require_once __DIR__ . '/../vendor/autoload.php';
-} else {
-    require_once __DIR__ . '/../src/Modules/Commerce/Infrastructure/Security/CommerceBillingCredentialRegistry.php';
-}
+require_once __DIR__ . '/../vendor/autoload.php';
 
 use App\Modules\Commerce\Infrastructure\Security\CommerceBillingCredentialRegistry;
 use Dotenv\Dotenv;
@@ -99,35 +95,6 @@ function readProtectedCredentialFile(string $path): string
         throw new RuntimeException('Credential input does not meet the safety policy.');
     }
     return $value;
-}
-
-/** @return array<string,string> */
-function parseLegacyEnvFile(string $path): array
-{
-    if (class_exists(Dotenv::class)) {
-        return Dotenv::parse((string)file_get_contents($path));
-    }
-
-    $parsed = [];
-    foreach (file($path, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
-        $line = trim($line);
-        if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
-            continue;
-        }
-        [$key, $value] = explode('=', $line, 2);
-        $key = trim($key);
-        $value = trim($value);
-        if ($key === '') {
-            continue;
-        }
-        if ((str_starts_with($value, '"') && str_ends_with($value, '"'))
-            || (str_starts_with($value, "'") && str_ends_with($value, "'"))) {
-            $value = substr($value, 1, -1);
-        }
-        $parsed[$key] = $value;
-    }
-
-    return $parsed;
 }
 
 /** @return array{version:int,credentials:list<array{tenant_id:string,allowed_hosts:list<string>,api_key:string}>} */
@@ -235,7 +202,7 @@ if ($command === 'upsert') {
     if (is_link($envPath) || !is_file($envPath) || !is_readable($envPath)) {
         throw new RuntimeException('Legacy environment file is unavailable.');
     }
-    $parsed = parseLegacyEnvFile($envPath);
+    $parsed = Dotenv::parse((string)file_get_contents($envPath));
     $apiKey = trim((string)($parsed['BILLING_API_KEY'] ?? ''));
     if ($tenantId === '') {
         $tenantId = strtolower(trim((string)($parsed['PUBLIC_TENANT_SLUG'] ?? $parsed['DEFAULT_TENANT'] ?? '')));

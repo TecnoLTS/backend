@@ -248,15 +248,8 @@ if ($readyTenantIds !== []) {
             }
             $expectedIps[$ip] = true;
         }
-        $haRequired = in_array(
-            strtolower(trim((string)($_ENV['APISIX_HA_REQUIRED'] ?? getenv('APISIX_HA_REQUIRED') ?: 'false'))),
-            ['1', 'true', 'yes'],
-            true
-        );
-        $replicas = (int)($_ENV['APISIX_REPLICAS'] ?? getenv('APISIX_REPLICAS') ?: 1);
-        $minimumExpectedIps = ($haRequired || $replicas > 1) ? 2 : 1;
-        if (count($expectedIps) < $minimumExpectedIps) {
-            failReconciliation(sprintf('Edge evidence requires at least %d public LB IPs.', $minimumExpectedIps));
+        if (count($expectedIps) < 2) {
+            failReconciliation('Edge evidence requires at least two public LB IPs.');
         }
 
         foreach ($edge['domains'] as $domainEvidence) {
@@ -277,7 +270,7 @@ if ($readyTenantIds !== []) {
                 || !preg_match('/^[a-f0-9]{64}$/', $desiredHash)
                 || !isset($receiptTenants[$tenantId])
                 || !hash_equals($receiptTenants[$tenantId]['desiredStateHash'], $desiredHash)
-                || count($resolvedIps) < $minimumExpectedIps
+                || count($resolvedIps) < 2
                 || count($resolverEvidence) < 2
             ) {
                 failReconciliation('Edge domain evidence lacks tenant/hash/DNS quorum.');
@@ -294,7 +287,7 @@ if ($readyTenantIds !== []) {
             foreach ($resolverEvidence as $resolver) {
                 $name = strtolower(trim((string)($resolver['resolver'] ?? '')));
                 $answers = is_array($resolver['resolvedIps'] ?? null) ? $resolver['resolvedIps'] : [];
-                if ($name === '' || isset($resolverNames[$name]) || count($answers) < $minimumExpectedIps) {
+                if ($name === '' || isset($resolverNames[$name]) || count($answers) < 2) {
                     failReconciliation('Edge evidence requires independent DNS resolvers.');
                 }
                 foreach ($answers as $answer) {

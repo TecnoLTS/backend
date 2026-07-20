@@ -5,7 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${BACKEND_ENV_FILE:-${APP_DIR}/entorno/.env}"
-GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${APP_DIR}/../gatewayapisix/entorno/.env}"
 receipt_file="${1:-}"
 
 if [[ "$#" -ne 1 || ! -r "${receipt_file}" ]]; then
@@ -34,14 +33,6 @@ if [[ -z "${identity_password}" ]]; then
   echo "Falta la credencial del reconciliador IdentityPlatform." >&2
   exit 1
 fi
-gateway_ha_required="false"
-gateway_apisix_replicas="1"
-if [[ -r "${GATEWAY_ENV_FILE}" ]]; then
-  gateway_ha_required="$(ENV_FILE="${GATEWAY_ENV_FILE}" bash -c 'awk -F= '\''$0 !~ /^[[:space:]]*#/ && $1 == "APISIX_HA_REQUIRED" { print $2; exit }'\'' "${ENV_FILE}"')"
-  gateway_apisix_replicas="$(ENV_FILE="${GATEWAY_ENV_FILE}" bash -c 'awk -F= '\''$0 !~ /^[[:space:]]*#/ && $1 == "APISIX_REPLICAS" { print $2; exit }'\'' "${ENV_FILE}"')"
-fi
-gateway_ha_required="${gateway_ha_required:-false}"
-gateway_apisix_replicas="${gateway_apisix_replicas:-1}"
 
 {
   printf '%s\n' "${identity_password}"
@@ -49,8 +40,5 @@ gateway_apisix_replicas="${gateway_apisix_replicas:-1}"
 } | docker compose \
   --env-file "${ENV_FILE}" \
   -f "${APP_DIR}/docker-compose.yml" \
-  run --rm --no-deps -T \
-  -e APISIX_HA_REQUIRED="${gateway_ha_required}" \
-  -e APISIX_REPLICAS="${gateway_apisix_replicas}" \
-  tenant-reconcile-worker
+  run --rm --no-deps -T tenant-reconcile-worker
 unset identity_password

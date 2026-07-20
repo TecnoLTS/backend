@@ -12,9 +12,8 @@ try {
     $configuration = StorageConfiguration::fromEnvironment();
     $appEnv = strtolower(trim((string)($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: 'qa')));
     if (in_array($appEnv, ['production', 'prod'], true)
-        && $configuration->requireHa
-        && $configuration->driver !== 's3') {
-        throw new RuntimeException('APP_ENV=production con REQUIRE_HA=true exige STORAGE_DRIVER=s3.');
+        && ($configuration->driver !== 's3' || !$configuration->requireHa)) {
+        throw new RuntimeException('APP_ENV=production exige STORAGE_DRIVER=s3 y REQUIRE_HA=true.');
     }
     if (!$quiet) {
         fwrite(STDOUT, json_encode($configuration->summary(), JSON_UNESCAPED_SLASHES) . PHP_EOL);

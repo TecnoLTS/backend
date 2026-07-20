@@ -20,6 +20,5 @@ source "${WORKSPACE_ENV_MODE}"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
 
-"${SCRIPT_DIR}/../../scripts/check-environment-contract.sh" --quiet
 mode="$(env_mode_from_file "${SCRIPT_DIR}/../entorno/.env")"
 deploy_backend "${mode}"
