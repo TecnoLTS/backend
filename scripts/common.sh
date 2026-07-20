@@ -616,6 +616,104 @@ wait_for_container_state() {
   exit 1
 }
 
+verify_local_catalog_uploads() {
+  local env_file="$1"
+  local storage_driver upload_root catalog_file paths_file
+  local attempt=1 max_attempts=15
+  local upload_path relative_path
+  local -a missing=()
+
+  storage_driver="$(normalize_env_value "$(read_env_value "${env_file}" "STORAGE_DRIVER" || true)")"
+  if [[ "${storage_driver}" != "local" ]]; then
+    return 0
+  fi
+
+  upload_root="$(runtime_mount_path "${env_file}" BACKEND_UPLOADS_PATH ./public/uploads)"
+  catalog_file="$(mktemp)"
+  paths_file="$(mktemp)"
+
+  if ! docker exec backend-http sh -lc \
+    "wget -q -O - 'http://127.0.0.1:8080/api/products'" >"${catalog_file}"; then
+    rm -f -- "${catalog_file}" "${paths_file}"
+    echo "No se pudo consultar el catalogo para verificar sus imagenes locales." >&2
+    return 1
+  fi
+
+  if ! python3 - "${catalog_file}" >"${paths_file}" <<'PY'
+import json
+import re
+import sys
+from urllib.parse import urlsplit
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    payload = json.load(source)
+
+paths = set()
+
+def visit(value):
+    if isinstance(value, dict):
+        for item in value.values():
+            visit(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            visit(item)
+        return
+    if not isinstance(value, str) or not value.startswith("/uploads/tenants/"):
+        return
+
+    path = urlsplit(value).path
+    segments = path.split("/")[1:]
+    if (not re.fullmatch(r"/uploads/tenants/[A-Za-z0-9._/-]+", path)
+            or any(segment in {"", ".", ".."} for segment in segments)):
+        raise ValueError(f"Ruta local de imagen insegura: {path!r}")
+    paths.add(path)
+    if "/products/" in path and path.lower().endswith(".webp"):
+        stem = path[:-5]
+        paths.add(f"{stem}-220.webp")
+        paths.add(f"{stem}-360.webp")
+
+visit(payload.get("data", []) if isinstance(payload, dict) else [])
+for path in sorted(paths):
+    print(path)
+PY
+  then
+    rm -f -- "${catalog_file}" "${paths_file}"
+    echo "El catalogo no tiene un JSON valido para verificar imagenes." >&2
+    return 1
+  fi
+
+  while (( attempt <= max_attempts )); do
+    missing=()
+    while IFS= read -r upload_path; do
+      [[ -n "${upload_path}" ]] || continue
+      relative_path="${upload_path#/uploads/}"
+      if [[ ! -r "${upload_root}/${relative_path}" ]] || \
+        ! docker exec backend-http wget -q -O /dev/null "http://127.0.0.1:8080${upload_path}"; then
+        missing+=("${upload_path}")
+      fi
+    done <"${paths_file}"
+
+    if (( ${#missing[@]} == 0 )); then
+      local verified_count
+      verified_count="$(wc -l <"${paths_file}" | tr -d '[:space:]')"
+      rm -f -- "${catalog_file}" "${paths_file}"
+      echo "Imagenes locales del catalogo verificadas (${verified_count:-0} archivos y variantes)."
+      return 0
+    fi
+
+    if (( attempt < max_attempts )); then
+      sleep 2
+    fi
+    ((attempt++))
+  done
+
+  echo "El catalogo referencia imagenes que Git/almacenamiento local aun no publico:" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  rm -f -- "${catalog_file}" "${paths_file}"
+  return 1
+}
+
 remove_legacy_backend_containers() {
   local container
 
@@ -986,6 +1084,7 @@ deploy_backend() {
   wait_for_container_state backend-commerce-billing-worker
   wait_for_container_state backend-mailer-worker
   assert_backend_mode "${env_file}"
+  verify_local_catalog_uploads "${env_file}"
   compose_cmd "${env_file}" ps
   if [[ "${rotate_db_app_password}" == "1" ]]; then
     BACKEND_ROTATION_GUARD_ACTIVE=0
